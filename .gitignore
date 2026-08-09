@@ -1,0 +1,22 @@
+.DS_Store
+
+# Dependencies and build output
+**/node_modules/
+**/dist/
+
+# Expo local state
+**/.expo/
+
+# Local environment files (keep examples)
+**/.env
+**/.env.*
+!**/.env.example
+
+# Runtime database files
+server/data/*.sqlite
+server/data/*.sqlite-shm
+server/data/*.sqlite-wal
+
+# Logs and coverage
+*.log
+**/coverage/

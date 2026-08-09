@@ -1,0 +1,2754 @@
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Modal,
+  Platform,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
+} from "react-native";
+import {
+  ArrowLeft,
+  Bell,
+  BookMarked,
+  BookOpen,
+  Check,
+  ChevronRight,
+  Clock3,
+  Flame,
+  GraduationCap,
+  Headphones,
+  History as HistoryIcon,
+  Home,
+  Library,
+  Menu,
+  MoreHorizontal,
+  Search,
+  Settings,
+  Sparkles,
+  Target,
+  Volume2,
+  X,
+} from "lucide-react-native";
+import { StatusBar as ExpoStatusBar } from "expo-status-bar";
+import { api, type AnswerResult, type ManualPush } from "./src/api";
+import {
+  articles,
+  exams,
+  getDailyArticles,
+  getExam,
+  lookupWord,
+} from "./src/data";
+import { storage } from "./src/storage";
+import { colors, radius, shadows, spacing } from "./src/theme";
+import {
+  Article,
+  ExamId,
+  HistoryRecord,
+  SavedWord,
+  WordInfo,
+} from "./src/types";
+
+type TabId = "today" | "history" | "words" | "profile";
+
+const navItems: { id: TabId; label: string; icon: typeof Home }[] = [
+  { id: "today", label: "今日阅读", icon: Home },
+  { id: "history", label: "阅读历史", icon: HistoryIcon },
+  { id: "words", label: "生词库", icon: BookMarked },
+  { id: "profile", label: "我的", icon: Settings },
+];
+
+const formatDateKey = (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const formatChineseDate = (date = new Date()) =>
+  `${date.getMonth() + 1}月${date.getDate()}日 · ${["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()]}`;
+
+function AppLogo({ compact = false }: { compact?: boolean }) {
+  return (
+    <View style={styles.logoRow}>
+      <View
+        style={[
+          styles.logoMark,
+          compact && { width: 36, height: 36, borderRadius: 12 },
+        ]}
+      >
+        <BookOpen color="#fff" size={compact ? 19 : 22} strokeWidth={2.4} />
+      </View>
+      {!compact && (
+        <View>
+          <Text style={styles.logoName}>拾词</Text>
+          <Text style={styles.logoEnglish}>READ & REMEMBER</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function Onboarding({ onSelect }: { onSelect: (examId: ExamId) => void }) {
+  const { width } = useWindowDimensions();
+  const tablet = width >= 768;
+  const [selected, setSelected] = useState<ExamId>("toefl");
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ExpoStatusBar style="dark" />
+      <ScrollView
+        contentContainerStyle={[
+          styles.onboarding,
+          tablet && styles.onboardingTablet,
+        ]}
+      >
+        <View
+          style={[
+            styles.onboardingIntro,
+            tablet && styles.onboardingIntroTablet,
+          ]}
+        >
+          <AppLogo />
+          <View style={styles.onboardingCopy}>
+            <View style={styles.pillSoft}>
+              <Sparkles size={14} color={colors.primary} />
+              <Text style={styles.pillSoftText}>每天 3 篇，读有所获</Text>
+            </View>
+            <Text style={[styles.heroTitle, tablet && styles.heroTitleTablet]}>
+              从阅读里，{`\n`}把单词真正记下来。
+            </Text>
+            <Text style={styles.heroBody}>
+              匹配你的考试目标，每日精选阅读训练。长按生词，即查即记，在语境中自然扩大词汇量。
+            </Text>
+          </View>
+          <View style={styles.onboardingFeatures}>
+            <Feature icon={Target} label="真题难度匹配" />
+            <Feature icon={BookMarked} label="语境生词本" />
+            <Feature icon={Flame} label="每日阅读习惯" />
+          </View>
+        </View>
+
+        <View style={[styles.examPanel, tablet && styles.examPanelTablet]}>
+          <Text style={styles.stepLabel}>01 / 选择目标</Text>
+          <Text style={styles.panelTitle}>你正在准备什么考试？</Text>
+          <Text style={styles.panelHint}>之后可以随时在“我的”中切换</Text>
+          <View style={styles.examGrid}>
+            {exams.map((exam) => {
+              const active = selected === exam.id;
+              return (
+                <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: active }}
+                  key={exam.id}
+                  onPress={() => setSelected(exam.id)}
+                  style={({ pressed }) => [
+                    styles.examOption,
+                    active && styles.examOptionActive,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.examIcon,
+                      { backgroundColor: `${exam.color}16` },
+                    ]}
+                  >
+                    <GraduationCap size={22} color={exam.color} />
+                  </View>
+                  <View style={styles.flexOne}>
+                    <Text style={styles.examName}>{exam.name}</Text>
+                    <Text style={styles.examSubtitle}>{exam.subtitle}</Text>
+                  </View>
+                  <View style={[styles.radio, active && styles.radioActive]}>
+                    {active && <Check size={13} color="#fff" />}
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable
+            onPress={() => onSelect(selected)}
+            style={({ pressed }) => [
+              styles.primaryButton,
+              pressed && styles.primaryButtonPressed,
+            ]}
+          >
+            <Text style={styles.primaryButtonText}>开启今日阅读</Text>
+            <ChevronRight color="#fff" size={20} />
+          </Pressable>
+          <Text style={styles.privacyNote}>你的学习记录仅保存在本机</Text>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function Feature({
+  icon: Icon,
+  label,
+}: {
+  icon: typeof Target;
+  label: string;
+}) {
+  return (
+    <View style={styles.featureRow}>
+      <View style={styles.featureIcon}>
+        <Icon color={colors.primary} size={16} />
+      </View>
+      <Text style={styles.featureText}>{label}</Text>
+    </View>
+  );
+}
+
+function Header({
+  title,
+  subtitle,
+  onMenu,
+  right,
+}: {
+  title: string;
+  subtitle?: string;
+  onMenu?: () => void;
+  right?: React.ReactNode;
+}) {
+  return (
+    <View style={styles.header}>
+      <View style={styles.headerLeft}>
+        {onMenu && (
+          <Pressable
+            accessibilityLabel="打开菜单"
+            onPress={onMenu}
+            style={styles.iconButton}
+          >
+            <Menu size={21} color={colors.ink} />
+          </Pressable>
+        )}
+        <View>
+          {subtitle && <Text style={styles.headerEyebrow}>{subtitle}</Text>}
+          <Text style={styles.headerTitle}>{title}</Text>
+        </View>
+      </View>
+      {right}
+    </View>
+  );
+}
+
+function TodayScreen({
+  examId,
+  daily,
+  manualPushes,
+  completed,
+  onOpen,
+  onOpenPush,
+  onNavigate,
+}: {
+  examId: ExamId;
+  daily: Article[];
+  manualPushes: ManualPush[];
+  completed: string[];
+  onOpen: (a: Article) => void;
+  onOpenPush: (articleId: string) => void;
+  onNavigate: (tab: TabId) => void;
+}) {
+  const exam = getExam(examId);
+  const done = daily.filter((item) => completed.includes(item.id)).length;
+
+  return (
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.screenContent}
+      showsVerticalScrollIndicator={false}
+    >
+      <Header
+        title="今天，读点什么？"
+        subtitle={formatChineseDate()}
+        right={
+          <Pressable style={styles.avatar}>
+            <Text style={styles.avatarText}>R</Text>
+          </Pressable>
+        }
+      />
+      <View style={styles.goalCard}>
+        <View style={styles.goalTop}>
+          <View>
+            <Text style={styles.goalEyebrow}>今日阅读计划</Text>
+            <Text style={styles.goalTitle}>
+              {done === 3 ? "今天的计划完成了" : `还剩 ${3 - done} 篇，慢慢来`}
+            </Text>
+          </View>
+          <View style={styles.streakPill}>
+            <Flame size={15} color={colors.accent} fill={colors.accent} />
+            <Text style={styles.streakText}>连续 7 天</Text>
+          </View>
+        </View>
+        <View style={styles.progressTrack}>
+          <View
+            style={[
+              styles.progressFill,
+              { width: `${Math.max(5, (done / 3) * 100)}%` },
+            ]}
+          />
+        </View>
+        <View style={styles.goalBottom}>
+          <Text style={styles.goalProgress}>{done} / 3 篇</Text>
+          <Text style={styles.goalExam}>{exam.name}</Text>
+        </View>
+      </View>
+
+      <View style={styles.sectionHeading}>
+        <View>
+          <Text style={styles.sectionTitle}>今日精选</Text>
+          <Text style={styles.sectionSubtitle}>根据你的目标与进度智能匹配</Text>
+        </View>
+        <View style={styles.countPill}>
+          <Text style={styles.countPillText}>3 篇</Text>
+        </View>
+      </View>
+
+      <View style={styles.articleList}>
+        {daily.map((article, index) => (
+          <ArticleCard
+            key={article.id}
+            article={article}
+            index={index}
+            completed={completed.includes(article.id)}
+            onPress={() => onOpen(article)}
+          />
+        ))}
+      </View>
+
+      {manualPushes.length > 0 && (
+        <>
+          <View style={styles.sectionHeading}>
+            <View>
+              <Text style={styles.sectionTitle}>运营加练</Text>
+              <Text style={styles.sectionSubtitle}>
+                为你单独推送的测试与专项练习
+              </Text>
+            </View>
+            <View style={styles.countPill}>
+              <Text style={styles.countPillText}>{manualPushes.length} 篇</Text>
+            </View>
+          </View>
+          <View style={styles.articleList}>
+            {manualPushes.map((push) => (
+              <ManualPushCard
+                key={`${push.batchId}-${push.article.id}`}
+                push={push}
+                completed={completed.includes(push.article.id)}
+                onPress={() => onOpenPush(push.article.id)}
+              />
+            ))}
+          </View>
+        </>
+      )}
+
+      <Pressable
+        onPress={() => onNavigate("history")}
+        style={styles.historyShortcut}
+      >
+        <View style={styles.shortcutIcon}>
+          <HistoryIcon size={20} color={colors.primary} />
+        </View>
+        <View style={styles.flexOne}>
+          <Text style={styles.shortcutTitle}>想回顾之前的文章？</Text>
+          <Text style={styles.shortcutText}>在阅读历史中查看已推送内容</Text>
+        </View>
+        <ChevronRight size={20} color={colors.inkMuted} />
+      </Pressable>
+    </ScrollView>
+  );
+}
+
+function ManualPushCard({
+  push,
+  completed,
+  onPress,
+}: {
+  push: ManualPush;
+  completed: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.manualPushCard,
+        pressed && styles.cardPressed,
+      ]}
+    >
+      <View style={styles.manualPushIcon}>
+        <Bell size={21} color={colors.accent} />
+        {completed && (
+          <View style={styles.completedBadge}>
+            <Check size={12} color="#fff" />
+          </View>
+        )}
+      </View>
+      <View style={styles.flexOne}>
+        <Text style={styles.manualPushLabel}>{push.pushName}</Text>
+        <Text style={styles.manualPushTitle}>{push.article.title}</Text>
+        <Text style={styles.manualPushMessage}>{push.message}</Text>
+      </View>
+      <ChevronRight size={19} color={colors.primary} />
+    </Pressable>
+  );
+}
+
+function ArticleCard({
+  article,
+  index,
+  completed,
+  onPress,
+}: {
+  article: Article;
+  index: number;
+  completed: boolean;
+  onPress: () => void;
+}) {
+  const cardColors = ["#DCECE7", "#F2E5CF", "#E2E7EF"];
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.articleCard,
+        pressed && styles.cardPressed,
+      ]}
+    >
+      <View
+        style={[
+          styles.articleNumber,
+          { backgroundColor: cardColors[index % 3] },
+        ]}
+      >
+        <Text style={styles.articleNumberText}>0{index + 1}</Text>
+        {completed && (
+          <View style={styles.completedBadge}>
+            <Check size={12} color="#fff" />
+          </View>
+        )}
+      </View>
+      <View style={styles.articleContent}>
+        <View style={styles.articleMetaTop}>
+          <Text style={styles.articleEyebrow}>{article.eyebrow}</Text>
+          <Text style={styles.articleYear}>{article.year} 真题精选</Text>
+        </View>
+        <Text style={styles.articleTitle}>{article.title}</Text>
+        <View style={styles.articleMeta}>
+          <View style={styles.metaItem}>
+            <Clock3 size={14} color={colors.inkMuted} />
+            <Text style={styles.metaText}>{article.readMinutes} 分钟</Text>
+          </View>
+          <View style={styles.metaItem}>
+            <Text style={styles.metaText}>难度</Text>
+            <Difficulty value={article.difficulty} />
+          </View>
+          <View style={styles.readButton}>
+            <Text style={styles.readButtonText}>
+              {completed ? "再读一次" : "开始阅读"}
+            </Text>
+            <ChevronRight size={16} color={colors.primary} />
+          </View>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+function Difficulty({ value }: { value: number }) {
+  return (
+    <View style={styles.difficulty}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <View
+          key={n}
+          style={[
+            styles.difficultyDot,
+            n <= value && styles.difficultyDotActive,
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+function ReaderScreen({
+  article,
+  savedWords,
+  completed,
+  onBack,
+  onToggleWord,
+  onSubmit,
+}: {
+  article: Article;
+  savedWords: SavedWord[];
+  completed: boolean;
+  onBack: () => void;
+  onToggleWord: (word: WordInfo, article: Article) => void;
+  onSubmit: (article: Article, answers: number[]) => Promise<AnswerResult[]>;
+}) {
+  const { width } = useWindowDimensions();
+  const [readerTab, setReaderTab] = useState<"article" | "answer">("article");
+  const [selectedWord, setSelectedWord] = useState<WordInfo | null>(null);
+  const [selectedAnswers, setSelectedAnswers] = useState<
+    Record<number, number>
+  >({});
+  const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [answerResults, setAnswerResults] = useState<AnswerResult[]>([]);
+  const [fontScale, setFontScale] = useState(1);
+  const isSaved = (word: string) =>
+    savedWords.some(
+      (item) =>
+        item.examId === article.examId &&
+        item.word === word.toLowerCase().replace(/[^a-z'-]/g, ""),
+    );
+  const contentWidth = Math.min(760, width - (width >= 768 ? 160 : 32));
+  const allAnswered = article.questions.every(
+    (_, index) => selectedAnswers[index] !== undefined,
+  );
+  const correctCount = answerResults.filter((result) => result.correct).length;
+
+  const openAnswers = async () => {
+    if (submitted) {
+      setReaderTab("answer");
+      return;
+    }
+    if (!allAnswered) {
+      Alert.alert("还有题目未完成", "请先在文章下方选择每道题的答案。");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const answers = article.questions.map(
+        (_, index) => selectedAnswers[index],
+      );
+      const results = await onSubmit(article, answers);
+      setAnswerResults(results);
+      setSubmitted(true);
+      setReaderTab("answer");
+    } catch (error) {
+      Alert.alert(
+        "提交失败",
+        error instanceof Error ? error.message : "请稍后再试",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const closeReader = () => {
+    onBack();
+  };
+
+  return (
+    <SafeAreaView style={styles.readerSafe}>
+      <ExpoStatusBar style="dark" />
+      <View style={styles.readerTopbar}>
+        <Pressable
+          accessibilityLabel="返回"
+          onPress={closeReader}
+          style={styles.iconButton}
+        >
+          <ArrowLeft size={22} color={colors.ink} />
+        </Pressable>
+        <View style={styles.readerTabs}>
+          <Pressable
+            onPress={() => setReaderTab("article")}
+            style={[
+              styles.readerTab,
+              readerTab === "article" && styles.readerTabActive,
+            ]}
+          >
+            <Text
+              style={[
+                styles.readerTabText,
+                readerTab === "article" && styles.readerTabTextActive,
+              ]}
+            >
+              文章
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={openAnswers}
+            style={[
+              styles.readerTab,
+              readerTab === "answer" && styles.readerTabActive,
+            ]}
+          >
+            <Text
+              style={[
+                styles.readerTabText,
+                readerTab === "answer" && styles.readerTabTextActive,
+              ]}
+            >
+              答案解析
+            </Text>
+          </Pressable>
+        </View>
+        <Pressable
+          accessibilityLabel="阅读设置"
+          onPress={() => setFontScale(fontScale >= 1.2 ? 0.9 : fontScale + 0.1)}
+          style={styles.fontButton}
+        >
+          <Text style={styles.fontButtonText}>Aa</Text>
+        </Pressable>
+      </View>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.readerScroll}
+      >
+        <View style={[styles.readerPaper, { width: contentWidth }]}>
+          <View style={styles.readerHeading}>
+            <Text style={styles.readerEyebrow}>
+              {article.eyebrow} · {article.year}
+            </Text>
+            <Text style={styles.readerTitle}>{article.title}</Text>
+            <View style={styles.readerMeta}>
+              <Text style={styles.readerMetaText}>
+                {getExam(article.examId).name}
+              </Text>
+              <View style={styles.metaDivider} />
+              <Text style={styles.readerMetaText}>
+                约 {article.readMinutes} 分钟
+              </Text>
+            </View>
+          </View>
+
+          {readerTab === "article" ? (
+            <View>
+              <View style={styles.longPressHint}>
+                <View style={styles.hintHand}>
+                  <Text>☝</Text>
+                </View>
+                <Text style={styles.longPressHintText}>
+                  长按任意单词，查看翻译并加入生词库
+                </Text>
+              </View>
+              {article.paragraphs.map((paragraph, pIndex) => (
+                <Text
+                  key={pIndex}
+                  style={[
+                    styles.paragraph,
+                    { fontSize: 18 * fontScale, lineHeight: 34 * fontScale },
+                  ]}
+                >
+                  {paragraph.split(/(\s+)/).map((token, index) => {
+                    if (/^\s+$/.test(token)) return token;
+                    const clean = token.toLowerCase().replace(/[^a-z'-]/g, "");
+                    const marked = clean && isSaved(clean);
+                    return (
+                      <Text
+                        key={`${pIndex}-${index}`}
+                        suppressHighlighting
+                        onLongPress={() =>
+                          clean && setSelectedWord(lookupWord(token))
+                        }
+                        style={marked ? styles.markedWord : undefined}
+                      >
+                        {token}
+                      </Text>
+                    );
+                  })}
+                </Text>
+              ))}
+
+              <View style={styles.practiceHeader}>
+                <Text style={styles.practiceEyebrow}>READING QUESTIONS</Text>
+                <Text style={styles.practiceTitle}>根据文章选择正确答案</Text>
+                <Text style={styles.practiceHint}>
+                  已完成 {Object.keys(selectedAnswers).length} /{" "}
+                  {article.questions.length}
+                </Text>
+              </View>
+              <View style={styles.questions}>
+                {article.questions.map((question, qIndex) => (
+                  <View key={question.prompt} style={styles.questionCard}>
+                    <Text style={styles.questionNumber}>
+                      QUESTION {String(qIndex + 1).padStart(2, "0")}
+                    </Text>
+                    <Text style={styles.questionPrompt}>{question.prompt}</Text>
+                    <View style={styles.options}>
+                      {question.options.map((option, index) => {
+                        const selected = selectedAnswers[qIndex] === index;
+                        return (
+                          <Pressable
+                            accessibilityRole="radio"
+                            accessibilityState={{ checked: selected }}
+                            key={option}
+                            onPress={() =>
+                              setSelectedAnswers((current) => ({
+                                ...current,
+                                [qIndex]: index,
+                              }))
+                            }
+                            style={({ pressed }) => [
+                              styles.option,
+                              selected && styles.optionSelected,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            <View
+                              style={[
+                                styles.optionLetter,
+                                selected && styles.optionLetterSelected,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.optionLetterText,
+                                  selected && styles.optionLetterTextSelected,
+                                ]}
+                              >
+                                {String.fromCharCode(65 + index)}
+                              </Text>
+                            </View>
+                            <Text
+                              style={[
+                                styles.optionText,
+                                selected && styles.optionTextSelected,
+                              ]}
+                            >
+                              {option}
+                            </Text>
+                            <View
+                              style={[
+                                styles.optionRadio,
+                                selected && styles.optionRadioSelected,
+                              ]}
+                            >
+                              {selected && (
+                                <View style={styles.optionRadioDot} />
+                              )}
+                            </View>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ))}
+              </View>
+              <Pressable
+                accessibilityState={{ disabled: !allAnswered || submitting }}
+                disabled={!allAnswered || submitting}
+                onPress={openAnswers}
+                style={[
+                  styles.answerCta,
+                  (!allAnswered || submitting) && styles.answerCtaDisabled,
+                ]}
+              >
+                <Text style={styles.answerCtaText}>
+                  {submitting
+                    ? "正在提交…"
+                    : allAnswered
+                      ? "提交答案并查看解析"
+                      : "请完成全部题目"}
+                </Text>
+                <ChevronRight color="#fff" size={19} />
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.questions}>
+              <View style={styles.answerIntro}>
+                <View style={styles.answerIntroIcon}>
+                  <Check color={colors.primary} size={20} />
+                </View>
+                <View style={styles.flexOne}>
+                  <Text style={styles.answerIntroTitle}>答案与解析</Text>
+                  <Text style={styles.answerIntroText}>
+                    {submitted
+                      ? `你答对了 ${correctCount} / ${article.questions.length} 题`
+                      : "先完成文章下方的题目，再核对答案"}
+                  </Text>
+                </View>
+              </View>
+              {article.questions.map((question, qIndex) => {
+                const result = answerResults.find(
+                  (item) => item.questionId === qIndex,
+                );
+                return (
+                  <View key={question.prompt} style={styles.questionCard}>
+                    <Text style={styles.questionNumber}>
+                      QUESTION {String(qIndex + 1).padStart(2, "0")}
+                    </Text>
+                    <Text style={styles.questionPrompt}>{question.prompt}</Text>
+                    <View style={styles.options}>
+                      {question.options.map((option, index) => (
+                        <View
+                          key={option}
+                          style={[
+                            styles.option,
+                            index === result?.correctAnswer &&
+                              styles.optionCorrect,
+                            selectedAnswers[qIndex] === index &&
+                              index !== result?.correctAnswer &&
+                              styles.optionWrong,
+                          ]}
+                        >
+                          <View
+                            style={[
+                              styles.optionLetter,
+                              index === result?.correctAnswer &&
+                                styles.optionLetterCorrect,
+                              selectedAnswers[qIndex] === index &&
+                                index !== result?.correctAnswer &&
+                                styles.optionLetterWrong,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.optionLetterText,
+                                index === result?.correctAnswer &&
+                                  styles.optionLetterTextCorrect,
+                              ]}
+                            >
+                              {String.fromCharCode(65 + index)}
+                            </Text>
+                          </View>
+                          <Text
+                            style={[
+                              styles.optionText,
+                              index === result?.correctAnswer &&
+                                styles.optionTextCorrect,
+                            ]}
+                          >
+                            {option}
+                          </Text>
+                          {index === result?.correctAnswer && (
+                            <Check size={18} color={colors.primary} />
+                          )}
+                          {selectedAnswers[qIndex] === index &&
+                            index !== result?.correctAnswer && (
+                              <X size={18} color={colors.danger} />
+                            )}
+                        </View>
+                      ))}
+                    </View>
+                    <View style={styles.explanation}>
+                      <Text style={styles.explanationLabel}>解析</Text>
+                      <Text style={styles.explanationText}>
+                        {result?.explanation ?? "提交答案后显示解析"}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </View>
+      </ScrollView>
+
+      <Modal
+        visible={!!selectedWord}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSelectedWord(null)}
+      >
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setSelectedWord(null)}
+        />
+        {selectedWord && (
+          <View style={styles.wordSheet}>
+            <View style={styles.sheetHandle} />
+            <View style={styles.wordTop}>
+              <View>
+                <Text style={styles.wordTitle}>{selectedWord.word}</Text>
+                <Text style={styles.phonetic}>{selectedWord.phonetic}</Text>
+              </View>
+              <View style={styles.wordActions}>
+                <Pressable
+                  accessibilityLabel="播放发音"
+                  style={styles.roundButton}
+                >
+                  <Volume2 size={20} color={colors.primary} />
+                </Pressable>
+                <Pressable
+                  accessibilityLabel="关闭"
+                  onPress={() => setSelectedWord(null)}
+                  style={styles.roundButton}
+                >
+                  <X size={20} color={colors.inkMuted} />
+                </Pressable>
+              </View>
+            </View>
+            <View style={styles.translationRow}>
+              <Text style={styles.translationLabel}>释义</Text>
+              <Text style={styles.translation}>{selectedWord.translation}</Text>
+            </View>
+            <Pressable
+              onPress={() => {
+                onToggleWord(selectedWord, article);
+                setSelectedWord(null);
+              }}
+              style={[
+                styles.saveWordButton,
+                isSaved(selectedWord.word) && styles.removeWordButton,
+              ]}
+            >
+              {isSaved(selectedWord.word) ? (
+                <X size={19} color={colors.danger} />
+              ) : (
+                <BookMarked size={19} color="#fff" />
+              )}
+              <Text
+                style={[
+                  styles.saveWordText,
+                  isSaved(selectedWord.word) && styles.removeWordText,
+                ]}
+              >
+                {isSaved(selectedWord.word) ? "移出生词库" : "标记为生词"}
+              </Text>
+            </Pressable>
+          </View>
+        )}
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+function HistoryScreen({
+  history,
+  onOpen,
+}: {
+  history: HistoryRecord[];
+  onOpen: (articleId: string) => void;
+}) {
+  const records = history.length
+    ? history
+    : [
+        {
+          date: formatDateKey(),
+          examId: "toefl" as ExamId,
+          articleIds: getDailyArticles("toefl").map((a) => a.id),
+        },
+      ];
+  return (
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.screenContent}
+      showsVerticalScrollIndicator={false}
+    >
+      <Header
+        title="阅读历史"
+        subtitle="你的每一次阅读都算数"
+        right={
+          <View style={styles.iconButton}>
+            <HistoryIcon size={20} color={colors.primary} />
+          </View>
+        }
+      />
+      <View style={styles.historySummary}>
+        <View>
+          <Text style={styles.summaryValue}>
+            {new Set(history.flatMap((h) => h.articleIds)).size}
+          </Text>
+          <Text style={styles.summaryLabel}>累计阅读</Text>
+        </View>
+        <View style={styles.summaryDivider} />
+        <View>
+          <Text style={styles.summaryValue}>{history.length}</Text>
+          <Text style={styles.summaryLabel}>学习天数</Text>
+        </View>
+        <View style={styles.summaryDivider} />
+        <View>
+          <Text style={styles.summaryValue}>
+            {Math.max(0, history.flatMap((h) => h.articleIds).length * 6)}
+          </Text>
+          <Text style={styles.summaryLabel}>阅读分钟</Text>
+        </View>
+      </View>
+      {records.map((record) => (
+        <View
+          key={`${record.date}-${record.examId}`}
+          style={styles.historyGroup}
+        >
+          <View style={styles.historyDateRow}>
+            <View style={styles.timelineDot} />
+            <Text style={styles.historyDate}>
+              {record.date === formatDateKey() ? "今天" : record.date}
+            </Text>
+            <Text style={styles.historyExam}>
+              {getExam(record.examId).name}
+            </Text>
+          </View>
+          {record.articleIds.map((id) => {
+            const article = articles.find((item) => item.id === id);
+            if (!article) return null;
+            return (
+              <Pressable
+                key={id}
+                onPress={() => onOpen(article.id)}
+                style={styles.historyArticle}
+              >
+                <View style={styles.historyArticleIcon}>
+                  <BookOpen size={18} color={colors.primary} />
+                </View>
+                <View style={styles.flexOne}>
+                  <Text style={styles.historyArticleTitle}>
+                    {article.title}
+                  </Text>
+                  <Text style={styles.historyArticleMeta}>
+                    {article.eyebrow} · {article.readMinutes} 分钟
+                  </Text>
+                </View>
+                <ChevronRight size={18} color={colors.inkMuted} />
+              </Pressable>
+            );
+          })}
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function WordsScreen({
+  words,
+  activeExam,
+  onRemove,
+}: {
+  words: SavedWord[];
+  activeExam: ExamId;
+  onRemove: (word: SavedWord) => void;
+}) {
+  const [filter, setFilter] = useState<ExamId>(activeExam);
+  const [search, setSearch] = useState("");
+  const filtered = words.filter(
+    (word) =>
+      word.examId === filter && word.word.includes(search.toLowerCase()),
+  );
+
+  return (
+    <View style={styles.screen}>
+      <ScrollView
+        contentContainerStyle={styles.screenContent}
+        stickyHeaderIndices={[2]}
+        showsVerticalScrollIndicator={false}
+      >
+        <Header
+          title="历史生词库"
+          subtitle={`${words.length} 个词，正在成为你的词汇`}
+          right={
+            <View style={styles.iconButton}>
+              <BookMarked size={20} color={colors.primary} />
+            </View>
+          }
+        />
+        <View style={styles.wordStatsCard}>
+          <View style={styles.wordStatsIcon}>
+            <Library size={24} color={colors.primary} />
+          </View>
+          <View style={styles.flexOne}>
+            <Text style={styles.wordStatsTitle}>
+              本周新收录 {words.length} 个
+            </Text>
+            <Text style={styles.wordStatsText}>
+              在原文语境里复习，记忆更牢固
+            </Text>
+          </View>
+          <View style={styles.streakCircle}>
+            <Text style={styles.streakCircleValue}>7</Text>
+            <Text style={styles.streakCircleLabel}>天</Text>
+          </View>
+        </View>
+        <View style={styles.stickyArea}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.examFilters}
+          >
+            {exams.map((exam) => (
+              <Pressable
+                key={exam.id}
+                onPress={() => setFilter(exam.id)}
+                style={[
+                  styles.filterPill,
+                  filter === exam.id && styles.filterPillActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.filterText,
+                    filter === exam.id && styles.filterTextActive,
+                  ]}
+                >
+                  {exam.name.replace(/ .+$/, "")}
+                </Text>
+                <View
+                  style={[
+                    styles.filterCount,
+                    filter === exam.id && styles.filterCountActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.filterCountText,
+                      filter === exam.id && styles.filterCountTextActive,
+                    ]}
+                  >
+                    {words.filter((w) => w.examId === exam.id).length}
+                  </Text>
+                </View>
+              </Pressable>
+            ))}
+          </ScrollView>
+          <View style={styles.searchBox}>
+            <Search size={18} color={colors.inkMuted} />
+            <TextInput
+              value={search}
+              onChangeText={setSearch}
+              placeholder="搜索生词"
+              placeholderTextColor="#909995"
+              style={styles.searchInput}
+              autoCapitalize="none"
+            />
+          </View>
+        </View>
+
+        {filtered.length === 0 ? (
+          <View style={styles.emptyState}>
+            <View style={styles.emptyIllustration}>
+              <BookMarked size={32} color={colors.primary} />
+            </View>
+            <Text style={styles.emptyTitle}>
+              {search ? "没有找到这个词" : "这里还没有生词"}
+            </Text>
+            <Text style={styles.emptyText}>
+              阅读文章时长按不熟悉的单词，{`\n`}它会自动出现在这里。
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.wordList}>
+            {filtered.map((item) => {
+              const article = articles.find((a) => a.id === item.articleId);
+              return (
+                <View
+                  key={`${item.examId}-${item.word}`}
+                  style={styles.wordCard}
+                >
+                  <View style={styles.wordCardTop}>
+                    <View>
+                      <Text style={styles.wordCardTitle}>{item.word}</Text>
+                      <Text style={styles.wordCardPhonetic}>
+                        {item.phonetic}
+                      </Text>
+                    </View>
+                    <View style={styles.wordCardActions}>
+                      <Pressable style={styles.miniRoundButton}>
+                        <Volume2 size={17} color={colors.primary} />
+                      </Pressable>
+                      <Pressable
+                        onPress={() => onRemove(item)}
+                        style={styles.miniRoundButton}
+                      >
+                        <MoreHorizontal size={18} color={colors.inkMuted} />
+                      </Pressable>
+                    </View>
+                  </View>
+                  <Text style={styles.wordCardTranslation}>
+                    {item.translation}
+                  </Text>
+                  <View style={styles.wordSource}>
+                    <BookOpen size={13} color={colors.inkMuted} />
+                    <Text numberOfLines={1} style={styles.wordSourceText}>
+                      来自：{article?.title ?? "阅读文章"}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function ProfileScreen({
+  examId,
+  onChangeExam,
+}: {
+  examId: ExamId;
+  onChangeExam: (id: ExamId) => void;
+}) {
+  const [showExamPicker, setShowExamPicker] = useState(false);
+  return (
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.screenContent}
+      showsVerticalScrollIndicator={false}
+    >
+      <Header title="我的学习" subtitle="保持节奏，持续积累" />
+      <View style={styles.profileCard}>
+        <View style={styles.profileAvatar}>
+          <Text style={styles.profileAvatarText}>R</Text>
+        </View>
+        <View style={styles.flexOne}>
+          <Text style={styles.profileName}>阅读学习者</Text>
+          <Text style={styles.profileSubtitle}>已连续学习 7 天</Text>
+        </View>
+        <View style={styles.levelBadge}>
+          <Text style={styles.levelBadgeText}>Lv. 3</Text>
+        </View>
+      </View>
+      <Text style={styles.settingsTitle}>学习设置</Text>
+      <View style={styles.settingsGroup}>
+        <Pressable
+          onPress={() => setShowExamPicker(!showExamPicker)}
+          style={styles.settingRow}
+        >
+          <View style={styles.settingIcon}>
+            <Target size={19} color={colors.primary} />
+          </View>
+          <View style={styles.flexOne}>
+            <Text style={styles.settingLabel}>考试目标</Text>
+            <Text style={styles.settingValue}>{getExam(examId).name}</Text>
+          </View>
+          <ChevronRight size={18} color={colors.inkMuted} />
+        </Pressable>
+        {showExamPicker && (
+          <View style={styles.inlineExamPicker}>
+            {exams.map((exam) => (
+              <Pressable
+                key={exam.id}
+                onPress={() => {
+                  onChangeExam(exam.id);
+                  setShowExamPicker(false);
+                }}
+                style={[
+                  styles.inlineExamItem,
+                  exam.id === examId && styles.inlineExamItemActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.inlineExamText,
+                    exam.id === examId && styles.inlineExamTextActive,
+                  ]}
+                >
+                  {exam.name}
+                </Text>
+                {exam.id === examId && (
+                  <Check size={17} color={colors.primary} />
+                )}
+              </Pressable>
+            ))}
+          </View>
+        )}
+        <View style={styles.settingSeparator} />
+        <View style={styles.settingRow}>
+          <View style={styles.settingIcon}>
+            <Bell size={19} color={colors.primary} />
+          </View>
+          <View style={styles.flexOne}>
+            <Text style={styles.settingLabel}>每日提醒</Text>
+            <Text style={styles.settingValue}>每天 20:30</Text>
+          </View>
+          <View style={styles.toggle}>
+            <View style={styles.toggleKnob} />
+          </View>
+        </View>
+        <View style={styles.settingSeparator} />
+        <View style={styles.settingRow}>
+          <View style={styles.settingIcon}>
+            <Headphones size={19} color={colors.primary} />
+          </View>
+          <View style={styles.flexOne}>
+            <Text style={styles.settingLabel}>英式 / 美式发音</Text>
+            <Text style={styles.settingValue}>美式发音</Text>
+          </View>
+          <ChevronRight size={18} color={colors.inkMuted} />
+        </View>
+      </View>
+      <View style={styles.quoteCard}>
+        <Text style={styles.quoteMark}>“</Text>
+        <Text style={styles.quoteText}>
+          A reader lives a thousand lives before he dies.
+        </Text>
+        <Text style={styles.quoteAuthor}>— George R. R. Martin</Text>
+      </View>
+    </ScrollView>
+  );
+}
+
+function Navigation({
+  active,
+  tablet,
+  onChange,
+}: {
+  active: TabId;
+  tablet: boolean;
+  onChange: (tab: TabId) => void;
+}) {
+  if (tablet) {
+    return (
+      <View style={styles.sideNav}>
+        <AppLogo compact />
+        <View style={styles.sideNavItems}>
+          {navItems.map(({ id, label, icon: Icon }) => (
+            <Pressable
+              accessibilityLabel={label}
+              key={id}
+              onPress={() => onChange(id)}
+              style={[
+                styles.sideNavItem,
+                active === id && styles.sideNavItemActive,
+              ]}
+            >
+              <Icon
+                size={22}
+                color={active === id ? colors.primary : colors.inkMuted}
+              />
+              <Text
+                style={[
+                  styles.sideNavText,
+                  active === id && styles.sideNavTextActive,
+                ]}
+              >
+                {label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={styles.sideNavFooter}>
+          <Text style={styles.sideNavFooterText}>每天读一点</Text>
+          <Text style={styles.sideNavFooterSub}>词汇自然多一点</Text>
+        </View>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.bottomNav}>
+      {navItems.map(({ id, label, icon: Icon }) => (
+        <Pressable
+          accessibilityLabel={label}
+          key={id}
+          onPress={() => onChange(id)}
+          style={styles.bottomNavItem}
+        >
+          <View
+            style={[
+              styles.bottomIconWrap,
+              active === id && styles.bottomIconWrapActive,
+            ]}
+          >
+            <Icon
+              size={21}
+              color={active === id ? colors.primary : colors.inkMuted}
+              strokeWidth={active === id ? 2.5 : 2}
+            />
+          </View>
+          <Text
+            style={[
+              styles.bottomNavText,
+              active === id && styles.bottomNavTextActive,
+            ]}
+          >
+            {label}
+          </Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+export default function App() {
+  const { width } = useWindowDimensions();
+  const tablet = width >= 768;
+  const [loading, setLoading] = useState(true);
+  const [examId, setExamId] = useState<ExamId | null>(null);
+  const [tab, setTab] = useState<TabId>("today");
+  const [reader, setReader] = useState<Article | null>(null);
+  const [savedWords, setSavedWords] = useState<SavedWord[]>([]);
+  const [history, setHistory] = useState<HistoryRecord[]>([]);
+  const [completed, setCompleted] = useState<string[]>([]);
+  const [daily, setDaily] = useState<Article[]>([]);
+  const [manualPushes, setManualPushes] = useState<ManualPush[]>([]);
+  const [apiOnline, setApiOnline] = useState(false);
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      const [
+        savedExam,
+        cachedWords,
+        cachedHistory,
+        cachedCompleted,
+        deviceId,
+        token,
+      ] = await Promise.all([
+        storage.getExam(),
+        storage.getWords(),
+        storage.getHistory(),
+        storage.getCompleted(),
+        storage.getDeviceId(),
+        storage.getAuthToken(),
+      ]);
+
+      setExamId(savedExam);
+      setSavedWords(cachedWords);
+      setHistory(cachedHistory);
+      setCompleted(cachedCompleted);
+      if (savedExam) {
+        setDaily(getDailyArticles(savedExam));
+      }
+
+      try {
+        const session = await api.authenticate(deviceId, token);
+        await storage.setAuthToken(session.token);
+        if (savedExam && session.examId !== savedExam) {
+          await api.setExam(savedExam);
+        }
+        if (savedExam) {
+          const [remoteDaily, remoteHistory, remoteWords, pushes] =
+            await Promise.all([
+              api.getDaily(),
+              api.getHistory(),
+              api.getVocabulary(),
+              api.getPushes(),
+            ]);
+          const completedIds = [
+            ...new Set([
+              ...remoteHistory.completedIds,
+              ...pushes
+                .filter((push) => push.completedAt)
+                .map((push) => push.article.id),
+            ]),
+          ];
+          setDaily(remoteDaily);
+          setManualPushes(pushes);
+          setHistory(remoteHistory.records);
+          setCompleted(completedIds);
+          setSavedWords(remoteWords);
+          await Promise.all([
+            storage.setHistory(remoteHistory.records),
+            storage.setCompleted(completedIds),
+            storage.setWords(remoteWords),
+          ]);
+        }
+        setApiOnline(true);
+      } catch (error) {
+        console.warn("API unavailable, using cached data", error);
+        setApiOnline(false);
+      } finally {
+        setLoading(false);
+      }
+    };
+    bootstrap();
+  }, []);
+
+  const selectExam = async (nextExam: ExamId) => {
+    setExamId(nextExam);
+    await storage.setExam(nextExam);
+    setDaily(getDailyArticles(nextExam));
+    setTab("today");
+    try {
+      await api.setExam(nextExam);
+      const [remoteDaily, remoteHistory, remoteWords, pushes] =
+        await Promise.all([
+          api.getDaily(),
+          api.getHistory(),
+          api.getVocabulary(),
+          api.getPushes(),
+        ]);
+      const completedIds = [
+        ...new Set([
+          ...remoteHistory.completedIds,
+          ...pushes
+            .filter((push) => push.completedAt)
+            .map((push) => push.article.id),
+        ]),
+      ];
+      setDaily(remoteDaily);
+      setManualPushes(pushes);
+      setHistory(remoteHistory.records);
+      setCompleted(completedIds);
+      setSavedWords(remoteWords);
+      setApiOnline(true);
+      await Promise.all([
+        storage.setHistory(remoteHistory.records),
+        storage.setCompleted(completedIds),
+        storage.setWords(remoteWords),
+      ]);
+    } catch (error) {
+      setApiOnline(false);
+      Alert.alert(
+        "正在使用离线内容",
+        error instanceof Error ? error.message : "暂时无法连接服务器",
+      );
+    }
+  };
+
+  const toggleWord = async (word: WordInfo, article: Article) => {
+    const existing = savedWords.some(
+      (item) => item.examId === article.examId && item.word === word.word,
+    );
+    const savedWord: SavedWord = {
+      ...word,
+      examId: article.examId,
+      articleId: article.id,
+      savedAt: new Date().toISOString(),
+    };
+    const next = existing
+      ? savedWords.filter(
+          (item) =>
+            !(item.examId === article.examId && item.word === word.word),
+        )
+      : [savedWord, ...savedWords];
+    setSavedWords(next);
+    await storage.setWords(next);
+    if (apiOnline) {
+      try {
+        if (existing) {
+          await api.removeWord(savedWord);
+        } else {
+          await api.saveWord(savedWord);
+        }
+      } catch (error) {
+        setSavedWords(savedWords);
+        await storage.setWords(savedWords);
+        Alert.alert(
+          "生词同步失败",
+          error instanceof Error ? error.message : "请稍后再试",
+        );
+      }
+    }
+  };
+
+  const removeWord = (word: SavedWord) => {
+    Alert.alert("移出生词库？", `“${word.word}” 将不再在文章中高亮。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "移除",
+        style: "destructive",
+        onPress: async () => {
+          const next = savedWords.filter(
+            (item) => !(item.examId === word.examId && item.word === word.word),
+          );
+          setSavedWords(next);
+          await storage.setWords(next);
+          if (apiOnline) {
+            try {
+              await api.removeWord(word);
+            } catch (error) {
+              setSavedWords(savedWords);
+              await storage.setWords(savedWords);
+              Alert.alert(
+                "移除失败",
+                error instanceof Error ? error.message : "请稍后再试",
+              );
+            }
+          }
+        },
+      },
+    ]);
+  };
+
+  const submitArticle = async (article: Article, answers: number[]) => {
+    let results: AnswerResult[];
+    if (apiOnline) {
+      const response = await api.completeArticle(article.id, answers);
+      results = response.results;
+    } else {
+      const localArticle =
+        articles.find((item) => item.id === article.id) ?? article;
+      results = localArticle.questions.map((question, index) => ({
+        questionId: index,
+        selectedAnswer: answers[index],
+        correctAnswer: question.answer,
+        correct: answers[index] === question.answer,
+        explanation: question.explanation,
+      }));
+    }
+    const next = completed.includes(article.id)
+      ? completed
+      : [...completed, article.id];
+    setCompleted(next);
+    await storage.setCompleted(next);
+    if (apiOnline) {
+      const [remoteHistory, pushes] = await Promise.all([
+        api.getHistory(),
+        api.getPushes(),
+      ]);
+      const completedIds = [
+        ...new Set([...remoteHistory.completedIds, article.id]),
+      ];
+      setHistory(remoteHistory.records);
+      setManualPushes(pushes);
+      setCompleted(completedIds);
+      await Promise.all([
+        storage.setHistory(remoteHistory.records),
+        storage.setCompleted(completedIds),
+      ]);
+    }
+    return results;
+  };
+
+  const openHistoryArticle = async (articleId: string) => {
+    const cached = daily.find((item) => item.id === articleId);
+    if (cached) {
+      setReader(cached);
+      return;
+    }
+    try {
+      setReader(
+        apiOnline
+          ? await api.getArticle(articleId)
+          : (articles.find((item) => item.id === articleId) ?? null),
+      );
+    } catch (error) {
+      Alert.alert(
+        "文章加载失败",
+        error instanceof Error ? error.message : "请稍后再试",
+      );
+    }
+  };
+
+  if (loading)
+    return (
+      <View style={styles.loading}>
+        <AppLogo />
+        <ActivityIndicator
+          color={colors.primary}
+          style={{ marginTop: spacing.xl }}
+        />
+      </View>
+    );
+  if (!examId) return <Onboarding onSelect={selectExam} />;
+  if (reader)
+    return (
+      <ReaderScreen
+        article={reader}
+        savedWords={savedWords}
+        completed={completed.includes(reader.id)}
+        onBack={() => setReader(null)}
+        onToggleWord={toggleWord}
+        onSubmit={submitArticle}
+      />
+    );
+
+  const content =
+    tab === "today" ? (
+      <TodayScreen
+        examId={examId}
+        daily={daily}
+        manualPushes={manualPushes}
+        completed={completed}
+        onOpen={setReader}
+        onOpenPush={openHistoryArticle}
+        onNavigate={setTab}
+      />
+    ) : tab === "history" ? (
+      <HistoryScreen history={history} onOpen={openHistoryArticle} />
+    ) : tab === "words" ? (
+      <WordsScreen
+        words={savedWords}
+        activeExam={examId}
+        onRemove={removeWord}
+      />
+    ) : (
+      <ProfileScreen examId={examId} onChangeExam={selectExam} />
+    );
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ExpoStatusBar style="dark" />
+      <View style={styles.appShell}>
+        {tablet && <Navigation active={tab} tablet onChange={setTab} />}
+        <View style={[styles.mainContent, tablet && styles.mainContentTablet]}>
+          {content}
+        </View>
+        {!tablet && (
+          <Navigation active={tab} tablet={false} onChange={setTab} />
+        )}
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: colors.background,
+    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight : 0,
+  },
+  readerSafe: {
+    flex: 1,
+    backgroundColor: "#F3F1EA",
+    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight : 0,
+  },
+  loading: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.background,
+  },
+  flexOne: { flex: 1 },
+  pressed: { opacity: 0.82 },
+  cardPressed: { transform: [{ scale: 0.992 }], opacity: 0.92 },
+  appShell: { flex: 1, flexDirection: "row" },
+  mainContent: { flex: 1, paddingBottom: 76 },
+  mainContentTablet: { paddingBottom: 0 },
+  screen: { flex: 1 },
+  screenContent: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 42,
+    width: "100%",
+    maxWidth: 1050,
+    alignSelf: "center",
+  },
+
+  logoRow: { flexDirection: "row", gap: 12, alignItems: "center" },
+  logoMark: {
+    width: 44,
+    height: 44,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+  },
+  logoName: {
+    fontSize: 19,
+    fontWeight: "800",
+    color: colors.ink,
+    letterSpacing: 1,
+  },
+  logoEnglish: {
+    fontSize: 8,
+    fontWeight: "700",
+    color: colors.inkMuted,
+    letterSpacing: 1.5,
+    marginTop: 1,
+  },
+  onboarding: { flexGrow: 1, padding: 24, gap: 32 },
+  onboardingTablet: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 48,
+    gap: 72,
+  },
+  onboardingIntro: { flex: 1, maxWidth: 560 },
+  onboardingIntroTablet: { minHeight: 570, justifyContent: "space-between" },
+  onboardingCopy: { marginTop: 50 },
+  pillSoft: {
+    alignSelf: "flex-start",
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.pill,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  pillSoftText: { color: colors.primary, fontSize: 12, fontWeight: "700" },
+  heroTitle: {
+    marginTop: 20,
+    color: colors.ink,
+    fontSize: 37,
+    lineHeight: 50,
+    fontWeight: "800",
+    letterSpacing: -1,
+  },
+  heroTitleTablet: { fontSize: 48, lineHeight: 64 },
+  heroBody: {
+    marginTop: 18,
+    color: colors.inkMuted,
+    fontSize: 16,
+    lineHeight: 28,
+    maxWidth: 500,
+  },
+  onboardingFeatures: {
+    marginTop: 36,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 18,
+  },
+  featureRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  featureIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primarySoft,
+  },
+  featureText: { fontSize: 13, fontWeight: "600", color: colors.inkMuted },
+  examPanel: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    padding: 24,
+    ...shadows.card,
+  },
+  examPanelTablet: { flex: 1, maxWidth: 510, padding: 32 },
+  stepLabel: {
+    fontSize: 11,
+    color: colors.primary,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+  },
+  panelTitle: {
+    fontSize: 24,
+    color: colors.ink,
+    fontWeight: "800",
+    marginTop: 10,
+  },
+  panelHint: { color: colors.inkMuted, fontSize: 13, marginTop: 6 },
+  examGrid: { gap: 10, marginTop: 22 },
+  examOption: {
+    minHeight: 72,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.line,
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "center",
+  },
+  examOptionActive: { borderColor: colors.primary, backgroundColor: "#F5FAF8" },
+  examIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 13,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  examName: { color: colors.ink, fontWeight: "700", fontSize: 15 },
+  examSubtitle: { color: colors.inkMuted, fontSize: 12, marginTop: 3 },
+  radio: {
+    width: 22,
+    height: 22,
+    borderWidth: 1.5,
+    borderColor: "#B7BDBA",
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  radioActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  primaryButton: {
+    height: 54,
+    marginTop: 22,
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  primaryButtonPressed: { backgroundColor: colors.primaryDark },
+  primaryButtonText: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  privacyNote: {
+    textAlign: "center",
+    marginTop: 13,
+    fontSize: 11,
+    color: colors.inkMuted,
+  },
+
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 22,
+  },
+  headerLeft: { flexDirection: "row", alignItems: "center", gap: 10 },
+  headerEyebrow: {
+    fontSize: 11,
+    color: colors.inkMuted,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    marginBottom: 4,
+  },
+  headerTitle: {
+    fontSize: 27,
+    fontWeight: "800",
+    letterSpacing: -0.5,
+    color: colors.ink,
+  },
+  avatar: {
+    width: 40,
+    height: 40,
+    backgroundColor: colors.primary,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarText: { color: "#fff", fontSize: 16, fontWeight: "800" },
+  iconButton: {
+    width: 42,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 14,
+    backgroundColor: colors.surface,
+  },
+  goalCard: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.lg,
+    padding: 20,
+  },
+  goalTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  goalEyebrow: {
+    color: "#BFD8D2",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+  },
+  goalTitle: { color: "#fff", fontSize: 20, fontWeight: "800", marginTop: 6 },
+  streakPill: {
+    borderRadius: radius.pill,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  streakText: { color: "#fff", fontSize: 11, fontWeight: "700" },
+  progressTrack: {
+    height: 7,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    borderRadius: radius.pill,
+    overflow: "hidden",
+    marginTop: 20,
+  },
+  progressFill: {
+    height: "100%",
+    backgroundColor: "#F0BC68",
+    borderRadius: radius.pill,
+  },
+  goalBottom: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 10,
+  },
+  goalProgress: { color: "#fff", fontSize: 12, fontWeight: "700" },
+  goalExam: { color: "#C7DCD7", fontSize: 12 },
+  sectionHeading: {
+    marginTop: 28,
+    marginBottom: 14,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-end",
+  },
+  sectionTitle: { color: colors.ink, fontWeight: "800", fontSize: 20 },
+  sectionSubtitle: { color: colors.inkMuted, fontSize: 12, marginTop: 4 },
+  countPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceMuted,
+  },
+  countPillText: { color: colors.inkMuted, fontSize: 11, fontWeight: "700" },
+  articleList: { gap: 12 },
+  articleCard: {
+    flexDirection: "row",
+    borderRadius: radius.lg,
+    backgroundColor: colors.surface,
+    padding: 14,
+    gap: 14,
+    ...shadows.card,
+  },
+  articleNumber: {
+    width: 66,
+    minHeight: 118,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  articleNumberText: { fontSize: 23, fontWeight: "800", color: colors.ink },
+  completedBadge: {
+    position: "absolute",
+    right: -5,
+    top: -5,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    borderWidth: 2,
+    borderColor: "#fff",
+  },
+  articleContent: { flex: 1, paddingVertical: 2 },
+  articleMetaTop: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    gap: 5,
+  },
+  articleEyebrow: {
+    fontSize: 10,
+    color: colors.primary,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  articleYear: { fontSize: 10, color: colors.inkMuted },
+  articleTitle: {
+    color: colors.ink,
+    fontSize: 18,
+    lineHeight: 24,
+    fontWeight: "700",
+    marginTop: 10,
+  },
+  articleMeta: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    marginTop: "auto",
+    paddingTop: 14,
+    gap: 12,
+  },
+  metaItem: { flexDirection: "row", alignItems: "center", gap: 5 },
+  metaText: { color: colors.inkMuted, fontSize: 11 },
+  difficulty: { flexDirection: "row", gap: 3 },
+  difficultyDot: {
+    width: 4,
+    height: 8,
+    borderRadius: 2,
+    backgroundColor: "#D8DAD6",
+  },
+  difficultyDotActive: { backgroundColor: colors.accent },
+  readButton: {
+    marginLeft: "auto",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 1,
+  },
+  readButtonText: { color: colors.primary, fontSize: 12, fontWeight: "700" },
+  historyShortcut: {
+    marginTop: 18,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 16,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceMuted,
+  },
+  manualPushCard: {
+    minHeight: 96,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 13,
+    padding: 15,
+    borderWidth: 1,
+    borderColor: "#E8D4AF",
+    borderRadius: radius.lg,
+    backgroundColor: "#FFF9ED",
+  },
+  manualPushIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFF0D5",
+    position: "relative",
+  },
+  manualPushLabel: {
+    color: "#A16918",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
+  manualPushTitle: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: "800",
+    marginTop: 5,
+  },
+  manualPushMessage: {
+    color: colors.inkMuted,
+    fontSize: 10,
+    marginTop: 4,
+  },
+  shortcutIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+  },
+  shortcutTitle: { color: colors.ink, fontSize: 13, fontWeight: "700" },
+  shortcutText: { color: colors.inkMuted, fontSize: 11, marginTop: 3 },
+
+  readerTopbar: {
+    height: 62,
+    paddingHorizontal: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.line,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#F9F8F3",
+  },
+  readerTabs: {
+    flexDirection: "row",
+    backgroundColor: colors.surfaceMuted,
+    padding: 3,
+    borderRadius: 12,
+  },
+  readerTab: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 9 },
+  readerTabActive: { backgroundColor: colors.surface },
+  readerTabText: { color: colors.inkMuted, fontSize: 12, fontWeight: "600" },
+  readerTabTextActive: { color: colors.ink, fontWeight: "800" },
+  fontButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  fontButtonText: { color: colors.ink, fontWeight: "800", fontSize: 16 },
+  readerScroll: {
+    alignItems: "center",
+    paddingVertical: 30,
+    paddingBottom: 80,
+  },
+  readerPaper: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    paddingHorizontal: 24,
+    paddingVertical: 30,
+    ...shadows.card,
+  },
+  readerHeading: {
+    paddingBottom: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  readerEyebrow: {
+    color: colors.primary,
+    fontSize: 10,
+    letterSpacing: 1.4,
+    fontWeight: "800",
+  },
+  readerTitle: {
+    color: colors.ink,
+    fontSize: 30,
+    lineHeight: 39,
+    fontWeight: "800",
+    letterSpacing: -0.5,
+    marginTop: 10,
+  },
+  readerMeta: { flexDirection: "row", alignItems: "center", marginTop: 12 },
+  readerMetaText: { fontSize: 11, color: colors.inkMuted },
+  metaDivider: {
+    height: 12,
+    width: 1,
+    backgroundColor: colors.line,
+    marginHorizontal: 10,
+  },
+  longPressHint: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    backgroundColor: "#F4F7F5",
+    borderRadius: radius.sm,
+    padding: 11,
+    marginTop: 20,
+    marginBottom: 4,
+  },
+  hintHand: {
+    width: 26,
+    height: 26,
+    backgroundColor: colors.surface,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  longPressHintText: { fontSize: 11, color: colors.inkMuted, flex: 1 },
+  paragraph: {
+    color: "#26332F",
+    marginTop: 24,
+    fontFamily: Platform.select({
+      ios: "Georgia",
+      android: "serif",
+      default: "Georgia",
+    }),
+  },
+  markedWord: { backgroundColor: colors.highlight, color: "#4B3A13" },
+  practiceHeader: {
+    marginTop: 38,
+    paddingTop: 26,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+  },
+  practiceEyebrow: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+  },
+  practiceTitle: {
+    color: colors.ink,
+    fontSize: 21,
+    fontWeight: "800",
+    marginTop: 7,
+  },
+  practiceHint: { color: colors.inkMuted, fontSize: 11, marginTop: 6 },
+  answerCta: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    minHeight: 52,
+    marginTop: 32,
+  },
+  answerCtaDisabled: { backgroundColor: "#AAB5B1" },
+  answerCtaText: { color: "#fff", fontSize: 14, fontWeight: "700" },
+  questions: { marginTop: 22, gap: 18 },
+  answerIntro: {
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "center",
+    padding: 14,
+    borderRadius: radius.md,
+    backgroundColor: colors.primarySoft,
+  },
+  answerIntroIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: colors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  answerIntroTitle: { color: colors.ink, fontWeight: "800", fontSize: 14 },
+  answerIntroText: { color: colors.inkMuted, fontSize: 11, marginTop: 3 },
+  questionCard: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.line,
+    padding: 18,
+  },
+  questionNumber: {
+    color: colors.primary,
+    fontWeight: "800",
+    letterSpacing: 1,
+    fontSize: 10,
+  },
+  questionPrompt: {
+    color: colors.ink,
+    fontSize: 16,
+    lineHeight: 24,
+    fontWeight: "700",
+    marginTop: 8,
+  },
+  options: { gap: 8, marginTop: 15 },
+  option: {
+    minHeight: 48,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  optionCorrect: { backgroundColor: "#EFF8F4", borderColor: "#8CBAB0" },
+  optionSelected: { backgroundColor: "#F1F7F5", borderColor: colors.primary },
+  optionWrong: { backgroundColor: "#FFF3F0", borderColor: "#E8A99D" },
+  optionLetter: {
+    width: 27,
+    height: 27,
+    borderRadius: 9,
+    backgroundColor: colors.surfaceMuted,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  optionLetterCorrect: { backgroundColor: colors.primary },
+  optionLetterSelected: { backgroundColor: colors.primary },
+  optionLetterWrong: { backgroundColor: colors.danger },
+  optionLetterText: { color: colors.inkMuted, fontSize: 11, fontWeight: "800" },
+  optionLetterTextCorrect: { color: "#fff" },
+  optionLetterTextSelected: { color: "#fff" },
+  optionText: { color: colors.ink, fontSize: 13, flex: 1 },
+  optionTextCorrect: { color: colors.primaryDark, fontWeight: "700" },
+  optionTextSelected: { color: colors.primaryDark, fontWeight: "700" },
+  optionRadio: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    borderColor: "#B7BDBA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  optionRadioSelected: { borderColor: colors.primary },
+  optionRadioDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.primary,
+  },
+  explanation: {
+    marginTop: 14,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+  },
+  explanationLabel: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: colors.accent,
+    letterSpacing: 1,
+  },
+  explanationText: {
+    color: colors.inkMuted,
+    fontSize: 12,
+    lineHeight: 20,
+    marginTop: 5,
+  },
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(20,30,27,0.38)" },
+  wordSheet: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    paddingHorizontal: 22,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "ios" ? 36 : 22,
+  },
+  sheetHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#D6D9D6",
+    alignSelf: "center",
+    marginBottom: 18,
+  },
+  wordTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+  },
+  wordTitle: { color: colors.ink, fontSize: 30, fontWeight: "800" },
+  phonetic: { color: colors.primary, fontSize: 14, marginTop: 4 },
+  wordActions: { flexDirection: "row", gap: 8 },
+  roundButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceMuted,
+  },
+  translationRow: {
+    marginTop: 22,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 18,
+    paddingVertical: 17,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: colors.line,
+  },
+  translationLabel: { color: colors.inkMuted, fontSize: 11, marginTop: 3 },
+  translation: { color: colors.ink, fontSize: 16, fontWeight: "600", flex: 1 },
+  saveWordButton: {
+    height: 52,
+    borderRadius: radius.md,
+    marginTop: 18,
+    backgroundColor: colors.primary,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  removeWordButton: {
+    backgroundColor: "#FFF4F1",
+    borderWidth: 1,
+    borderColor: "#F2C8C0",
+  },
+  saveWordText: { color: "#fff", fontSize: 15, fontWeight: "700" },
+  removeWordText: { color: colors.danger },
+
+  historySummary: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.lg,
+    paddingVertical: 20,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-around",
+    marginBottom: 28,
+  },
+  summaryValue: {
+    color: "#fff",
+    fontSize: 24,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  summaryLabel: {
+    color: "#BFD8D2",
+    fontSize: 10,
+    marginTop: 4,
+    textAlign: "center",
+  },
+  summaryDivider: {
+    width: 1,
+    height: 34,
+    backgroundColor: "rgba(255,255,255,0.18)",
+  },
+  historyGroup: { marginBottom: 26, paddingLeft: 4 },
+  historyDateRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  timelineDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: colors.accent,
+    marginRight: 9,
+  },
+  historyDate: { color: colors.ink, fontWeight: "800", fontSize: 15 },
+  historyExam: { color: colors.inkMuted, fontSize: 11, marginLeft: 10 },
+  historyArticle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: 13,
+    marginBottom: 9,
+    ...shadows.card,
+  },
+  historyArticleIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: colors.primarySoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  historyArticleTitle: { color: colors.ink, fontSize: 14, fontWeight: "700" },
+  historyArticleMeta: { color: colors.inkMuted, fontSize: 10, marginTop: 4 },
+  wordStatsCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 16,
+    borderRadius: radius.lg,
+    backgroundColor: colors.primarySoft,
+    marginBottom: 20,
+  },
+  wordStatsIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+  },
+  wordStatsTitle: { color: colors.ink, fontWeight: "800", fontSize: 14 },
+  wordStatsText: { color: colors.inkMuted, fontSize: 10, marginTop: 4 },
+  streakCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    borderWidth: 3,
+    borderColor: colors.accent,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  streakCircleValue: {
+    color: colors.ink,
+    fontSize: 14,
+    fontWeight: "800",
+    lineHeight: 15,
+  },
+  streakCircleLabel: { color: colors.inkMuted, fontSize: 8 },
+  stickyArea: { backgroundColor: colors.background, paddingBottom: 12 },
+  examFilters: { gap: 8, paddingRight: 20 },
+  filterPill: {
+    height: 38,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 13,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  filterPillActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  filterText: { color: colors.inkMuted, fontSize: 12, fontWeight: "700" },
+  filterTextActive: { color: "#fff" },
+  filterCount: {
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    paddingHorizontal: 5,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceMuted,
+  },
+  filterCountActive: { backgroundColor: "rgba(255,255,255,0.18)" },
+  filterCountText: { fontSize: 9, color: colors.inkMuted, fontWeight: "800" },
+  filterCountTextActive: { color: "#fff" },
+  searchBox: {
+    height: 44,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 13,
+    gap: 9,
+    marginTop: 11,
+  },
+  searchInput: { flex: 1, color: colors.ink, fontSize: 13 },
+  wordList: { gap: 11 },
+  wordCard: {
+    padding: 17,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    ...shadows.card,
+  },
+  wordCardTop: { flexDirection: "row", justifyContent: "space-between" },
+  wordCardTitle: { color: colors.ink, fontSize: 22, fontWeight: "800" },
+  wordCardPhonetic: { color: colors.primary, fontSize: 12, marginTop: 3 },
+  wordCardActions: { flexDirection: "row", gap: 7 },
+  miniRoundButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceMuted,
+  },
+  wordCardTranslation: {
+    color: colors.ink,
+    fontSize: 14,
+    marginTop: 15,
+    paddingBottom: 14,
+  },
+  wordSource: {
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    paddingTop: 11,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  wordSourceText: { color: colors.inkMuted, fontSize: 10, flex: 1 },
+  emptyState: { alignItems: "center", paddingVertical: 72 },
+  emptyIllustration: {
+    width: 78,
+    height: 78,
+    borderRadius: 26,
+    backgroundColor: colors.primarySoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  emptyTitle: {
+    color: colors.ink,
+    fontSize: 17,
+    fontWeight: "800",
+    marginTop: 18,
+  },
+  emptyText: {
+    color: colors.inkMuted,
+    fontSize: 12,
+    lineHeight: 20,
+    textAlign: "center",
+    marginTop: 7,
+  },
+  profileCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 13,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: 18,
+    ...shadows.card,
+  },
+  profileAvatar: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: colors.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  profileAvatarText: { color: "#fff", fontSize: 22, fontWeight: "800" },
+  profileName: { color: colors.ink, fontWeight: "800", fontSize: 17 },
+  profileSubtitle: { color: colors.inkMuted, fontSize: 11, marginTop: 4 },
+  levelBadge: {
+    backgroundColor: "#FFF2D8",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+  },
+  levelBadgeText: { color: "#9A641B", fontSize: 10, fontWeight: "800" },
+  settingsTitle: {
+    color: colors.ink,
+    fontWeight: "800",
+    fontSize: 16,
+    marginTop: 28,
+    marginBottom: 11,
+  },
+  settingsGroup: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    paddingHorizontal: 15,
+  },
+  settingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    minHeight: 68,
+    gap: 12,
+  },
+  settingIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: colors.primarySoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  settingLabel: { color: colors.ink, fontSize: 13, fontWeight: "700" },
+  settingValue: { color: colors.inkMuted, fontSize: 10, marginTop: 3 },
+  settingSeparator: { height: 1, backgroundColor: colors.line, marginLeft: 50 },
+  toggle: {
+    width: 43,
+    height: 25,
+    borderRadius: 14,
+    backgroundColor: colors.primary,
+    justifyContent: "center",
+    alignItems: "flex-end",
+    paddingHorizontal: 3,
+  },
+  toggleKnob: {
+    width: 19,
+    height: 19,
+    borderRadius: 10,
+    backgroundColor: "#fff",
+  },
+  inlineExamPicker: {
+    backgroundColor: "#F6F8F7",
+    borderRadius: radius.md,
+    padding: 7,
+    marginBottom: 10,
+  },
+  inlineExamItem: {
+    height: 42,
+    borderRadius: 10,
+    paddingHorizontal: 11,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  inlineExamItemActive: { backgroundColor: colors.surface },
+  inlineExamText: { color: colors.inkMuted, fontSize: 12 },
+  inlineExamTextActive: { color: colors.primary, fontWeight: "800" },
+  quoteCard: {
+    marginTop: 22,
+    borderRadius: radius.lg,
+    padding: 22,
+    backgroundColor: "#EAE1D4",
+  },
+  quoteMark: {
+    color: colors.accent,
+    fontSize: 38,
+    lineHeight: 32,
+    fontWeight: "800",
+  },
+  quoteText: {
+    color: colors.ink,
+    fontFamily: Platform.select({
+      ios: "Georgia",
+      android: "serif",
+      default: "Georgia",
+    }),
+    fontSize: 17,
+    lineHeight: 26,
+  },
+  quoteAuthor: { color: colors.inkMuted, fontSize: 10, marginTop: 10 },
+
+  bottomNav: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: Platform.OS === "ios" ? 82 : 72,
+    paddingBottom: Platform.OS === "ios" ? 14 : 6,
+    flexDirection: "row",
+    backgroundColor: "rgba(255,255,255,0.98)",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+  },
+  bottomNavItem: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+  },
+  bottomIconWrap: {
+    height: 29,
+    minWidth: 39,
+    borderRadius: radius.pill,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bottomIconWrapActive: { backgroundColor: colors.primarySoft },
+  bottomNavText: { color: colors.inkMuted, fontSize: 9 },
+  bottomNavTextActive: { color: colors.primary, fontWeight: "800" },
+  sideNav: {
+    width: 180,
+    borderRightWidth: 1,
+    borderRightColor: colors.line,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 14,
+    paddingTop: 22,
+    paddingBottom: 20,
+  },
+  sideNavItems: { marginTop: 40, gap: 7 },
+  sideNavItem: {
+    minHeight: 48,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+    paddingHorizontal: 13,
+    borderRadius: radius.md,
+  },
+  sideNavItemActive: { backgroundColor: colors.primarySoft },
+  sideNavText: { color: colors.inkMuted, fontSize: 12, fontWeight: "600" },
+  sideNavTextActive: { color: colors.primary, fontWeight: "800" },
+  sideNavFooter: {
+    marginTop: "auto",
+    borderRadius: radius.md,
+    backgroundColor: colors.primary,
+    padding: 14,
+  },
+  sideNavFooterText: { color: "#fff", fontSize: 12, fontWeight: "700" },
+  sideNavFooterSub: { color: "#BFD8D2", fontSize: 9, marginTop: 3 },
+});

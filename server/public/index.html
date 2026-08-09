@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>拾词运营后台</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <div id="login" class="login-shell">
+      <section class="login-card">
+        <div class="brand-mark">拾</div>
+        <p class="eyebrow">READ &amp; REMEMBER</p>
+        <h1>运营后台</h1>
+        <p class="muted">管理题库、内容同步、用户推送和阅读运营数据</p>
+        <div class="field">
+          <label for="admin-key">管理员密钥</label>
+          <div class="secret-field">
+            <input
+              id="admin-key"
+              class="secret-input revealed"
+              type="text"
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false"
+              inputmode="text"
+              placeholder="输入 ADMIN_API_KEY"
+            />
+            <button
+              id="toggle-key"
+              class="secret-toggle"
+              type="button"
+              aria-label="隐藏管理员密钥"
+            >
+              隐藏
+            </button>
+          </div>
+        </div>
+        <button id="login-button" class="button primary wide">进入后台</button>
+        <button
+          id="local-dev-login"
+          class="button secondary wide hidden"
+          type="button"
+        >
+          本地开发：直接登录
+        </button>
+        <p id="login-error" class="form-error" role="alert"></p>
+      </section>
+    </div>
+
+    <div id="app" class="app hidden">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark small">拾</div>
+          <div><strong>拾词</strong><span>运营后台</span></div>
+        </div>
+        <nav aria-label="后台导航">
+          <button class="nav-item active" data-view="overview">
+            <span>⌂</span>运营总览
+          </button>
+          <button class="nav-item" data-view="articles">
+            <span>▤</span>题库管理
+          </button>
+          <button class="nav-item" data-view="sync">
+            <span>↻</span>内容同步
+          </button>
+          <button class="nav-item" data-view="push">
+            <span>↗</span>手动推送
+          </button>
+          <button class="nav-item" data-view="users">
+            <span>◎</span>用户运营
+          </button>
+        </nav>
+        <div class="sidebar-note">
+          <strong>安全提示</strong
+          ><span>仅同步已获得授权或允许使用的内容。</span>
+        </div>
+        <button id="logout" class="logout">退出登录</button>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <button id="menu-button" class="icon-button" aria-label="打开菜单">
+            ☰
+          </button>
+          <div>
+            <p id="page-eyebrow" class="eyebrow">OPERATION OVERVIEW</p>
+            <h1 id="page-title">运营总览</h1>
+          </div>
+          <div class="status"><i></i><span>服务正常</span></div>
+        </header>
+        <div id="content" class="content" aria-live="polite"></div>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/admin/app.js" defer></script>
+  </body>
+</html>
