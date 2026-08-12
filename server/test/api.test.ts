@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { after, before, test } from "node:test";
 import { createApp } from "../src/app";
 import { createDatabase } from "../src/database";
+import { dispatchDailyPushes } from "../src/daily-push";
 
 const db = createDatabase(":memory:");
 const server = createServer(
@@ -10,6 +11,7 @@ const server = createServer(
     corsOrigin: "*",
     adminApiKey: "test-admin-key",
     syncAllowedHosts: [],
+    dailyPushEnabled: false,
   }),
 );
 let baseUrl = "";
@@ -209,6 +211,42 @@ test("changing exam creates an independent unseen delivery pool", async () => {
   );
 });
 
+test("daily automatic push follows each user's exam and is idempotent", async () => {
+  const autoUserId = "18e57236-dd4a-45a7-aaef-2449af54543d";
+  db.prepare(
+    `INSERT INTO users(id, device_id, token, exam_id)
+     VALUES (?, ?, ?, ?)`,
+  ).run(autoUserId, "daily-auto-test-device", "daily-auto-test-token", "high");
+  const first = dispatchDailyPushes(db, "2026-08-12");
+  assert.ok(first.delivered >= 1);
+
+  const row = db
+    .prepare(
+      `SELECT dap.delivery_date AS deliveryDate, dap.exam_id AS examId,
+        a.exam_id AS articleExamId
+       FROM daily_auto_pushes dap
+       JOIN articles a ON a.id = dap.article_id
+       WHERE dap.user_id = ? AND dap.delivery_date = ?`,
+    )
+    .get(autoUserId, "2026-08-12") as {
+    deliveryDate: string;
+    examId: string;
+    articleExamId: string;
+  };
+  assert.equal(row.examId, "high");
+  assert.equal(row.articleExamId, "high");
+
+  const repeated = dispatchDailyPushes(db, "2026-08-12");
+  assert.equal(repeated.delivered, 0);
+  assert.equal(repeated.skipped, first.delivered);
+  const count = db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM daily_auto_pushes WHERE user_id = ? AND delivery_date = ?",
+    )
+    .get(autoUserId, "2026-08-12") as { count: number };
+  assert.equal(count.count, 1);
+});
+
 test("admin can inspect the bank, import authorized content, and view metrics", async () => {
   const unauthorized = await fetch(`${baseUrl}/api/v1/admin/overview`);
   assert.equal(unauthorized.status, 401);
@@ -303,6 +341,8 @@ test("admin manual push reaches the selected mobile user", async () => {
 
   const pushes = await request("/api/v1/pushes");
   const pushData = (await pushes.json()).data;
-  assert.equal(pushData.length, 1);
-  assert.equal(pushData[0].article.id, firstArticleId);
+  const manualPush = pushData.find(
+    (item: { pushName: string }) => item.pushName === "Integration push",
+  );
+  assert.equal(manualPush.article.id, firstArticleId);
 });

@@ -18,6 +18,8 @@ npm run dev
 
 运营后台的手动推送支持按考试分类、文章主题类型及关键词筛选题库；切换筛选会清除不再可见的文章选择，避免误推。
 
+每日自动推荐默认按 `Asia/Shanghai` 时区在 08:00 后，为每位用户从其当前选择的考试分类中分配一篇未推送过的文章。服务晚启动会补发当天任务，客户端在线时每分钟刷新应用内推送列表。
+
 运营后台：`http://localhost:4000/admin/`
 
 本地默认管理员密钥为 `dev-admin-change-me`。正式部署必须通过 `ADMIN_API_KEY` 修改，并仅在 HTTPS 后使用。
@@ -60,7 +62,7 @@ Authorization: Bearer <token>
 | `GET`    | `/api/v1/vocabulary`                    | 按考试和关键词查询生词     |
 | `PUT`    | `/api/v1/vocabulary/:word`              | 添加或更新生词             |
 | `DELETE` | `/api/v1/vocabulary/:word?examId=toefl` | 取消生词标记               |
-| `GET`    | `/api/v1/pushes`                        | 获取运营手动推送           |
+| `GET`    | `/api/v1/pushes`                        | 获取自动推荐和运营推送     |
 
 ## 运营后台
 
@@ -114,6 +116,8 @@ Feed 格式：
 - `(user_id, article_id)`：一篇文章不会重复推送给同一用户。
 
 当未读题库不足 3 篇时，接口返回现有未读文章并将 `corpusExhausted` 设为 `true`，不会为了凑数重复投递。生产环境应在此状态出现前由授权题库持续补充内容。
+
+自动推荐使用 `(user_id, delivery_date)` 唯一约束，多实例或重复调度不会为同一用户重复推送。可通过 `DAILY_PUSH_ENABLED`、`DAILY_PUSH_HOUR` 和 `DAILY_PUSH_TIME_ZONE` 调整开关、小时与时区。
 
 ## 校验和构建
 

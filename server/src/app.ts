@@ -20,6 +20,7 @@ import {
   lookupPronunciation,
   pronunciationAudio,
 } from "./pronunciation";
+import { ensureDailyPushForUser, localDateParts } from "./daily-push";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -31,7 +32,13 @@ const articleFromId = (db: AppDatabase, id: string) =>
 
 export function createApp(
   db: AppDatabase,
-  config: Pick<Config, "corsOrigin" | "adminApiKey" | "syncAllowedHosts">,
+  config: Pick<Config, "corsOrigin" | "adminApiKey" | "syncAllowedHosts"> &
+    Partial<
+      Pick<
+        Config,
+        "dailyPushEnabled" | "dailyPushHour" | "dailyPushTimeZone"
+      >
+    >,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -206,6 +213,16 @@ export function createApp(
 
   authenticated.get("/pushes", (_req, res) => {
     const user = currentUser(res);
+    const current = localDateParts(
+      new Date(),
+      config.dailyPushTimeZone ?? "Asia/Shanghai",
+    );
+    if (
+      config.dailyPushEnabled !== false &&
+      current.hour >= (config.dailyPushHour ?? 8)
+    ) {
+      ensureDailyPushForUser(db, user.id, current.date);
+    }
     const rows = db
       .prepare(
         `

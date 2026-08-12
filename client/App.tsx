@@ -364,9 +364,9 @@ function TodayScreen({
         <>
           <View style={styles.sectionHeading}>
             <View>
-              <Text style={styles.sectionTitle}>运营加练</Text>
+              <Text style={styles.sectionTitle}>每日推荐与运营加练</Text>
               <Text style={styles.sectionSubtitle}>
-                为你单独推送的测试与专项练习
+                根据考试目标自动推荐，也包含专项练习
               </Text>
             </View>
             <View style={styles.countPill}>
@@ -1568,6 +1568,19 @@ export default function App() {
     };
     bootstrap();
   }, []);
+
+  useEffect(() => {
+    if (!apiOnline || !examId) return;
+    const refreshPushes = async () => {
+      try {
+        setManualPushes(await api.getPushes());
+      } catch {
+        // Keep the last successful list while the app is temporarily offline.
+      }
+    };
+    const timer = setInterval(refreshPushes, 60_000);
+    return () => clearInterval(timer);
+  }, [apiOnline, examId]);
 
   const selectExam = async (nextExam: ExamId) => {
     setExamId(nextExam);

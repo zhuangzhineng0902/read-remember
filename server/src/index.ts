@@ -2,11 +2,17 @@ import { createServer } from "node:http";
 import { createApp } from "./app";
 import { getConfig } from "./config";
 import { createDatabase } from "./database";
+import { startDailyPushScheduler } from "./daily-push";
 
 const config = getConfig();
 const db = createDatabase(config.databasePath);
 const app = createApp(db, config);
 const server = createServer(app);
+const dailyPushScheduler = startDailyPushScheduler(db, {
+  enabled: config.dailyPushEnabled,
+  hour: config.dailyPushHour,
+  timeZone: config.dailyPushTimeZone,
+});
 
 server.listen(config.port, config.host, () => {
   console.log(
@@ -17,6 +23,7 @@ server.listen(config.port, config.host, () => {
 
 function shutdown(signal: string) {
   console.log(`${signal} received, shutting down...`);
+  dailyPushScheduler.stop();
   server.close(() => {
     db.close();
     process.exit(0);

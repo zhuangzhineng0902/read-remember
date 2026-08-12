@@ -7,9 +7,13 @@ export type Config = {
   corsOrigin: string;
   adminApiKey: string;
   syncAllowedHosts: string[];
+  dailyPushEnabled: boolean;
+  dailyPushHour: number;
+  dailyPushTimeZone: string;
 };
 
 export function getConfig(overrides: Partial<Config> = {}): Config {
+  const configuredDailyPushHour = Number(process.env.DAILY_PUSH_HOUR ?? 8);
   return {
     port: Number(process.env.PORT ?? 4000),
     host: process.env.HOST ?? "0.0.0.0",
@@ -22,6 +26,11 @@ export function getConfig(overrides: Partial<Config> = {}): Config {
       .split(",")
       .map((host) => host.trim().toLowerCase())
       .filter(Boolean),
+    dailyPushEnabled: process.env.DAILY_PUSH_ENABLED !== "false",
+    dailyPushHour: Number.isFinite(configuredDailyPushHour)
+      ? Math.min(23, Math.max(0, configuredDailyPushHour))
+      : 8,
+    dailyPushTimeZone: process.env.DAILY_PUSH_TIME_ZONE ?? "Asia/Shanghai",
     ...overrides,
   };
 }

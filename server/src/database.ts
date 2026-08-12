@@ -142,6 +142,17 @@ export function createDatabase(filename: string): AppDatabase {
       PRIMARY KEY(batch_id, article_id, user_id)
     );
 
+    CREATE TABLE IF NOT EXISTS daily_auto_pushes (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      delivery_date TEXT NOT NULL,
+      batch_id TEXT NOT NULL REFERENCES push_batches(id) ON DELETE CASCADE,
+      article_id TEXT NOT NULL REFERENCES articles(id),
+      exam_id TEXT NOT NULL REFERENCES exams(id),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_id, delivery_date),
+      UNIQUE(user_id, article_id)
+    );
+
     CREATE TABLE IF NOT EXISTS admin_audit_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       action TEXT NOT NULL,
@@ -154,6 +165,7 @@ export function createDatabase(filename: string): AppDatabase {
     CREATE INDEX IF NOT EXISTS idx_vocabulary_user_exam ON vocabulary(user_id, exam_id, saved_at DESC);
     CREATE INDEX IF NOT EXISTS idx_pronunciation_updated ON pronunciation_cache(updated_at);
     CREATE INDEX IF NOT EXISTS idx_user_push_user ON user_push_items(user_id, received_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_daily_auto_push_date ON daily_auto_pushes(delivery_date);
     CREATE INDEX IF NOT EXISTS idx_progress_completed ON article_progress(completed_at DESC);
   `);
 
