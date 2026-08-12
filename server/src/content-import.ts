@@ -27,7 +27,7 @@ export const importedArticleSchema = z.object({
 });
 
 export const importPayloadSchema = z.object({
-  examId: z.enum(["toefl", "toeic", "middle", "high"]),
+  examId: z.enum(["toefl", "ielts", "toeic", "middle", "high"]),
   sourceName: z.string().trim().min(2).max(120),
   sourceUrl: z.string().url().max(2000).nullable().optional(),
   licenseNote: z.string().trim().min(5).max(1000),

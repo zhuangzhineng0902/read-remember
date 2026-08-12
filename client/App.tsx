@@ -39,6 +39,8 @@ import {
   X,
 } from "lucide-react-native";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
+import { createAudioPlayer, type AudioPlayer } from "expo-audio";
+import * as Speech from "expo-speech";
 import { api, type AnswerResult, type ManualPush } from "./src/api";
 import {
   articles,
@@ -75,6 +77,38 @@ const formatDateKey = (date = new Date()) => {
 
 const formatChineseDate = (date = new Date()) =>
   `${date.getMonth() + 1}月${date.getDate()}日 · ${["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()]}`;
+
+let pronunciationPlayer: AudioPlayer | null = null;
+let pronunciationReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function playWord(word: string, accent: "us" | "uk" = "us") {
+  try {
+    const pronunciation = await api.getPronunciation(word, accent);
+    const matchesRequestedAccent =
+      !pronunciation.actualAccent ||
+      pronunciation.actualAccent === "unknown" ||
+      pronunciation.actualAccent === accent;
+    if (pronunciation.audioUrl && matchesRequestedAccent) {
+      if (pronunciationReleaseTimer) clearTimeout(pronunciationReleaseTimer);
+      pronunciationPlayer?.release();
+      pronunciationPlayer = createAudioPlayer(pronunciation.audioUrl);
+      pronunciationPlayer.play();
+      pronunciationReleaseTimer = setTimeout(() => {
+        pronunciationPlayer?.release();
+        pronunciationPlayer = null;
+      }, 15_000);
+      return;
+    }
+  } catch {
+    // Device speech remains available when the dictionary service is offline.
+  }
+  Speech.stop();
+  Speech.speak(word, {
+    language: accent === "uk" ? "en-GB" : "en-US",
+    rate: 0.82,
+    pitch: 1,
+  });
+}
 
 function AppLogo({ compact = false }: { compact?: boolean }) {
   return (
@@ -498,6 +532,8 @@ function ReaderScreen({
   const { width } = useWindowDimensions();
   const [readerTab, setReaderTab] = useState<"article" | "answer">("article");
   const [selectedWord, setSelectedWord] = useState<WordInfo | null>(null);
+  const [pressedWord, setPressedWord] = useState<string | null>(null);
+  const [wordLoading, setWordLoading] = useState(false);
   const [selectedAnswers, setSelectedAnswers] = useState<
     Record<number, number>
   >({});
@@ -516,6 +552,44 @@ function ReaderScreen({
     (_, index) => selectedAnswers[index] !== undefined,
   );
   const correctCount = answerResults.filter((result) => result.correct).length;
+
+  const openWord = (token: string, paragraph: string) => {
+    const localWord = lookupWord(token);
+    if (!localWord.word) return;
+    setSelectedWord(localWord);
+    setPressedWord(localWord.word);
+    setWordLoading(true);
+    api
+      .getPronunciation(localWord.word, "us", paragraph)
+      .then((pronunciation) => {
+        setSelectedWord((current) =>
+          current?.word === localWord.word
+            ? {
+                ...current,
+                phonetic: pronunciation.phonetic || current.phonetic,
+                translation:
+                  pronunciation.translation ||
+                  (current.translation === "正在查询中文释义…"
+                    ? "暂未查询到中文释义"
+                    : current.translation),
+                definition: pronunciation.definition,
+                partOfSpeech: pronunciation.partOfSpeech,
+                example: pronunciation.example,
+                exampleTranslation: pronunciation.exampleTranslation,
+              }
+            : current,
+        );
+      })
+      .catch(() =>
+        setSelectedWord((current) =>
+          current?.word === localWord.word &&
+          current.translation === "正在查询中文释义…"
+            ? { ...current, translation: "释义服务暂时不可用，请稍后重试" }
+            : current,
+        ),
+      )
+      .finally(() => setWordLoading(false));
+  };
 
   const openAnswers = async () => {
     if (submitted) {
@@ -648,11 +722,21 @@ function ReaderScreen({
                     return (
                       <Text
                         key={`${pIndex}-${index}`}
-                        suppressHighlighting
-                        onLongPress={() =>
-                          clean && setSelectedWord(lookupWord(token))
+                        accessibilityRole="button"
+                        accessibilityHint="长按查看中文释义和例句"
+                        onLongPress={() => clean && openWord(token, paragraph)}
+                        onPressIn={() => clean && setPressedWord(clean)}
+                        onPressOut={() =>
+                          setPressedWord((current) =>
+                            current === clean ? null : current,
+                          )
                         }
-                        style={marked ? styles.markedWord : undefined}
+                        style={[
+                          styles.interactiveWord,
+                          marked && styles.markedWord,
+                          pressedWord === clean && styles.pressedWord,
+                          selectedWord?.word === clean && styles.selectedInlineWord,
+                        ]}
                       >
                         {token}
                       </Text>
@@ -867,6 +951,7 @@ function ReaderScreen({
               <View style={styles.wordActions}>
                 <Pressable
                   accessibilityLabel="播放发音"
+                  onPress={() => playWord(selectedWord.word)}
                   style={styles.roundButton}
                 >
                   <Volume2 size={20} color={colors.primary} />
@@ -882,8 +967,32 @@ function ReaderScreen({
             </View>
             <View style={styles.translationRow}>
               <Text style={styles.translationLabel}>释义</Text>
-              <Text style={styles.translation}>{selectedWord.translation}</Text>
+              <View style={styles.translationContent}>
+                {wordLoading ? (
+                  <ActivityIndicator size="small" color={colors.primary} />
+                ) : null}
+                <Text style={styles.translation}>{selectedWord.translation}</Text>
+                {!!selectedWord.partOfSpeech && (
+                  <Text style={styles.partOfSpeech}>{selectedWord.partOfSpeech}</Text>
+                )}
+                {!!selectedWord.definition && (
+                  <Text style={styles.englishDefinition}>
+                    {selectedWord.definition}
+                  </Text>
+                )}
+              </View>
             </View>
+            {!!selectedWord.example && (
+              <View style={styles.exampleCard}>
+                <Text style={styles.exampleLabel}>例句</Text>
+                <Text style={styles.exampleEnglish}>{selectedWord.example}</Text>
+                {!!selectedWord.exampleTranslation && (
+                  <Text style={styles.exampleChinese}>
+                    {selectedWord.exampleTranslation}
+                  </Text>
+                )}
+              </View>
+            )}
             <Pressable
               onPress={() => {
                 onToggleWord(selectedWord, article);
@@ -1142,7 +1251,11 @@ function WordsScreen({
                       </Text>
                     </View>
                     <View style={styles.wordCardActions}>
-                      <Pressable style={styles.miniRoundButton}>
+                      <Pressable
+                        accessibilityLabel={`播放 ${item.word} 的发音`}
+                        onPress={() => playWord(item.word)}
+                        style={styles.miniRoundButton}
+                      >
                         <Volume2 size={17} color={colors.primary} />
                       </Pressable>
                       <Pressable
@@ -1156,6 +1269,18 @@ function WordsScreen({
                   <Text style={styles.wordCardTranslation}>
                     {item.translation}
                   </Text>
+                  {!!item.example && (
+                    <View style={styles.wordCardExample}>
+                      <Text style={styles.wordCardExampleEnglish}>
+                        {item.example}
+                      </Text>
+                      {!!item.exampleTranslation && (
+                        <Text style={styles.wordCardExampleChinese}>
+                          {item.exampleTranslation}
+                        </Text>
+                      )}
+                    </View>
+                  )}
                   <View style={styles.wordSource}>
                     <BookOpen size={13} color={colors.inkMuted} />
                     <Text numberOfLines={1} style={styles.wordSourceText}>
@@ -1490,8 +1615,19 @@ export default function App() {
     const existing = savedWords.some(
       (item) => item.examId === article.examId && item.word === word.word,
     );
+    let enrichedWord = word;
+    if (word.phonetic === "/ pronunciation /") {
+      try {
+        const pronunciation = await api.getPronunciation(word.word);
+        if (pronunciation.phonetic) {
+          enrichedWord = { ...word, phonetic: pronunciation.phonetic };
+        }
+      } catch {
+        // Saving a word should still work when pronunciation lookup is offline.
+      }
+    }
     const savedWord: SavedWord = {
-      ...word,
+      ...enrichedWord,
       examId: article.examId,
       articleId: article.id,
       savedAt: new Date().toISOString(),
@@ -2182,7 +2318,20 @@ const styles = StyleSheet.create({
       default: "Georgia",
     }),
   },
+  interactiveWord: {
+    textDecorationLine: "underline",
+    textDecorationStyle: "dotted",
+    textDecorationColor: "#A9B8B3",
+  },
   markedWord: { backgroundColor: colors.highlight, color: "#4B3A13" },
+  pressedWord: {
+    backgroundColor: "#D9EEE8",
+    color: colors.primary,
+  },
+  selectedInlineWord: {
+    backgroundColor: "#C7E4DC",
+    color: colors.primary,
+  },
   practiceHeader: {
     marginTop: 38,
     paddingTop: 26,
@@ -2367,6 +2516,51 @@ const styles = StyleSheet.create({
   },
   translationLabel: { color: colors.inkMuted, fontSize: 11, marginTop: 3 },
   translation: { color: colors.ink, fontSize: 16, fontWeight: "600", flex: 1 },
+  translationContent: { flex: 1, gap: 7 },
+  partOfSpeech: {
+    alignSelf: "flex-start",
+    color: colors.primary,
+    backgroundColor: "#E9F4F1",
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  englishDefinition: { color: colors.inkMuted, fontSize: 13, lineHeight: 20 },
+  exampleCard: {
+    marginTop: 14,
+    backgroundColor: "#F4F7F5",
+    borderRadius: radius.md,
+    padding: 15,
+  },
+  exampleLabel: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1,
+    marginBottom: 8,
+  },
+  exampleEnglish: { color: colors.ink, fontSize: 14, lineHeight: 22 },
+  exampleChinese: {
+    color: colors.inkMuted,
+    fontSize: 13,
+    lineHeight: 21,
+    marginTop: 6,
+  },
+  wordCardExample: {
+    backgroundColor: "#F4F7F5",
+    borderRadius: radius.sm,
+    padding: 10,
+    marginTop: 10,
+  },
+  wordCardExampleEnglish: { color: colors.ink, fontSize: 12, lineHeight: 19 },
+  wordCardExampleChinese: {
+    color: colors.inkMuted,
+    fontSize: 11,
+    lineHeight: 18,
+    marginTop: 4,
+  },
   saveWordButton: {
     height: 52,
     borderRadius: radius.md,

@@ -9,6 +9,13 @@ export const exams: Exam[] = [
     color: "#256A60",
   },
   {
+    id: "ielts",
+    name: "雅思 IELTS",
+    subtitle: "学术与通用培训阅读",
+    level: "留学 · 移民",
+    color: "#9A4C47",
+  },
+  {
     id: "toeic",
     name: "托业 TOEIC",
     subtitle: "职场与商务英语",
@@ -235,7 +242,7 @@ const passages = [
 ];
 
 export const articles: Article[] = (
-  ["toefl", "toeic", "high", "middle"] as ExamId[]
+  ["toefl", "ielts", "toeic", "high", "middle"] as ExamId[]
 ).flatMap((examId, examIndex) =>
   passages.map((passage, index) => ({
     id: `${examId}-${index + 1}`,
@@ -286,7 +293,7 @@ export function lookupWord(raw: string): WordInfo {
   return {
     word,
     phonetic: entry?.[0] ?? "/ pronunciation /",
-    translation: entry?.[1] ?? "点击加入生词库，稍后完善释义",
+    translation: entry?.[1] ?? "正在查询中文释义…",
   };
 }
 

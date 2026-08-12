@@ -76,9 +76,12 @@ export function createAdminRouter(
   router.get("/articles", (req, res) => {
     const query = parse(
       z.object({
-        examId: z.enum(["toefl", "toeic", "middle", "high"]).optional(),
+        examId: z
+          .enum(["toefl", "ielts", "toeic", "middle", "high"])
+          .optional(),
         search: z.string().trim().max(100).optional(),
-        limit: z.coerce.number().int().min(1).max(200).default(50),
+        eyebrow: z.string().trim().max(120).optional(),
+        limit: z.coerce.number().int().min(1).max(500).default(50),
         offset: z.coerce.number().int().min(0).default(0),
       }),
       req.query,
@@ -92,6 +95,10 @@ export function createAdminRouter(
     if (query.search) {
       conditions.push("(a.title LIKE ? OR a.eyebrow LIKE ?)");
       params.push(`%${query.search}%`, `%${query.search}%`);
+    }
+    if (query.eyebrow) {
+      conditions.push("a.eyebrow = ?");
+      params.push(query.eyebrow);
     }
     const count = db
       .prepare(
@@ -127,6 +134,31 @@ export function createAdminRouter(
     });
   });
 
+  router.get("/article-types", (req, res) => {
+    const query = parse(
+      z.object({
+        examId: z
+          .enum(["toefl", "ielts", "toeic", "middle", "high"])
+          .optional(),
+      }),
+      req.query,
+    );
+    const rows = query.examId
+      ? db
+          .prepare(
+            `SELECT eyebrow, COUNT(*) AS count FROM articles
+             WHERE exam_id = ? GROUP BY eyebrow ORDER BY count DESC, eyebrow`,
+          )
+          .all(query.examId)
+      : db
+          .prepare(
+            `SELECT eyebrow, COUNT(*) AS count FROM articles
+             GROUP BY eyebrow ORDER BY count DESC, eyebrow`,
+          )
+          .all();
+    res.json({ data: rows });
+  });
+
   router.post("/articles/import", (req, res) => {
     const payload = parse(importPayloadSchema, req.body);
     const ids = importArticles(db, payload);
@@ -143,7 +175,7 @@ export function createAdminRouter(
       const requestBody = parse(
         z.object({
           url: z.string().url(),
-          examId: z.enum(["toefl", "toeic", "middle", "high"]),
+          examId: z.enum(["toefl", "ielts", "toeic", "middle", "high"]),
           sourceName: z.string().trim().min(2).max(120),
           licenseNote: z.string().trim().min(5).max(1000),
           rightsConfirmed: z.literal(true),

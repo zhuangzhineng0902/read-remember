@@ -571,6 +571,21 @@ td strong {
   grid-template-columns: 1fr 1fr;
   gap: 14px;
 }
+.push-filters {
+  display: grid;
+  grid-template-columns: 170px 220px minmax(220px, 1fr);
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+.push-filters label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
 .selection-box {
   min-height: 340px;
   max-height: 440px;
@@ -677,7 +692,8 @@ td strong {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .grid-two,
-  .selection-grid {
+  .selection-grid,
+  .push-filters {
     grid-template-columns: 1fr;
   }
 }

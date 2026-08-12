@@ -8,7 +8,7 @@
 - 每日 3 篇不重复阅读任务
 - 文章正文与可交互答题选项
 - 提交答案后显示评分、正确答案和解析
-- 长按单词显示翻译、音标并加入生词库
+- 长按单词显示翻译、真实音标并加入生词库；播放按钮优先使用服务端缓存录音，无录音时使用设备英文语音
 - 生词淡黄色高亮与取消标记
 - 阅读历史与按考试分类的生词库
 - API 数据同步及本地缓存兜底
@@ -56,3 +56,55 @@ npx expo-doctor
 npx expo export --platform ios
 npx expo export --platform android
 ```
+
+## 构建 iOS 与 Android 应用
+
+项目已经配置 EAS Build。首次使用需要登录一个 Expo 账号：
+
+```bash
+npx eas-cli@latest login
+npm run eas:init
+```
+
+`eas:init` 只需执行一次，用于把本地应用关联到你的 Expo 项目；生成的项目 ID 会自动写入应用配置。
+
+正式安装包不能使用 `localhost` 访问电脑上的服务。构建前请在 EAS 对应环境中设置公网 HTTPS API 地址：
+
+```bash
+npx eas-cli@latest env:set --name EXPO_PUBLIC_API_URL \
+  --value https://api.example.com/api/v1 \
+  --environment preview --visibility plaintext
+npx eas-cli@latest env:set --name EXPO_PUBLIC_API_URL \
+  --value https://api.example.com/api/v1 \
+  --environment production --visibility plaintext
+```
+
+可用构建命令：
+
+```bash
+# 可直接安装到 Android 手机或模拟器的 APK
+npm run build:android:apk
+
+# 可安装到 macOS iOS Simulator 的应用
+npm run build:ios:simulator
+
+# Google Play 使用的 AAB
+npm run build:android
+
+# TestFlight / App Store 使用的 iOS 包
+npm run build:ios
+
+# 同时构建两个商店正式包
+npm run build:all
+```
+
+正式 iOS 构建需要 Apple Developer Program 账号；上传 Google Play 需要 Google Play Console 开发者账号。EAS 会在首次构建时引导创建或选择签名证书。
+
+也可以在装好本地原生工具链后编译 Release：
+
+```bash
+npm run build:local:ios
+npm run build:local:android
+```
+
+本地 iOS Release 需要 macOS、Xcode 和 CocoaPods；本地 Android Release 需要 Android Studio、Android SDK 和 JDK 17。

@@ -5,6 +5,9 @@ const state = {
   users: [],
   selectedArticles: new Set(),
   selectedUsers: new Set(),
+  pushExam: "",
+  pushType: "",
+  pushSearch: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -18,6 +21,7 @@ const titles = {
 };
 const examNames = {
   toefl: "托福",
+  ielts: "雅思",
   toeic: "托业",
   high: "高中",
   middle: "初中",
@@ -281,14 +285,14 @@ async function submitImport(event) {
 }
 
 async function renderPush() {
-  const [articlePayload, users] = await Promise.all([
-    fetch("/api/v1/admin/articles?limit=200", {
-      headers: { "x-admin-key": state.key },
-    }).then((r) => r.json()),
+  const [articlePayload, users, types] = await Promise.all([
+    api("/articles?limit=500"),
     api("/users"),
+    api("/article-types"),
   ]);
-  state.articles = articlePayload.data;
+  state.articles = articlePayload;
   state.users = users;
+  state.articleTypes = types;
   state.selectedArticles.clear();
   state.selectedUsers.clear();
   content.innerHTML = `
@@ -296,22 +300,85 @@ async function renderPush() {
     <section class="panel form-grid">
       <label class="field"><span>推送名称</span><input id="push-name" placeholder="例如：托福周末加练" value="运营测试推送"></label>
       <label class="field"><span>用户端消息</span><input id="push-message" placeholder="推荐给用户的简短说明" value="为你准备了一组专项阅读练习"></label>
+      <div class="span-2 push-filters">
+        <label><span>考试分类</span><select id="push-exam"><option value="">全部考试</option>${examOptions("")}</select></label>
+        <label><span>文章类型</span><select id="push-type"><option value="">全部类型</option>${articleTypeOptions(types)}</select></label>
+        <label><span>搜索文章</span><input id="push-search" placeholder="标题或主题关键词"></label>
+      </div>
       <div class="span-2 selection-grid">
-        <div class="selection-box"><div class="selection-head"><span>选择文章</span><span id="article-selected">0 篇</span></div>${state.articles.map(articleCheck).join("")}</div>
+        <div class="selection-box"><div class="selection-head"><span id="article-filter-summary">选择文章 · ${state.articles.length} 篇</span><span id="article-selected">0 篇</span></div><div id="push-article-list">${state.articles.map(articleCheck).join("")}</div></div>
         <div class="selection-box"><div class="selection-head"><span>选择用户</span><label><input id="all-users" type="checkbox"> 推送全部用户</label></div>${state.users.map(userCheck).join("") || '<div class="empty">暂无注册用户</div>'}</div>
       </div>
       <div class="span-2 push-summary"><div><strong id="delivery-count">预计产生 0 条推送</strong><br><span>手动推送不会占用每日 3 篇计划</span></div><button id="send-push" class="button primary" disabled>确认推送</button></div>
     </section>
     <section class="panel" style="margin-top:14px"><div class="section-head"><div><h3>最近推送</h3><p>查看目标人数与打开情况</p></div></div><div id="push-history" class="empty">加载中…</div></section>`;
-  document
-    .querySelectorAll("[data-article-id]")
-    .forEach((box) => (box.onchange = updatePushSelection));
+  bindArticleChecks();
   document
     .querySelectorAll("[data-user-id]")
     .forEach((box) => (box.onchange = updatePushSelection));
   $("#all-users").onchange = updatePushSelection;
+  $("#push-exam").onchange = () => {
+    updatePushTypeOptions();
+    filterPushArticles();
+  };
+  $("#push-type").onchange = filterPushArticles;
+  $("#push-search").oninput = filterPushArticles;
   $("#send-push").onclick = sendPush;
   renderPushHistory();
+}
+
+function articleTypeOptions(types) {
+  return types
+    .map(
+      (item) =>
+        `<option value="${escapeHtml(item.eyebrow)}">${escapeHtml(item.eyebrow)}（${item.count}）</option>`,
+    )
+    .join("");
+}
+
+function updatePushTypeOptions() {
+  const exam = $("#push-exam").value;
+  const counts = new Map();
+  state.articles
+    .filter((article) => !exam || article.examId === exam)
+    .forEach((article) =>
+      counts.set(article.eyebrow, (counts.get(article.eyebrow) || 0) + 1),
+    );
+  const types = [...counts.entries()]
+    .map(([eyebrow, count]) => ({ eyebrow, count }))
+    .sort((left, right) => right.count - left.count || left.eyebrow.localeCompare(right.eyebrow));
+  $("#push-type").innerHTML = `<option value="">全部类型</option>${articleTypeOptions(types)}`;
+}
+
+function bindArticleChecks() {
+  document.querySelectorAll("[data-article-id]").forEach((box) => {
+    box.checked = state.selectedArticles.has(box.dataset.articleId);
+    box.onchange = updatePushSelection;
+  });
+}
+
+function filterPushArticles() {
+  const exam = $("#push-exam").value;
+  const type = $("#push-type").value;
+  const search = $("#push-search").value.trim().toLowerCase();
+  const visible = state.articles.filter(
+    (article) =>
+      (!exam || article.examId === exam) &&
+      (!type || article.eyebrow === type) &&
+      (!search ||
+        article.title.toLowerCase().includes(search) ||
+        article.eyebrow.toLowerCase().includes(search)),
+  );
+  const visibleIds = new Set(visible.map((item) => item.id));
+  state.selectedArticles = new Set(
+    [...state.selectedArticles].filter((id) => visibleIds.has(id)),
+  );
+  $("#push-article-list").innerHTML =
+    visible.map(articleCheck).join("") ||
+    '<div class="empty">没有符合筛选条件的文章</div>';
+  $("#article-filter-summary").textContent = `选择文章 · ${visible.length} 篇`;
+  bindArticleChecks();
+  updatePushSelection();
 }
 
 function articleCheck(article) {

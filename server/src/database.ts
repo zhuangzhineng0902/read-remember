@@ -79,9 +79,33 @@ export function createDatabase(filename: string): AppDatabase {
       word TEXT NOT NULL,
       phonetic TEXT NOT NULL,
       translation TEXT NOT NULL,
+      definition_en TEXT NOT NULL DEFAULT '',
+      part_of_speech TEXT NOT NULL DEFAULT '',
+      example_en TEXT NOT NULL DEFAULT '',
+      example_zh TEXT NOT NULL DEFAULT '',
       article_id TEXT NOT NULL REFERENCES articles(id),
       saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY(user_id, exam_id, word)
+    );
+
+    CREATE TABLE IF NOT EXISTS pronunciation_cache (
+      word TEXT NOT NULL,
+      accent TEXT NOT NULL CHECK(accent IN ('us', 'uk')),
+      phonetic TEXT NOT NULL DEFAULT '',
+      actual_accent TEXT,
+      source_url TEXT,
+      license_name TEXT,
+      license_url TEXT,
+      audio_mime TEXT,
+      audio_blob BLOB,
+      status TEXT NOT NULL CHECK(status IN ('ready', 'tts_only')),
+      definition_en TEXT NOT NULL DEFAULT '',
+      translation_zh TEXT NOT NULL DEFAULT '',
+      part_of_speech TEXT NOT NULL DEFAULT '',
+      example_en TEXT NOT NULL DEFAULT '',
+      example_zh TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(word, accent)
     );
 
     CREATE TABLE IF NOT EXISTS article_sources (
@@ -128,9 +152,30 @@ export function createDatabase(filename: string): AppDatabase {
     CREATE INDEX IF NOT EXISTS idx_articles_exam ON articles(exam_id);
     CREATE INDEX IF NOT EXISTS idx_deliveries_user_date ON deliveries(user_id, delivery_date);
     CREATE INDEX IF NOT EXISTS idx_vocabulary_user_exam ON vocabulary(user_id, exam_id, saved_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_pronunciation_updated ON pronunciation_cache(updated_at);
     CREATE INDEX IF NOT EXISTS idx_user_push_user ON user_push_items(user_id, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_progress_completed ON article_progress(completed_at DESC);
   `);
+
+  // CREATE TABLE IF NOT EXISTS does not add columns to an existing local DB.
+  // Keep these additive migrations safe for projects upgraded in place.
+  const ensureColumn = (table: string, column: string, sql: string) => {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((item) => item.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${sql}`);
+    }
+  };
+  ensureColumn("pronunciation_cache", "definition_en", "definition_en TEXT NOT NULL DEFAULT ''");
+  ensureColumn("pronunciation_cache", "translation_zh", "translation_zh TEXT NOT NULL DEFAULT ''");
+  ensureColumn("pronunciation_cache", "part_of_speech", "part_of_speech TEXT NOT NULL DEFAULT ''");
+  ensureColumn("pronunciation_cache", "example_en", "example_en TEXT NOT NULL DEFAULT ''");
+  ensureColumn("pronunciation_cache", "example_zh", "example_zh TEXT NOT NULL DEFAULT ''");
+  ensureColumn("vocabulary", "definition_en", "definition_en TEXT NOT NULL DEFAULT ''");
+  ensureColumn("vocabulary", "part_of_speech", "part_of_speech TEXT NOT NULL DEFAULT ''");
+  ensureColumn("vocabulary", "example_en", "example_en TEXT NOT NULL DEFAULT ''");
+  ensureColumn("vocabulary", "example_zh", "example_zh TEXT NOT NULL DEFAULT ''");
 
   seedContent(db);
   return db;

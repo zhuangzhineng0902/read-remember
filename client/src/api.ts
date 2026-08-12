@@ -37,6 +37,25 @@ export type AnswerResult = {
   explanation: string;
 };
 
+export type Pronunciation = {
+  word: string;
+  accent: "us" | "uk";
+  phonetic: string;
+  actualAccent: string | null;
+  hasAudio: boolean;
+  audioPath: string | null;
+  fallback: "device-tts";
+  sourceUrl: string | null;
+  licenseName: string | null;
+  licenseUrl: string | null;
+  cached: boolean;
+  definition: string;
+  translation: string;
+  partOfSpeech: string;
+  example: string;
+  exampleTranslation: string;
+};
+
 type HistoryItem = {
   date: string;
   slot: number;
@@ -173,6 +192,22 @@ export const api = {
 
   getVocabulary: () => request<SavedWord[]>("/vocabulary"),
 
+  async getPronunciation(
+    word: string,
+    accent: "us" | "uk" = "us",
+    context = "",
+  ): Promise<Pronunciation & { audioUrl: string | null }> {
+    const pronunciation = await request<Pronunciation>(
+      `/pronunciations/${encodeURIComponent(word)}?${new URLSearchParams({ accent, context }).toString()}`,
+    );
+    return {
+      ...pronunciation,
+      audioUrl: pronunciation.audioPath
+        ? `${API_BASE_URL}${pronunciation.audioPath}`
+        : null,
+    };
+  },
+
   saveWord: (word: SavedWord) =>
     request<SavedWord>(`/vocabulary/${encodeURIComponent(word.word)}`, {
       method: "PUT",
@@ -181,6 +216,10 @@ export const api = {
         articleId: word.articleId,
         phonetic: word.phonetic,
         translation: word.translation,
+        definition: word.definition ?? "",
+        partOfSpeech: word.partOfSpeech ?? "",
+        example: word.example ?? "",
+        exampleTranslation: word.exampleTranslation ?? "",
       }),
     }),
 

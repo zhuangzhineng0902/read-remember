@@ -16,8 +16,12 @@ import {
   type ArticleRow,
 } from "./serializers";
 import type { Question } from "../../client/src/types";
+import {
+  lookupPronunciation,
+  pronunciationAudio,
+} from "./pronunciation";
 
-const examIds = ["toefl", "toeic", "middle", "high"] as const;
+const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
 const articleFromId = (db: AppDatabase, id: string) =>
@@ -58,6 +62,47 @@ export function createApp(
       )
       .all();
     res.json({ data: rows });
+  });
+
+  const pronunciationParams = z.object({
+    word: z.string().trim().toLowerCase().regex(/^[a-z][a-z'-]{0,79}$/),
+  });
+  const pronunciationQuery = z.object({
+    accent: z.enum(["us", "uk"]).default("us"),
+    context: z.string().trim().max(450).default(""),
+  });
+
+  app.get("/api/v1/pronunciations/:word", async (req, res, next) => {
+    try {
+      const { word } = parse(pronunciationParams, req.params);
+      const { accent, context } = parse(pronunciationQuery, req.query);
+      const result = await lookupPronunciation(db, word, accent, context);
+      res.json({
+        data: {
+          ...result,
+          audioPath: result.hasAudio
+            ? `/pronunciations/${encodeURIComponent(word)}/audio?accent=${accent}`
+            : null,
+          fallback: "device-tts",
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/v1/pronunciations/:word/audio", async (req, res, next) => {
+    try {
+      const { word } = parse(pronunciationParams, req.params);
+      const { accent } = parse(pronunciationQuery, req.query);
+      const audio = await pronunciationAudio(db, word, accent);
+      res.setHeader("cross-origin-resource-policy", "cross-origin");
+      res.setHeader("content-type", audio.mime);
+      res.setHeader("cache-control", "public, max-age=2592000, immutable");
+      res.send(Buffer.from(audio.data));
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post("/api/v1/auth/anonymous", (req, res) => {
@@ -382,7 +427,9 @@ export function createApp(
       .prepare(
         `
       SELECT
-        v.word, v.phonetic, v.translation,
+        v.word, v.phonetic, v.translation, v.definition_en AS definition,
+        v.part_of_speech AS partOfSpeech, v.example_en AS example,
+        v.example_zh AS exampleTranslation,
         v.exam_id AS examId,
         v.article_id AS articleId,
         v.saved_at AS savedAt,
@@ -404,6 +451,10 @@ export function createApp(
         articleId: z.string().min(1).max(80),
         phonetic: z.string().trim().min(1).max(120),
         translation: z.string().trim().min(1).max(500),
+        definition: z.string().trim().max(1000).default(""),
+        partOfSpeech: z.string().trim().max(80).default(""),
+        example: z.string().trim().max(1000).default(""),
+        exampleTranslation: z.string().trim().max(1000).default(""),
       }),
       req.body,
     );
@@ -428,11 +479,17 @@ export function createApp(
 
     db.prepare(
       `
-      INSERT INTO vocabulary(user_id, exam_id, word, phonetic, translation, article_id)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO vocabulary(
+        user_id, exam_id, word, phonetic, translation, definition_en,
+        part_of_speech, example_en, example_zh, article_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(user_id, exam_id, word) DO UPDATE SET
         phonetic = excluded.phonetic,
         translation = excluded.translation,
+        definition_en = excluded.definition_en,
+        part_of_speech = excluded.part_of_speech,
+        example_en = excluded.example_en,
+        example_zh = excluded.example_zh,
         article_id = excluded.article_id,
         saved_at = CURRENT_TIMESTAMP
     `,
@@ -442,13 +499,19 @@ export function createApp(
       word,
       body.phonetic,
       body.translation,
+      body.definition,
+      body.partOfSpeech,
+      body.example,
+      body.exampleTranslation,
       body.articleId,
     );
 
     const saved = db
       .prepare(
         `
-      SELECT word, phonetic, translation, exam_id AS examId,
+      SELECT word, phonetic, translation, definition_en AS definition,
+        part_of_speech AS partOfSpeech, example_en AS example,
+        example_zh AS exampleTranslation, exam_id AS examId,
         article_id AS articleId, saved_at AS savedAt
       FROM vocabulary WHERE user_id = ? AND exam_id = ? AND word = ?
     `,

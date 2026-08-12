@@ -3,9 +3,14 @@
 # Dependencies and build output
 **/node_modules/
 **/dist/
+**/build/
+**/*.apk
+**/*.aab
+**/*.ipa
 
 # Expo local state
 **/.expo/
+**/.eas/
 
 # Local environment files (keep examples)
 **/.env

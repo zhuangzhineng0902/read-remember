@@ -49,7 +49,52 @@ test("health and exam list are public", async () => {
 
   const exams = await request("/api/v1/exams");
   assert.equal(exams.status, 200);
-  assert.equal((await exams.json()).data.length, 4);
+  assert.equal((await exams.json()).data.length, 5);
+});
+
+test("pronunciation metadata and cached audio are public", async () => {
+  db.prepare(
+    `
+    INSERT INTO pronunciation_cache(
+      word, accent, phonetic, actual_accent, source_url, license_name,
+      license_url, audio_mime, audio_blob, status, definition_en,
+      translation_zh, part_of_speech, example_en, example_zh
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+  ).run(
+    "fixture",
+    "us",
+    "/ˈfɪkstʃər/",
+    "us",
+    "https://example.com/source",
+    "Test license",
+    "https://example.com/license",
+    "audio/mpeg",
+    new Uint8Array([73, 68, 51]),
+    "ready",
+    "A thing used as a fixed test example.",
+    "用于固定测试的示例。",
+    "noun",
+    "This fixture keeps the test deterministic.",
+    "这个固定数据让测试结果保持确定。",
+  );
+
+  const metadata = await request("/api/v1/pronunciations/fixture?accent=us");
+  assert.equal(metadata.status, 200);
+  const data = (await metadata.json()).data;
+  assert.equal(data.phonetic, "/ˈfɪkstʃər/");
+  assert.equal(data.hasAudio, true);
+  assert.equal(data.fallback, "device-tts");
+  assert.equal(data.translation, "用于固定测试的示例。");
+  assert.equal(data.partOfSpeech, "noun");
+  assert.equal(data.exampleTranslation, "这个固定数据让测试结果保持确定。");
+
+  const audio = await request(
+    "/api/v1/pronunciations/fixture/audio?accent=us",
+  );
+  assert.equal(audio.status, 200);
+  assert.equal(audio.headers.get("content-type"), "audio/mpeg");
+  assert.deepEqual([...new Uint8Array(await audio.arrayBuffer())], [73, 68, 51]);
 });
 
 test("anonymous device login returns a reusable token", async () => {
@@ -127,12 +172,20 @@ test("vocabulary can be added, filtered, and removed", async () => {
       articleId,
       phonetic: "/ˈvʌlnərəbl/",
       translation: "脆弱的；易受伤害的",
+      definition: "Likely to be harmed.",
+      partOfSpeech: "adjective",
+      example: "Young trees are vulnerable to drought.",
+      exampleTranslation: "幼树容易受到干旱影响。",
     }),
   });
   assert.equal(saved.status, 201);
 
   const list = await request("/api/v1/vocabulary?examId=toefl&search=vul");
   assert.equal((await list.json()).data.length, 1);
+  const detailedList = await request("/api/v1/vocabulary?examId=toefl&search=vul");
+  const detailedVocabulary = (await detailedList.json()).data;
+  assert.equal(detailedVocabulary[0].partOfSpeech, "adjective");
+  assert.equal(detailedVocabulary[0].exampleTranslation, "幼树容易受到干旱影响。");
 
   const removed = await request("/api/v1/vocabulary/vulnerable?examId=toefl", {
     method: "DELETE",
@@ -203,6 +256,26 @@ test("admin can inspect the bank, import authorized content, and view metrics", 
     headers,
   });
   assert.equal((await bank.json()).data.length, 1);
+
+  const filteredBank = await fetch(
+    `${baseUrl}/api/v1/admin/articles?examId=toeic&eyebrow=BUSINESS`,
+    { headers },
+  );
+  const filteredArticles = (await filteredBank.json()).data;
+  assert.ok(filteredArticles.length >= 1);
+  assert.ok(
+    filteredArticles.every(
+      (article: { examId: string; eyebrow: string }) =>
+        article.examId === "toeic" && article.eyebrow === "BUSINESS",
+    ),
+  );
+
+  const articleTypes = await fetch(
+    `${baseUrl}/api/v1/admin/article-types?examId=toeic`,
+    { headers },
+  );
+  const typeRows = (await articleTypes.json()).data;
+  assert.ok(typeRows.some((item: { eyebrow: string }) => item.eyebrow === "BUSINESS"));
 
   const users = await fetch(`${baseUrl}/api/v1/admin/users`, { headers });
   const userRows = (await users.json()).data;

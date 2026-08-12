@@ -14,6 +14,10 @@ npm run dev
 
 健康检查：`GET http://localhost:4000/health`
 
+单词注释与发音：`GET http://localhost:4000/api/v1/pronunciations/hello?accent=us`。服务会依次尝试 Free Dictionary 与备用真人发音源，并缓存 IPA、录音、中文释义、词性和中英例句；全部来源均无录音时返回 `fallback: "device-tts"`。
+
+运营后台的手动推送支持按考试分类、文章主题类型及关键词筛选题库；切换筛选会清除不再可见的文章选择，避免误推。
+
 运营后台：`http://localhost:4000/admin/`
 
 本地默认管理员密钥为 `dev-admin-change-me`。正式部署必须通过 `ADMIN_API_KEY` 修改，并仅在 HTTPS 后使用。

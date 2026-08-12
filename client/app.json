@@ -3,17 +3,33 @@
     "name": "拾词 Read & Remember",
     "slug": "read-remember",
     "version": "1.0.0",
+    "scheme": "readremember",
     "orientation": "default",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.readremember.app"
+      "bundleIdentifier": "com.readremember.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#1E6258"
       },
-      "package": "com.readremember.app"
-    }
+      "package": "com.readremember.app",
+      "versionCode": 1
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-asset"
+    ]
   }
 }

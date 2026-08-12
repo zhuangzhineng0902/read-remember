@@ -1,4 +1,4 @@
-export type ExamId = "toefl" | "toeic" | "middle" | "high";
+export type ExamId = "toefl" | "ielts" | "toeic" | "middle" | "high";
 
 export type Exam = {
   id: ExamId;
@@ -31,6 +31,10 @@ export type WordInfo = {
   word: string;
   phonetic: string;
   translation: string;
+  definition?: string;
+  partOfSpeech?: string;
+  example?: string;
+  exampleTranslation?: string;
 };
 
 export type SavedWord = WordInfo & {
