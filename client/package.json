@@ -8,7 +8,9 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "typecheck": "tsc --noEmit",
+    "build:web": "EXPO_PUBLIC_API_URL=/api/v1 expo export --platform web --output-dir dist",
+    "preview:web": "npx serve dist",
+    "typecheck": "node --stack_size=8192 node_modules/typescript/bin/tsc --noEmit",
     "eas:init": "npx eas-cli@latest init",
     "build:android:apk": "npx eas-cli@latest build --platform android --profile android-apk",
     "build:ios:simulator": "npx eas-cli@latest build --platform ios --profile ios-simulator",
@@ -19,6 +21,7 @@
     "build:local:ios": "expo run:ios --configuration Release"
   },
   "dependencies": {
+    "@expo/metro-runtime": "~6.1.2",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~54.0.35",
     "expo-asset": "~12.0.13",
@@ -28,8 +31,10 @@
     "expo-status-bar": "~3.0.9",
     "lucide-react-native": "^1.30.0",
     "react": "19.1.0",
+    "react-dom": "19.1.0",
     "react-native": "0.81.5",
-    "react-native-svg": "15.12.1"
+    "react-native-svg": "15.12.1",
+    "react-native-web": "^0.21.0"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",

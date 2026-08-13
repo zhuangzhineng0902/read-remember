@@ -12,6 +12,23 @@ npm install
 npm run dev
 ```
 
+## 托管用户网站
+
+服务端可以直接托管 Expo Web 网站，并保持网站、API 和运营后台同域：
+
+```bash
+npm run build:site
+npm start
+```
+
+- 用户网站：`http://localhost:4000/`
+- 运营后台：`http://localhost:4000/admin/`
+- API：`http://localhost:4000/api/v1`
+
+网站目录默认是 `../client/dist`，可通过 `WEB_ROOT` 覆盖。
+
+仓库根目录的 `Dockerfile` 会一次性构建网站与 API。部署时请将容器 `/app/data` 目录挂载为持久卷，避免重启后丢失 SQLite 数据，并配置 `ADMIN_API_KEY`。
+
 健康检查：`GET http://localhost:4000/health`
 
 单词注释与发音：`GET http://localhost:4000/api/v1/pronunciations/hello?accent=us`。服务会依次尝试 Free Dictionary 与备用真人发音源，并缓存 IPA、录音、中文释义、词性和中英例句；全部来源均无录音时返回 `fallback: "device-tts"`。

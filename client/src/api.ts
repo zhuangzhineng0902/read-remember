@@ -1,4 +1,4 @@
-import { NativeModules } from "react-native";
+import { NativeModules, Platform } from "react-native";
 import { Article, ExamId, HistoryRecord, SavedWord } from "./types";
 
 type ApiEnvelope<T> = { data: T };
@@ -74,7 +74,10 @@ function developmentHost() {
 }
 
 export const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL ?? `http://${developmentHost()}:4000/api/v1`;
+  process.env.EXPO_PUBLIC_API_URL ??
+  (Platform.OS === "web"
+    ? "/api/v1"
+    : `http://${developmentHost()}:4000/api/v1`);
 
 let authToken: string | null = null;
 

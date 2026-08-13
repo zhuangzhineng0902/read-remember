@@ -1,6 +1,6 @@
-# 拾词移动端
+# 拾词跨平台客户端
 
-基于 Expo、React Native 和 TypeScript 的 iOS、Android 与 Pad 客户端。
+基于 Expo、React Native 和 TypeScript 的 Web、iOS、Android 与 Pad 客户端。
 
 ## 功能
 
@@ -26,6 +26,7 @@ npm start
 ```bash
 npm run ios
 npm run android
+npm run web
 ```
 
 开发环境会从 Metro Bundle 地址自动推断电脑局域网 IP，并连接：
@@ -55,6 +56,26 @@ npm run typecheck
 npx expo-doctor
 npx expo export --platform ios
 npx expo export --platform android
+```
+
+## 构建 Web 网站
+
+```bash
+npm run build:web
+```
+
+静态网站输出到 `dist/`。默认使用同域 `/api/v1`，适合由仓库中的服务端直接托管：
+
+```bash
+cd ../server
+npm run build:site
+npm start
+```
+
+随后访问 `http://localhost:4000/`。若将网站与 API 分别部署，使用公网 HTTPS 地址重新导出：
+
+```bash
+EXPO_PUBLIC_API_URL=https://api.example.com/api/v1 npx expo export --platform web --output-dir dist
 ```
 
 ## 构建 iOS 与 Android 应用

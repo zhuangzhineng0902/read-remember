@@ -36,7 +36,10 @@ export function createApp(
     Partial<
       Pick<
         Config,
-        "dailyPushEnabled" | "dailyPushHour" | "dailyPushTimeZone"
+        | "dailyPushEnabled"
+        | "dailyPushHour"
+        | "dailyPushTimeZone"
+        | "webRoot"
       >
     >,
 ) {
@@ -553,6 +556,14 @@ export function createApp(
 
   app.use("/api/v1/admin", createAdminRouter(db, config));
   app.use("/api/v1", authenticated);
+  if (config.webRoot) {
+    app.use(
+      express.static(config.webRoot, {
+        index: "index.html",
+        maxAge: process.env.NODE_ENV === "production" ? "1h" : 0,
+      }),
+    );
+  }
   app.use(notFound);
   app.use(errorHandler);
   return app;

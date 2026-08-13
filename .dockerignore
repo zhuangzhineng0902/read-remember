@@ -1,0 +1,8 @@
+.git
+**/node_modules
+**/dist
+**/.expo
+**/.eas
+**/.env
+server/data/*.sqlite*
+*.log

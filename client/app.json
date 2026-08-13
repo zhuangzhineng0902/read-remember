@@ -21,6 +21,14 @@
       "package": "com.readremember.app",
       "versionCode": 1
     },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "name": "拾词 Read & Remember",
+      "shortName": "拾词",
+      "themeColor": "#1E6258",
+      "backgroundColor": "#F5F1E8"
+    },
     "plugins": [
       [
         "expo-audio",

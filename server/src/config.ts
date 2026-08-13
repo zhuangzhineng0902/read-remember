@@ -7,6 +7,7 @@ export type Config = {
   corsOrigin: string;
   adminApiKey: string;
   syncAllowedHosts: string[];
+  webRoot: string;
   dailyPushEnabled: boolean;
   dailyPushHour: number;
   dailyPushTimeZone: string;
@@ -26,6 +27,8 @@ export function getConfig(overrides: Partial<Config> = {}): Config {
       .split(",")
       .map((host) => host.trim().toLowerCase())
       .filter(Boolean),
+    webRoot:
+      process.env.WEB_ROOT ?? path.resolve(process.cwd(), "../client/dist"),
     dailyPushEnabled: process.env.DAILY_PUSH_ENABLED !== "false",
     dailyPushHour: Number.isFinite(configuredDailyPushHour)
       ? Math.min(23, Math.max(0, configuredDailyPushHour))

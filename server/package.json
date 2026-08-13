@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsup src/index.ts --format esm --platform node --target node22 --out-dir dist --clean",
+    "build:web": "npm --prefix ../client run build:web",
+    "build:site": "npm run build:web && npm run build",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts"
