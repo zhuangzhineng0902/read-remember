@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React from "react";
 import { StyleProp, Text, TextStyle } from "react-native";
 import * as Haptics from "expo-haptics";
 
@@ -26,43 +26,21 @@ export function LongPressWord({
   onPressOut,
   style,
 }: LongPressWordProps) {
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const cancel = () => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
-    onPressOut?.();
-  };
-
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
-  );
-
   return (
     <Text
       accessible={false}
       accessibilityHint={accessibilityHint}
-      onPressIn={(event) => {
-        cancel();
-        onPressIn?.();
-        const anchor = {
+      onLongPress={(event) => {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        onLongPress({
           x: event.nativeEvent.pageX,
           y: event.nativeEvent.pageY,
           width: 0,
           height: 0,
-        };
-        timer.current = setTimeout(() => {
-          timer.current = null;
-          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          onLongPress(anchor);
-        }, 380);
+        });
       }}
-      onPressOut={cancel}
+      onPressIn={onPressIn}
+      onPressOut={onPressOut}
       style={style}
     >
       {children}

@@ -1,5 +1,6 @@
 import { NativeModules, Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import Constants from "expo-constants";
 import {
   Article,
   ExamId,
@@ -75,14 +76,35 @@ type HistoryItem = {
   progress: { score: number; total: number; completedAt: string } | null;
 };
 
+function hostnameFrom(value?: string | null) {
+  if (!value) return null;
+  try {
+    const url = value.includes("://") ? value : `http://${value}`;
+    return new URL(url).hostname || null;
+  } catch {
+    return value.match(/(?:https?|exp):\/\/([^:/]+)/)?.[1] ?? null;
+  }
+}
+
 function developmentHost() {
   const scriptUrl = NativeModules.SourceCode?.scriptURL as string | undefined;
-  if (!scriptUrl) return "127.0.0.1";
-  try {
-    return new URL(scriptUrl).hostname;
-  } catch {
-    return scriptUrl.match(/https?:\/\/([^:/]+)/)?.[1] ?? "127.0.0.1";
+  const candidates = [
+    Constants.expoConfig?.hostUri,
+    Constants.linkingUri,
+    scriptUrl,
+  ];
+  for (const candidate of candidates) {
+    const host = hostnameFrom(candidate);
+    if (!host) continue;
+    if (
+      Platform.OS === "android" &&
+      (host === "localhost" || host === "127.0.0.1")
+    ) {
+      return "10.0.2.2";
+    }
+    return host;
   }
+  return Platform.OS === "android" ? "10.0.2.2" : "127.0.0.1";
 }
 
 export const API_BASE_URL =
