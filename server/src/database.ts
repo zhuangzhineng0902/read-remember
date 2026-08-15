@@ -48,6 +48,10 @@ export function createDatabase(filename: string): AppDatabase {
       device_id TEXT NOT NULL UNIQUE,
       token TEXT NOT NULL UNIQUE,
       exam_id TEXT NOT NULL REFERENCES exams(id),
+      username TEXT,
+      password_hash TEXT,
+      display_name TEXT NOT NULL DEFAULT '阅读学习者',
+      email TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -56,10 +60,11 @@ export function createDatabase(filename: string): AppDatabase {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       article_id TEXT NOT NULL REFERENCES articles(id),
+      exam_id TEXT NOT NULL REFERENCES exams(id),
       delivery_date TEXT NOT NULL,
       slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 3),
       delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(user_id, delivery_date, slot),
+      UNIQUE(user_id, delivery_date, exam_id, slot),
       UNIQUE(user_id, article_id)
     );
 
@@ -198,6 +203,49 @@ export function createDatabase(filename: string): AppDatabase {
   ensureColumn("vocabulary", "last_reviewed_at", "last_reviewed_at TEXT");
   ensureColumn("vocabulary", "review_count", "review_count INTEGER NOT NULL DEFAULT 0");
   ensureColumn("vocabulary", "lapse_count", "lapse_count INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("users", "username", "username TEXT");
+  ensureColumn("users", "password_hash", "password_hash TEXT");
+  ensureColumn(
+    "users",
+    "display_name",
+    "display_name TEXT NOT NULL DEFAULT '阅读学习者'",
+  );
+  ensureColumn("users", "email", "email TEXT NOT NULL DEFAULT ''");
+
+  const deliveryColumns = db.prepare("PRAGMA table_info(deliveries)").all() as Array<{
+    name: string;
+  }>;
+  if (!deliveryColumns.some((item) => item.name === "exam_id")) {
+    db.exec(`
+      ALTER TABLE deliveries RENAME TO deliveries_legacy;
+      CREATE TABLE deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        article_id TEXT NOT NULL REFERENCES articles(id),
+        exam_id TEXT NOT NULL REFERENCES exams(id),
+        delivery_date TEXT NOT NULL,
+        slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 3),
+        delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, delivery_date, exam_id, slot),
+        UNIQUE(user_id, article_id)
+      );
+      INSERT INTO deliveries(
+        id, user_id, article_id, exam_id, delivery_date, slot, delivered_at
+      )
+      SELECT d.id, d.user_id, d.article_id, a.exam_id,
+        d.delivery_date, d.slot, d.delivered_at
+      FROM deliveries_legacy d
+      JOIN articles a ON a.id = d.article_id;
+      DROP TABLE deliveries_legacy;
+    `);
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username
+    ON users(username COLLATE NOCASE)
+    WHERE username IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_deliveries_user_date_exam
+    ON deliveries(user_id, delivery_date, exam_id);
+  `);
   db.exec(`
     UPDATE vocabulary
     SET next_review_at = saved_at

@@ -7,14 +7,13 @@ import {
   HistoryRecord,
   MemoryRating,
   SavedWord,
+  UserProfile,
 } from "./types";
 
 type ApiEnvelope<T> = { data: T };
 
-type Session = {
-  id: string;
+export type Session = UserProfile & {
   token: string;
-  examId: ExamId;
 };
 
 export type ArticleSummary = Omit<Article, "paragraphs" | "questions">;
@@ -246,6 +245,50 @@ export const api = {
     });
     authToken = session.token;
     return session;
+  },
+
+  async register(input: {
+    deviceId: string;
+    username: string;
+    password: string;
+    displayName: string;
+    email: string;
+  }) {
+    const session = await request<Session>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    authToken = session.token;
+    return session;
+  },
+
+  async login(username: string, password: string) {
+    const session = await request<Session>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    authToken = session.token;
+    return session;
+  },
+
+  updateProfile: (profile: {
+    username: string;
+    displayName: string;
+    email: string;
+  }) =>
+    request<UserProfile>("/users/me", {
+      method: "PATCH",
+      body: JSON.stringify(profile),
+    }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<void>("/users/me/password", {
+      method: "PATCH",
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+
+  clearAuthentication() {
+    authToken = null;
   },
 
   setExam: (examId: ExamId) =>

@@ -24,6 +24,7 @@ import {
   BookMarked,
   BookOpen,
   Check,
+  ChevronLeft,
   ChevronRight,
   Clock3,
   Flame,
@@ -68,6 +69,7 @@ import {
   MemoryRating,
   ReaderSettings,
   SavedWord,
+  UserProfile,
   WordInfo,
 } from "./src/types";
 
@@ -393,6 +395,352 @@ function NativeNoticeModal({
               <Text style={styles.nativeNoticePrimaryText}>{primaryLabel}</Text>
             </Pressable>
           </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+type AccountMode = "login" | "register" | "profile";
+
+function AccountSheet({
+  user,
+  deviceId,
+  initialMode,
+  dismissible = true,
+  onClose,
+  onAuthenticated,
+  onProfileUpdated,
+}: {
+  user: UserProfile | null;
+  deviceId: string;
+  initialMode: AccountMode;
+  dismissible?: boolean;
+  onClose: () => void;
+  onAuthenticated: (session: UserProfile & { token: string }) => Promise<void>;
+  onProfileUpdated: (profile: UserProfile) => void;
+}) {
+  const { width } = useWindowDimensions();
+  const tablet = width >= 768;
+  const [mode, setMode] = useState<AccountMode>(initialMode);
+  const [username, setUsername] = useState(user?.username ?? "");
+  const [displayName, setDisplayName] = useState(user?.displayName ?? "");
+  const [email, setEmail] = useState(user?.email ?? "");
+  const [password, setPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [passwordSubmitting, setPasswordSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const switchMode = (next: AccountMode) => {
+    setMode(next);
+    setError("");
+    setSuccess("");
+    setPassword("");
+  };
+
+  const submit = async () => {
+    if (submitting) return;
+    setError("");
+    setSuccess("");
+    if (!/^[a-zA-Z0-9_]{3,24}$/.test(username.trim())) {
+      setError("用户名需为 3-24 位字母、数字或下划线");
+      return;
+    }
+    if ((mode === "register" || mode === "profile") && !displayName.trim()) {
+      setError("请输入昵称");
+      return;
+    }
+    if (email.trim() && !/^\S+@\S+\.\S+$/.test(email.trim())) {
+      setError("请输入有效的邮箱地址");
+      return;
+    }
+    if (mode !== "profile" && password.length < 8) {
+      setError("密码至少需要 8 位");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      if (mode === "login") {
+        const session = await api.login(username.trim(), password);
+        await onAuthenticated(session);
+        onClose();
+      } else if (mode === "register") {
+        const session = await api.register({
+          deviceId,
+          username: username.trim(),
+          password,
+          displayName: displayName.trim(),
+          email: email.trim(),
+        });
+        await onAuthenticated(session);
+        onClose();
+      } else {
+        const updated = await api.updateProfile({
+          username: username.trim(),
+          displayName: displayName.trim(),
+          email: email.trim(),
+        });
+        onProfileUpdated(updated);
+        setSuccess("个人资料已保存");
+      }
+    } catch (submitError) {
+      setError(
+        submitError instanceof Error ? submitError.message : "操作失败，请稍后再试",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitPassword = async () => {
+    if (passwordSubmitting) return;
+    setError("");
+    setSuccess("");
+    if (currentPassword.length < 8) {
+      setError("请输入当前密码");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setError("新密码至少需要 8 位");
+      return;
+    }
+    setPasswordSubmitting(true);
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setSuccess("密码已更新，下次登录请使用新密码");
+    } catch (submitError) {
+      setError(
+        submitError instanceof Error ? submitError.message : "密码修改失败",
+      );
+    } finally {
+      setPasswordSubmitting(false);
+    }
+  };
+
+  const formTitle =
+    mode === "profile" ? "编辑个人资料" : mode === "login" ? "登录拾词" : "注册拾词";
+  const formSubtitle =
+    mode === "profile"
+      ? "修改后会同步到你的学习账号"
+      : mode === "login"
+        ? "登录后同步阅读历史、生词与复习进度"
+        : "注册后会保留当前设备上的学习数据";
+
+  return (
+    <Modal
+      visible
+      transparent
+      animationType={tablet ? "fade" : "slide"}
+      onRequestClose={() => dismissible && onClose()}
+      statusBarTranslucent
+    >
+      <View
+        style={[
+          styles.nativeModalRoot,
+          tablet && styles.nativeModalRootDesktop,
+        ]}
+      >
+        {dismissible ? (
+          <Pressable onPress={onClose} style={styles.nativeModalBackdrop} />
+        ) : (
+          <View style={styles.nativeModalBackdrop} />
+        )}
+        <View
+          accessibilityViewIsModal
+          style={[
+            styles.accountSheet,
+            tablet && styles.accountSheetDesktop,
+          ]}
+        >
+          {!tablet && <View style={styles.nativeSheetHandle} />}
+          <View style={styles.nativeSheetHeader}>
+            <View style={styles.flexOne}>
+              <Text style={styles.nativeSheetTitle}>{formTitle}</Text>
+              <Text style={styles.nativeSheetSubtitle}>{formSubtitle}</Text>
+            </View>
+            {dismissible && (
+              <Pressable
+                accessibilityLabel="关闭账号面板"
+                onPress={onClose}
+                style={styles.nativeSheetClose}
+              >
+                <X size={18} color={colors.inkMuted} />
+              </Pressable>
+            )}
+          </View>
+
+          {mode !== "profile" && !user?.isRegistered && (
+            <View style={styles.accountModeTabs}>
+              {(["login", "register"] as const).map((item) => (
+                <Pressable
+                  key={item}
+                  onPress={() => switchMode(item)}
+                  style={[
+                    styles.accountModeTab,
+                    mode === item && styles.accountModeTabActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.accountModeText,
+                      mode === item && styles.accountModeTextActive,
+                    ]}
+                  >
+                    {item === "login" ? "登录" : "注册"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.accountForm}
+          >
+            {(mode === "register" || mode === "profile") && (
+              <View style={styles.accountField}>
+                <Text style={styles.accountFieldLabel}>昵称</Text>
+                <TextInput
+                  value={displayName}
+                  onChangeText={setDisplayName}
+                  placeholder="请输入昵称"
+                  placeholderTextColor="#98A09D"
+                  style={styles.accountInput}
+                  maxLength={30}
+                />
+              </View>
+            )}
+            <View style={styles.accountField}>
+              <Text style={styles.accountFieldLabel}>用户名</Text>
+              <TextInput
+                value={username}
+                onChangeText={setUsername}
+                placeholder="3-24 位字母、数字或下划线"
+                placeholderTextColor="#98A09D"
+                style={styles.accountInput}
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={24}
+              />
+            </View>
+            {(mode === "register" || mode === "profile") && (
+              <View style={styles.accountField}>
+                <Text style={styles.accountFieldLabel}>邮箱（选填）</Text>
+                <TextInput
+                  value={email}
+                  onChangeText={setEmail}
+                  placeholder="用于找回与账号通知"
+                  placeholderTextColor="#98A09D"
+                  style={styles.accountInput}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="email-address"
+                />
+              </View>
+            )}
+            {mode !== "profile" && (
+              <View style={styles.accountField}>
+                <Text style={styles.accountFieldLabel}>密码</Text>
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  placeholder="至少 8 位"
+                  placeholderTextColor="#98A09D"
+                  style={styles.accountInput}
+                  secureTextEntry
+                  autoCapitalize="none"
+                />
+              </View>
+            )}
+
+            {!!error && <Text style={styles.accountError}>{error}</Text>}
+            {!!success && <Text style={styles.accountSuccess}>{success}</Text>}
+
+            <Pressable
+              disabled={submitting}
+              onPress={submit}
+              style={({ pressed }) => [
+                styles.accountPrimaryButton,
+                pressed && styles.primaryButtonPressed,
+                submitting && styles.disabledButton,
+              ]}
+            >
+              {submitting ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.accountPrimaryText}>
+                  {mode === "login"
+                    ? "登录"
+                    : mode === "register"
+                      ? "创建账号"
+                      : "保存资料"}
+                </Text>
+              )}
+            </Pressable>
+
+            {mode === "profile" && (
+              <View>
+              <View style={styles.passwordSection}>
+                <Text style={styles.passwordSectionTitle}>修改密码</Text>
+                <Text style={styles.passwordSectionHint}>
+                  修改后不会影响当前设备的登录状态
+                </Text>
+                <View style={styles.accountField}>
+                  <Text style={styles.accountFieldLabel}>当前密码</Text>
+                  <TextInput
+                    value={currentPassword}
+                    onChangeText={setCurrentPassword}
+                    placeholder="输入当前密码"
+                    placeholderTextColor="#98A09D"
+                    style={styles.accountInput}
+                    secureTextEntry
+                  />
+                </View>
+                <View style={styles.accountField}>
+                  <Text style={styles.accountFieldLabel}>新密码</Text>
+                  <TextInput
+                    value={newPassword}
+                    onChangeText={setNewPassword}
+                    placeholder="至少 8 位"
+                    placeholderTextColor="#98A09D"
+                    style={styles.accountInput}
+                    secureTextEntry
+                  />
+                </View>
+                <Pressable
+                  disabled={passwordSubmitting}
+                  onPress={submitPassword}
+                  style={({ pressed }) => [
+                    styles.accountSecondaryButton,
+                    pressed && styles.pressed,
+                    passwordSubmitting && styles.disabledButton,
+                  ]}
+                >
+                  {passwordSubmitting ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <Text style={styles.accountSecondaryText}>更新密码</Text>
+                  )}
+                </Pressable>
+              </View>
+              <Pressable
+                onPress={() => switchMode("login")}
+                style={({ pressed }) => [
+                  styles.accountSwitchButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.accountSwitchText}>登录其他账号</Text>
+              </Pressable>
+              </View>
+            )}
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -931,6 +1279,11 @@ function ReaderScreen({
   savedWords,
   completed,
   pronunciationAccent,
+  sequencePosition,
+  sequenceTotal,
+  navigatingArticle,
+  onPreviousArticle,
+  onNextArticle,
   onBack,
   onToggleWord,
   onSubmit,
@@ -939,6 +1292,11 @@ function ReaderScreen({
   savedWords: SavedWord[];
   completed: boolean;
   pronunciationAccent: LearningSettings["pronunciationAccent"];
+  sequencePosition: number;
+  sequenceTotal: number;
+  navigatingArticle: boolean;
+  onPreviousArticle?: () => void;
+  onNextArticle?: () => void;
   onBack: () => void;
   onToggleWord: (word: WordInfo, article: Article) => void;
   onSubmit: (article: Article, answers: number[]) => Promise<AnswerResult[]>;
@@ -1802,6 +2160,50 @@ function ReaderScreen({
         </View>
       </ScrollView>
 
+      {sequenceTotal > 1 && (
+        <View style={styles.readerSequenceBar}>
+          <Pressable
+            accessibilityLabel="上一篇文章"
+            disabled={!onPreviousArticle || navigatingArticle}
+            onPress={onPreviousArticle}
+            style={({ pressed }) => [
+              styles.readerSequenceButton,
+              (!onPreviousArticle || navigatingArticle) && styles.readerSequenceDisabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            <ChevronLeft size={18} color={colors.ink} />
+            <Text style={styles.readerSequenceButtonText}>上一篇</Text>
+          </Pressable>
+          <View style={styles.readerSequencePosition}>
+            {navigatingArticle ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+              <>
+                <Text style={styles.readerSequenceCount}>
+                  {sequencePosition} / {sequenceTotal}
+                </Text>
+                <Text style={styles.readerSequenceHint}>今日文章</Text>
+              </>
+            )}
+          </View>
+          <Pressable
+            accessibilityLabel="下一篇文章"
+            disabled={!onNextArticle || navigatingArticle}
+            onPress={onNextArticle}
+            style={({ pressed }) => [
+              styles.readerSequenceButton,
+              styles.readerSequenceButtonNext,
+              (!onNextArticle || navigatingArticle) && styles.readerSequenceDisabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.readerSequenceButtonTextNext}>下一篇</Text>
+            <ChevronRight size={18} color="#fff" />
+          </Pressable>
+        </View>
+      )}
+
       <Modal
         visible={!!selectedWord}
         transparent
@@ -2551,12 +2953,14 @@ function WordsScreen({
   pronunciationAccent,
   onRemove,
   onReview,
+  onOpenSource,
 }: {
   words: SavedWord[];
   activeExam: ExamId;
   pronunciationAccent: LearningSettings["pronunciationAccent"];
   onRemove: (word: SavedWord) => Promise<void>;
   onReview: (word: SavedWord, rating: MemoryRating) => Promise<SavedWord>;
+  onOpenSource: (articleId: string, examId: ExamId) => void;
 }) {
   const [filter, setFilter] = useState<ExamId>(activeExam);
   const [search, setSearch] = useState("");
@@ -2763,12 +3167,21 @@ function WordsScreen({
                       )}
                     </View>
                   )}
-                  <View style={styles.wordSource}>
-                    <BookOpen size={13} color={colors.inkMuted} />
+                  <Pressable
+                    accessibilityLabel={`查看原文：${item.articleTitle ?? article?.title ?? "阅读文章"}`}
+                    onPress={() => onOpenSource(item.articleId, item.examId)}
+                    style={({ pressed }) => [
+                      styles.wordSource,
+                      pressed && styles.wordSourcePressed,
+                    ]}
+                  >
+                    <BookOpen size={14} color={colors.primary} />
                     <Text numberOfLines={1} style={styles.wordSourceText}>
-                      来自：{article?.title ?? "阅读文章"}
+                      摘自：{item.articleTitle ?? article?.title ?? "阅读文章"}
                     </Text>
-                  </View>
+                    <Text style={styles.wordSourceAction}>查看原文</Text>
+                    <ChevronRight size={15} color={colors.primary} />
+                  </Pressable>
                 </View>
               );
             })}
@@ -2846,13 +3259,17 @@ function WordsScreen({
 function ProfileScreen({
   examId,
   settings,
+  user,
   onChangeExam,
   onChangeSettings,
+  onOpenAccount,
 }: {
   examId: ExamId;
   settings: LearningSettings;
+  user: UserProfile | null;
   onChangeExam: (id: ExamId) => void;
   onChangeSettings: (settings: LearningSettings) => void;
+  onOpenAccount: () => void;
 }) {
   const [activePicker, setActivePicker] = useState<
     "exam" | "time" | "accent" | "goal" | null
@@ -2931,18 +3348,33 @@ function ProfileScreen({
         showsVerticalScrollIndicator={false}
       >
         <Header title="我的学习" subtitle="保持节奏，持续积累" />
-        <View style={styles.profileCard}>
+        <Pressable
+          accessibilityLabel={user?.isRegistered ? "编辑个人资料" : "登录或注册"}
+          onPress={onOpenAccount}
+          style={({ pressed }) => [
+            styles.profileCard,
+            pressed && styles.cardPressed,
+          ]}
+        >
           <View style={styles.profileAvatar}>
-            <Text style={styles.profileAvatarText}>R</Text>
+            <Text style={styles.profileAvatarText}>
+              {(user?.displayName || "R").slice(0, 1).toUpperCase()}
+            </Text>
           </View>
           <View style={styles.flexOne}>
-            <Text style={styles.profileName}>阅读学习者</Text>
-            <Text style={styles.profileSubtitle}>已连续学习 7 天</Text>
+            <Text style={styles.profileName}>
+              {user?.displayName || "阅读学习者"}
+            </Text>
+            <Text style={styles.profileSubtitle}>
+              {user?.isRegistered ? `@${user.username}` : "游客账号 · 登录后同步学习数据"}
+            </Text>
           </View>
           <View style={styles.levelBadge}>
-            <Text style={styles.levelBadgeText}>Lv. 3</Text>
+            <Text style={styles.levelBadgeText}>
+              {user?.isRegistered ? "编辑资料" : "登录 / 注册"}
+            </Text>
           </View>
-        </View>
+        </Pressable>
         <Text style={styles.settingsTitle}>学习设置</Text>
         <View style={styles.settingsGroup}>
           <Pressable
@@ -3028,6 +3460,32 @@ function ProfileScreen({
             <View style={styles.flexOne}>
               <Text style={styles.settingLabel}>每日阅读目标</Text>
               <Text style={styles.settingValue}>每天 {settings.dailyGoal} 篇</Text>
+            </View>
+            <ChevronRight size={18} color={colors.inkMuted} />
+          </Pressable>
+        </View>
+        <Text style={styles.settingsTitle}>账号设置</Text>
+        <View style={styles.settingsGroup}>
+          <Pressable
+            accessibilityLabel={user?.isRegistered ? "修改用户信息" : "登录或注册账号"}
+            onPress={onOpenAccount}
+            style={({ pressed }) => [
+              styles.settingRow,
+              pressed && styles.settingRowPressed,
+            ]}
+          >
+            <View style={styles.settingIcon}>
+              <GraduationCap size={19} color={colors.primary} />
+            </View>
+            <View style={styles.flexOne}>
+              <Text style={styles.settingLabel}>
+                {user?.isRegistered ? "个人资料与密码" : "注册 / 登录"}
+              </Text>
+              <Text style={styles.settingValue}>
+                {user?.isRegistered
+                  ? "修改昵称、用户名、邮箱和密码"
+                  : "同步阅读历史、生词和复习进度"}
+              </Text>
             </View>
             <ChevronRight size={18} color={colors.inkMuted} />
           </Pressable>
@@ -3147,6 +3605,8 @@ export default function App() {
   const [examId, setExamId] = useState<ExamId | null>(null);
   const [tab, setTab] = useState<TabId>("today");
   const [reader, setReader] = useState<Article | null>(null);
+  const [readerQueue, setReaderQueue] = useState<string[]>([]);
+  const [readerNavigating, setReaderNavigating] = useState(false);
   const [savedWords, setSavedWords] = useState<SavedWord[]>([]);
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [completed, setCompleted] = useState<string[]>([]);
@@ -3157,6 +3617,10 @@ export default function App() {
     DEFAULT_LEARNING_SETTINGS,
   );
   const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [currentDeviceId, setCurrentDeviceId] = useState("");
+  const [accountMode, setAccountMode] = useState<AccountMode | null>(null);
+  const [authRequired, setAuthRequired] = useState(false);
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -3179,6 +3643,7 @@ export default function App() {
       ]);
 
       setExamId(savedExam);
+      setCurrentDeviceId(deviceId);
       setSavedWords(cachedWords);
       setHistory(cachedHistory);
       setCompleted(cachedCompleted);
@@ -3192,11 +3657,26 @@ export default function App() {
         setDaily(getDailyArticles(savedExam));
       }
 
+      if (!token) {
+        api.clearAuthentication();
+        setAuthRequired(true);
+        setLoading(false);
+        return;
+      }
+
       try {
         const session = await api.authenticate(deviceId, token);
+        if (!session.isRegistered) {
+          api.clearAuthentication();
+          await storage.clearAuthToken();
+          setAuthRequired(true);
+          return;
+        }
         await storage.setAuthToken(session.token);
+        setCurrentUser(session);
         if (savedExam && session.examId !== savedExam) {
-          await api.setExam(savedExam);
+          const updated = await api.setExam(savedExam);
+          setCurrentUser(updated);
         }
         if (savedExam) {
           const [remoteDaily, remoteHistory, remoteWords, pushes] =
@@ -3227,7 +3707,8 @@ export default function App() {
         }
         setApiOnline(true);
       } catch (error) {
-        console.warn("API unavailable, using cached data", error);
+        console.warn("Authentication unavailable", error);
+        setAuthRequired(true);
         setApiOnline(false);
       } finally {
         setLoading(false);
@@ -3254,13 +3735,54 @@ export default function App() {
     void storage.setLearningSettings(next);
   };
 
+  const applyRemoteSnapshot = async () => {
+    const [remoteDaily, remoteHistory, remoteWords, pushes] = await Promise.all([
+      api.getDaily(),
+      api.getHistory(),
+      api.getVocabulary(),
+      api.getPushes(),
+    ]);
+    const completedIds = [
+      ...new Set([
+        ...remoteHistory.completedIds,
+        ...pushes
+          .filter((push) => push.completedAt)
+          .map((push) => push.article.id),
+      ]),
+    ];
+    setDaily(remoteDaily);
+    setManualPushes(pushes);
+    setHistory(remoteHistory.records);
+    setCompleted(completedIds);
+    setSavedWords(remoteWords);
+    await Promise.all([
+      storage.setHistory(remoteHistory.records),
+      storage.setCompleted(completedIds),
+      storage.setWords(remoteWords),
+    ]);
+  };
+
+  const handleAuthenticated = async (
+    session: UserProfile & { token: string },
+  ) => {
+    await storage.setAuthToken(session.token);
+    setCurrentUser(session);
+    setExamId(session.examId);
+    await storage.setExam(session.examId);
+    await applyRemoteSnapshot();
+    setApiOnline(true);
+    setAuthRequired(false);
+  };
+
   const selectExam = async (nextExam: ExamId, navigateToToday = true) => {
     setExamId(nextExam);
+    setCurrentUser((user) => (user ? { ...user, examId: nextExam } : user));
     await storage.setExam(nextExam);
     setDaily(getDailyArticles(nextExam));
     if (navigateToToday) setTab("today");
     try {
-      await api.setExam(nextExam);
+      const updatedUser = await api.setExam(nextExam);
+      setCurrentUser(updatedUser);
       const [remoteDaily, remoteHistory, remoteWords, pushes] =
         await Promise.all([
           api.getDaily(),
@@ -3319,6 +3841,7 @@ export default function App() {
       ...enrichedWord,
       examId: article.examId,
       articleId: article.id,
+      articleTitle: article.title,
       savedAt: new Date().toISOString(),
       memoryStage: 0,
       nextReviewAt: new Date().toISOString(),
@@ -3452,23 +3975,105 @@ export default function App() {
   };
 
   const openHistoryArticle = async (articleId: string) => {
+    const defaultQueue = history.flatMap((record) => record.articleIds);
+    const queue = defaultQueue.includes(articleId) ? defaultQueue : [articleId];
     const cached = daily.find((item) => item.id === articleId);
     if (cached) {
+      setReaderQueue(queue);
       setReader(cached);
       return;
     }
     try {
-      setReader(
-        apiOnline
-          ? await api.getArticle(articleId)
-          : (articles.find((item) => item.id === articleId) ?? null),
-      );
+      const loaded = apiOnline
+        ? await api.getArticle(articleId)
+        : (articles.find((item) => item.id === articleId) ?? null);
+      if (loaded) {
+        setReaderQueue(queue);
+        setReader(loaded);
+      }
     } catch (error) {
       setAppNotice({
         title: "文章加载失败",
         message: error instanceof Error ? error.message : "请稍后再试",
         tone: "error",
       });
+    }
+  };
+
+  const openDailyArticle = (article: Article) => {
+    setReaderQueue(daily.map((item) => item.id));
+    setReader(article);
+  };
+
+  const openPushedArticle = async (articleId: string) => {
+    const queue = manualPushes.map((push) => push.article.id);
+    try {
+      const loaded =
+        daily.find((item) => item.id === articleId) ??
+        (apiOnline
+          ? await api.getArticle(articleId)
+          : (articles.find((item) => item.id === articleId) ?? null));
+      if (loaded) {
+        setReaderQueue(queue);
+        setReader(loaded);
+      }
+    } catch (error) {
+      setAppNotice({
+        title: "文章加载失败",
+        message: error instanceof Error ? error.message : "请稍后再试",
+        tone: "error",
+      });
+    }
+  };
+
+  const openWordSourceArticle = async (articleId: string, sourceExam: ExamId) => {
+    const queue = [
+      ...new Set(
+        savedWords
+          .filter((word) => word.examId === sourceExam)
+          .map((word) => word.articleId),
+      ),
+    ];
+    try {
+      const loaded =
+        daily.find((item) => item.id === articleId) ??
+        (apiOnline
+          ? await api.getArticle(articleId)
+          : (articles.find((item) => item.id === articleId) ?? null));
+      if (loaded) {
+        setReaderQueue(queue.length ? queue : [articleId]);
+        setReader(loaded);
+      }
+    } catch (error) {
+      setAppNotice({
+        title: "原文加载失败",
+        message: error instanceof Error ? error.message : "请稍后再试",
+        tone: "error",
+      });
+    }
+  };
+
+  const readerIndex = reader ? readerQueue.indexOf(reader.id) : -1;
+  const navigateReader = async (offset: -1 | 1) => {
+    if (!reader || readerNavigating || readerIndex < 0) return;
+    const targetId = readerQueue[readerIndex + offset];
+    if (!targetId) return;
+    setReaderNavigating(true);
+    try {
+      const loaded =
+        daily.find((item) => item.id === targetId) ??
+        (apiOnline
+          ? await api.getArticle(targetId)
+          : (articles.find((item) => item.id === targetId) ?? null));
+      if (loaded) setReader(loaded);
+    } catch (error) {
+      setAppNotice({
+        title: "文章切换失败",
+        message: error instanceof Error ? error.message : "请稍后再试",
+        tone: "error",
+      });
+    } finally {
+      setReaderNavigating(false);
     }
   };
 
@@ -3482,15 +4087,50 @@ export default function App() {
         />
       </View>
     );
+  if (authRequired || !currentUser?.isRegistered)
+    return (
+      <SafeAreaView style={styles.authGateSafe}>
+        <ExpoStatusBar style="dark" />
+        <View style={styles.authGateBackground}>
+          <AppLogo />
+          <View style={styles.authGateCopy}>
+            <Text style={styles.authGateEyebrow}>READ · REMEMBER · GROW</Text>
+            <Text style={styles.authGateTitle}>登录后，开始你的{`\n`}每日英语阅读</Text>
+            <Text style={styles.authGateText}>
+              阅读历史、生词和记忆进度会安全保存在你的账号中。
+            </Text>
+          </View>
+        </View>
+        <AccountSheet
+          user={null}
+          deviceId={currentDeviceId}
+          initialMode="login"
+          dismissible={false}
+          onClose={() => {}}
+          onAuthenticated={handleAuthenticated}
+          onProfileUpdated={() => {}}
+        />
+      </SafeAreaView>
+    );
   if (!examId) return <Onboarding onSelect={(id) => void selectExam(id)} />;
   if (reader)
     return (
       <>
         <ReaderScreen
+          key={reader.id}
           article={reader}
           savedWords={savedWords}
           completed={completed.includes(reader.id)}
           pronunciationAccent={learningSettings.pronunciationAccent}
+          sequencePosition={Math.max(1, readerIndex + 1)}
+          sequenceTotal={Math.max(1, readerQueue.length)}
+          navigatingArticle={readerNavigating}
+          onPreviousArticle={readerIndex > 0 ? () => void navigateReader(-1) : undefined}
+          onNextArticle={
+            readerIndex >= 0 && readerIndex < readerQueue.length - 1
+              ? () => void navigateReader(1)
+              : undefined
+          }
           onBack={() => setReader(null)}
           onToggleWord={toggleWord}
           onSubmit={submitArticle}
@@ -3510,8 +4150,8 @@ export default function App() {
         dailyGoal={learningSettings.dailyGoal}
         manualPushes={manualPushes}
         completed={completed}
-        onOpen={setReader}
-        onOpenPush={openHistoryArticle}
+        onOpen={openDailyArticle}
+        onOpenPush={openPushedArticle}
         onNavigate={setTab}
       />
     ) : tab === "history" ? (
@@ -3523,13 +4163,20 @@ export default function App() {
         pronunciationAccent={learningSettings.pronunciationAccent}
         onRemove={removeWord}
         onReview={reviewWord}
+        onOpenSource={(articleId, sourceExam) =>
+          void openWordSourceArticle(articleId, sourceExam)
+        }
       />
     ) : (
       <ProfileScreen
         examId={examId}
         settings={learningSettings}
+        user={currentUser}
         onChangeExam={(id) => void selectExam(id, false)}
         onChangeSettings={updateLearningSettings}
+        onOpenAccount={() =>
+          setAccountMode(currentUser?.isRegistered ? "profile" : "login")
+        }
       />
     );
 
@@ -3549,11 +4196,51 @@ export default function App() {
         notice={appNotice}
         onClose={() => setAppNotice(null)}
       />
+      {accountMode && (
+        <AccountSheet
+          key={accountMode}
+          user={currentUser}
+          deviceId={currentDeviceId}
+          initialMode={accountMode}
+          onClose={() => setAccountMode(null)}
+          onAuthenticated={handleAuthenticated}
+          onProfileUpdated={setCurrentUser}
+        />
+      )}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  authGateSafe: { flex: 1, backgroundColor: colors.background },
+  authGateBackground: {
+    flex: 1,
+    paddingHorizontal: 28,
+    paddingTop: 26,
+    paddingBottom: 48,
+    justifyContent: "space-between",
+  },
+  authGateCopy: { maxWidth: 520, marginBottom: 36 },
+  authGateEyebrow: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1.6,
+  },
+  authGateTitle: {
+    color: colors.ink,
+    fontSize: 34,
+    lineHeight: 46,
+    fontWeight: "800",
+    marginTop: 14,
+  },
+  authGateText: {
+    color: colors.inkMuted,
+    fontSize: 14,
+    lineHeight: 23,
+    marginTop: 14,
+    maxWidth: 420,
+  },
   safeArea: {
     flex: 1,
     backgroundColor: colors.background,
@@ -3751,6 +4438,109 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
   },
   nativeNoticePrimaryText: { color: "#fff", fontSize: 14, fontWeight: "800" },
+  accountSheet: {
+    width: "100%",
+    maxHeight: "94%",
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "ios" ? 28 : 20,
+  },
+  accountSheetDesktop: {
+    width: 520,
+    maxHeight: "88%",
+    borderRadius: 24,
+    padding: 24,
+    ...shadows.card,
+  },
+  accountModeTabs: {
+    flexDirection: "row",
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 14,
+    padding: 3,
+    marginBottom: 16,
+  },
+  accountModeTab: {
+    flex: 1,
+    height: 40,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  accountModeTabActive: { backgroundColor: colors.surface, ...shadows.card },
+  accountModeText: { color: colors.inkMuted, fontSize: 13, fontWeight: "700" },
+  accountModeTextActive: { color: colors.ink, fontWeight: "800" },
+  accountForm: { paddingBottom: 12 },
+  accountField: { marginBottom: 14 },
+  accountFieldLabel: {
+    color: colors.ink,
+    fontSize: 12,
+    fontWeight: "800",
+    marginBottom: 7,
+  },
+  accountInput: {
+    height: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: "#FAFBFA",
+    color: colors.ink,
+    fontSize: 14,
+    paddingHorizontal: 14,
+  },
+  accountError: {
+    color: colors.danger,
+    fontSize: 12,
+    lineHeight: 19,
+    marginBottom: 10,
+  },
+  accountSuccess: {
+    color: colors.primary,
+    fontSize: 12,
+    lineHeight: 19,
+    marginBottom: 10,
+    fontWeight: "700",
+  },
+  accountPrimaryButton: {
+    height: 50,
+    borderRadius: 15,
+    backgroundColor: colors.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  accountPrimaryText: { color: "#fff", fontSize: 15, fontWeight: "800" },
+  passwordSection: {
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    marginTop: 24,
+    paddingTop: 20,
+  },
+  passwordSectionTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
+  passwordSectionHint: {
+    color: colors.inkMuted,
+    fontSize: 11,
+    marginTop: 4,
+    marginBottom: 16,
+  },
+  accountSecondaryButton: {
+    height: 48,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  accountSecondaryText: { color: colors.primary, fontSize: 14, fontWeight: "800" },
+  accountSwitchButton: {
+    height: 46,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 12,
+  },
+  accountSwitchText: { color: colors.inkMuted, fontSize: 13, fontWeight: "700" },
 
   logoRow: { flexDirection: "row", gap: 12, alignItems: "center" },
   logoMark: {
@@ -4190,6 +4980,43 @@ const styles = StyleSheet.create({
     height: "100%",
     backgroundColor: colors.primary,
   },
+  readerSequenceBar: {
+    minHeight: 66,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    backgroundColor: "rgba(255,255,255,0.98)",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+  },
+  readerSequenceButton: {
+    flex: 1,
+    height: 46,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surfaceMuted,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+  },
+  readerSequenceButtonNext: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  readerSequenceDisabled: { opacity: 0.35 },
+  readerSequenceButtonText: { color: colors.ink, fontSize: 12, fontWeight: "800" },
+  readerSequenceButtonTextNext: { color: "#fff", fontSize: 12, fontWeight: "800" },
+  readerSequencePosition: {
+    width: 68,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  readerSequenceCount: { color: colors.ink, fontSize: 13, fontWeight: "800" },
+  readerSequenceHint: { color: colors.inkMuted, fontSize: 9, marginTop: 2 },
   readerScroll: {
     alignItems: "center",
     paddingVertical: 30,
@@ -5197,12 +6024,15 @@ const styles = StyleSheet.create({
   wordSource: {
     borderTopWidth: 1,
     borderTopColor: colors.line,
-    paddingTop: 11,
+    minHeight: 44,
+    paddingTop: 10,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
   },
+  wordSourcePressed: { opacity: 0.68 },
   wordSourceText: { color: colors.inkMuted, fontSize: 10, flex: 1 },
+  wordSourceAction: { color: colors.primary, fontSize: 10, fontWeight: "800" },
   emptyState: { alignItems: "center", paddingVertical: 72 },
   emptyIllustration: {
     width: 78,

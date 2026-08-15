@@ -144,6 +144,69 @@ test("anonymous device login returns a reusable token", async () => {
   });
   assert.equal(again.status, 200);
   assert.equal((await again.json()).data.token, token);
+
+  const blocked = await request("/api/v1/daily?date=2026-08-08");
+  assert.equal(blocked.status, 403);
+  assert.equal((await blocked.json()).error.code, "REGISTRATION_REQUIRED");
+});
+
+test("anonymous account can register, login, and update profile", async () => {
+  const registered = await request("/api/v1/auth/register", {
+    method: "POST",
+    body: JSON.stringify({
+      deviceId: "integration-test-device",
+      username: "reader_test",
+      password: "reading123",
+      displayName: "测试读者",
+      email: "reader@example.com",
+    }),
+  });
+  assert.equal(registered.status, 201);
+  const account = (await registered.json()).data;
+  assert.equal(account.isRegistered, true);
+  assert.equal(account.displayName, "测试读者");
+
+  const invalid = await request("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username: "reader_test", password: "wrongpass" }),
+  });
+  assert.equal(invalid.status, 401);
+
+  const login = await request("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username: "reader_test", password: "reading123" }),
+  });
+  assert.equal(login.status, 200);
+  token = (await login.json()).data.token;
+
+  const updated = await request("/api/v1/users/me", {
+    method: "PATCH",
+    body: JSON.stringify({
+      username: "reader_updated",
+      displayName: "新的昵称",
+      email: "updated@example.com",
+    }),
+  });
+  assert.equal(updated.status, 200);
+  assert.equal((await updated.json()).data.username, "reader_updated");
+
+  const changedPassword = await request("/api/v1/users/me/password", {
+    method: "PATCH",
+    body: JSON.stringify({
+      currentPassword: "reading123",
+      newPassword: "remember456",
+    }),
+  });
+  assert.equal(changedPassword.status, 204);
+
+  const relogin = await request("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify({
+      username: "reader_updated",
+      password: "remember456",
+    }),
+  });
+  assert.equal(relogin.status, 200);
 });
 
 test("daily delivery is idempotent and never repeats across dates", async () => {
@@ -216,6 +279,8 @@ test("vocabulary can be added, filtered, and removed", async () => {
   const detailedVocabulary = (await detailedList.json()).data;
   assert.equal(detailedVocabulary[0].partOfSpeech, "adjective");
   assert.equal(detailedVocabulary[0].exampleTranslation, "幼树容易受到干旱影响。");
+  assert.equal(typeof detailedVocabulary[0].articleTitle, "string");
+  assert.ok(detailedVocabulary[0].articleTitle.length > 0);
   assert.equal(detailedVocabulary[0].memoryStage, 0);
   assert.equal(detailedVocabulary[0].reviewCount, 0);
 
@@ -236,14 +301,14 @@ test("vocabulary can be added, filtered, and removed", async () => {
   assert.equal(removed.status, 204);
 });
 
-test("changing exam creates an independent unseen delivery pool", async () => {
+test("changing exam creates three new target articles on the same date", async () => {
   const changed = await request("/api/v1/users/me/exam", {
     method: "PATCH",
     body: JSON.stringify({ examId: "toeic" }),
   });
   assert.equal((await changed.json()).data.examId, "toeic");
 
-  const daily = await request("/api/v1/daily?date=2026-08-11");
+  const daily = await request("/api/v1/daily?date=2026-08-09");
   const data = (await daily.json()).data;
   assert.equal(data.examId, "toeic");
   assert.equal(data.articles.length, 3);

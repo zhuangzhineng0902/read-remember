@@ -5,7 +5,13 @@ import express, { type Request, type Response } from "express";
 import helmet from "helmet";
 import { z } from "zod";
 import { createAdminRouter } from "./admin";
-import { currentUser, requireAuth } from "./auth";
+import {
+  currentUser,
+  hashPassword,
+  requireAuth,
+  requireRegistered,
+  verifyPassword,
+} from "./auth";
 import type { Config } from "./config";
 import type { AppDatabase } from "./database";
 import { ApiError, errorHandler, notFound, parse } from "./http";
@@ -25,6 +31,24 @@ import { scheduleMemoryReview } from "../../client/src/memory";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+const usernamePattern = /^[a-zA-Z0-9_]{3,24}$/;
+
+const publicUserSelect = `
+  id, device_id AS deviceId, token, exam_id AS examId,
+  username, display_name AS displayName, email,
+  CASE WHEN username IS NULL THEN 0 ELSE 1 END AS isRegistered
+`;
+
+const serializeSession = (row: {
+  id: string;
+  deviceId: string;
+  token: string;
+  examId: string;
+  username: string | null;
+  displayName: string;
+  email: string;
+  isRegistered: number;
+}) => ({ ...row, isRegistered: Boolean(row.isRegistered) });
 
 const articleFromId = (db: AppDatabase, id: string) =>
   db
@@ -136,21 +160,119 @@ export function createApp(
     );
     const existing = db
       .prepare(
-        `SELECT id, token, exam_id AS examId FROM users WHERE device_id = ?`,
+        `SELECT ${publicUserSelect} FROM users WHERE device_id = ?`,
       )
-      .get(body.deviceId) as
-      { id: string; token: string; examId: string } | undefined;
+      .get(body.deviceId) as Parameters<typeof serializeSession>[0] | undefined;
 
     if (existing) {
-      res.json({ data: existing });
+      if (existing.username) {
+        throw new ApiError(
+          401,
+          "PASSWORD_LOGIN_REQUIRED",
+          "该设备已绑定正式账号，请使用用户名密码登录",
+        );
+      }
+      res.json({ data: serializeSession(existing) });
       return;
     }
 
-    const user = { id: randomUUID(), token: randomUUID(), examId: "toefl" };
+    const user = {
+      id: randomUUID(),
+      deviceId: body.deviceId,
+      token: randomUUID(),
+      examId: "toefl",
+      username: null,
+      displayName: "阅读学习者",
+      email: "",
+      isRegistered: false,
+    };
     db.prepare(
       `INSERT INTO users(id, device_id, token, exam_id) VALUES (?, ?, ?, ?)`,
     ).run(user.id, body.deviceId, user.token, user.examId);
     res.status(201).json({ data: user });
+  });
+
+  app.post("/api/v1/auth/register", async (req, res) => {
+    const body = parse(
+      z.object({
+        deviceId: z.string().trim().min(6).max(128),
+        username: z.string().trim().regex(usernamePattern),
+        password: z.string().min(8).max(72),
+        displayName: z.string().trim().min(1).max(30),
+        email: z.string().trim().email().max(120).or(z.literal("")).default(""),
+      }),
+      req.body,
+    );
+    const username = body.username.toLowerCase();
+    const usernameExists = db
+      .prepare("SELECT 1 FROM users WHERE username = ? COLLATE NOCASE")
+      .get(username);
+    if (usernameExists) {
+      throw new ApiError(409, "USERNAME_TAKEN", "该用户名已被使用");
+    }
+
+    const deviceUser = db
+      .prepare(`SELECT ${publicUserSelect} FROM users WHERE device_id = ?`)
+      .get(body.deviceId) as Parameters<typeof serializeSession>[0] | undefined;
+    if (deviceUser?.username) {
+      throw new ApiError(409, "DEVICE_REGISTERED", "该设备已注册，请直接登录");
+    }
+
+    const passwordHash = await hashPassword(body.password);
+    if (deviceUser) {
+      db.prepare(
+        `UPDATE users
+         SET username = ?, password_hash = ?, display_name = ?, email = ?,
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+      ).run(username, passwordHash, body.displayName, body.email, deviceUser.id);
+    } else {
+      db.prepare(
+        `INSERT INTO users(
+          id, device_id, token, exam_id, username, password_hash,
+          display_name, email
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        randomUUID(),
+        body.deviceId,
+        randomUUID(),
+        "toefl",
+        username,
+        passwordHash,
+        body.displayName,
+        body.email,
+      );
+    }
+    const row = db
+      .prepare(`SELECT ${publicUserSelect} FROM users WHERE username = ?`)
+      .get(username) as Parameters<typeof serializeSession>[0];
+    res.status(201).json({ data: serializeSession(row) });
+  });
+
+  app.post("/api/v1/auth/login", async (req, res) => {
+    const body = parse(
+      z.object({
+        username: z.string().trim().regex(usernamePattern),
+        password: z.string().min(8).max(72),
+      }),
+      req.body,
+    );
+    const row = db
+      .prepare(
+        `SELECT ${publicUserSelect}, password_hash AS passwordHash
+         FROM users WHERE username = ? COLLATE NOCASE`,
+      )
+      .get(body.username) as
+      | (Parameters<typeof serializeSession>[0] & { passwordHash: string | null })
+      | undefined;
+    if (
+      !row?.passwordHash ||
+      !(await verifyPassword(body.password, row.passwordHash))
+    ) {
+      throw new ApiError(401, "INVALID_CREDENTIALS", "用户名或密码不正确");
+    }
+    const { passwordHash: _passwordHash, ...session } = row;
+    res.json({ data: serializeSession(session) });
   });
 
   const authenticated = express.Router();
@@ -160,6 +282,8 @@ export function createApp(
     res.json({ data: currentUser(res) });
   });
 
+  authenticated.use(requireRegistered);
+
   authenticated.patch("/users/me/exam", (req, res) => {
     const body = parse(z.object({ examId: z.enum(examIds) }), req.body);
     const user = currentUser(res);
@@ -167,6 +291,67 @@ export function createApp(
       `UPDATE users SET exam_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
     ).run(body.examId, user.id);
     res.json({ data: { ...user, examId: body.examId } });
+  });
+
+  authenticated.patch("/users/me", (req, res) => {
+    const body = parse(
+      z.object({
+        username: z.string().trim().regex(usernamePattern),
+        displayName: z.string().trim().min(1).max(30),
+        email: z.string().trim().email().max(120).or(z.literal("")),
+      }),
+      req.body,
+    );
+    const user = currentUser(res);
+    if (!user.isRegistered) {
+      throw new ApiError(403, "REGISTRATION_REQUIRED", "请先注册正式账号");
+    }
+    const normalizedUsername = body.username.toLowerCase();
+    const conflict = db
+      .prepare(
+        "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE AND id <> ?",
+      )
+      .get(normalizedUsername, user.id);
+    if (conflict) {
+      throw new ApiError(409, "USERNAME_TAKEN", "该用户名已被使用");
+    }
+    db.prepare(
+      `UPDATE users SET username = ?, display_name = ?, email = ?,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).run(normalizedUsername, body.displayName, body.email, user.id);
+    res.json({
+      data: {
+        ...user,
+        username: normalizedUsername,
+        displayName: body.displayName,
+        email: body.email,
+      },
+    });
+  });
+
+  authenticated.patch("/users/me/password", async (req, res) => {
+    const body = parse(
+      z.object({
+        currentPassword: z.string().min(8).max(72),
+        newPassword: z.string().min(8).max(72),
+      }),
+      req.body,
+    );
+    const user = currentUser(res);
+    const row = db
+      .prepare("SELECT password_hash AS passwordHash FROM users WHERE id = ?")
+      .get(user.id) as { passwordHash: string | null };
+    if (
+      !row.passwordHash ||
+      !(await verifyPassword(body.currentPassword, row.passwordHash))
+    ) {
+      throw new ApiError(401, "INVALID_PASSWORD", "当前密码不正确");
+    }
+    db.prepare(
+      `UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    ).run(await hashPassword(body.newPassword), user.id);
+    res.status(204).send();
   });
 
   authenticated.get("/daily", (req, res) => {
@@ -180,11 +365,11 @@ export function createApp(
       SELECT ${articleSelect}
       FROM deliveries d
       JOIN articles a ON a.id = d.article_id
-      WHERE d.user_id = ? AND d.delivery_date = ?
+      WHERE d.user_id = ? AND d.delivery_date = ? AND d.exam_id = ?
       ORDER BY d.slot
     `);
 
-    let rows = delivered.all(user.id, date) as unknown as ArticleRow[];
+    let rows = delivered.all(user.id, date, user.examId) as unknown as ArticleRow[];
     if (rows.length === 0) {
       db.exec("BEGIN IMMEDIATE");
       try {
@@ -205,11 +390,11 @@ export function createApp(
           .all(user.examId, user.id) as unknown as ArticleRow[];
 
         const insert = db.prepare(`
-          INSERT INTO deliveries(user_id, article_id, delivery_date, slot)
-          VALUES (?, ?, ?, ?)
+          INSERT INTO deliveries(user_id, article_id, exam_id, delivery_date, slot)
+          VALUES (?, ?, ?, ?, ?)
         `);
         rows.forEach((row, index) =>
-          insert.run(user.id, row.id, date, index + 1),
+          insert.run(user.id, row.id, user.examId, date, index + 1),
         );
         db.exec("COMMIT");
       } catch (error) {

@@ -42,6 +42,7 @@ export type MemoryRating = "again" | "hard" | "good" | "easy";
 export type SavedWord = WordInfo & {
   examId: ExamId;
   articleId: string;
+  articleTitle?: string;
   savedAt: string;
   memoryStage?: number;
   nextReviewAt?: string;
@@ -69,6 +70,16 @@ export type LearningSettings = {
   reminderTime: string;
   pronunciationAccent: "us" | "uk";
   dailyGoal: 1 | 2 | 3;
+};
+
+export type UserProfile = {
+  id: string;
+  deviceId: string;
+  examId: ExamId;
+  username: string | null;
+  displayName: string;
+  email: string;
+  isRegistered: boolean;
 };
 
 export type ReadingProgress = {

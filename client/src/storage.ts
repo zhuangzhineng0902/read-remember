@@ -53,6 +53,7 @@ export const storage = {
   },
   getAuthToken: () => AsyncStorage.getItem(KEYS.authToken),
   setAuthToken: (token: string) => AsyncStorage.setItem(KEYS.authToken, token),
+  clearAuthToken: () => AsyncStorage.removeItem(KEYS.authToken),
   getReaderSettings: () =>
     readJson<ReaderSettings | null>(KEYS.readerSettings, null),
   setReaderSettings: (settings: ReaderSettings) =>
