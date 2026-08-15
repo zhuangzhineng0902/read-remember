@@ -30,7 +30,6 @@ import {
   Home,
   Library,
   Menu,
-  MoreHorizontal,
   Search,
   Settings,
   Sparkles,
@@ -51,10 +50,17 @@ import {
 } from "./src/data";
 import { storage } from "./src/storage";
 import { colors, radius, shadows, spacing } from "./src/theme";
+import { LongPressWord } from "./src/components/LongPressWord";
+import {
+  isReviewDue,
+  reviewIntervalLabel,
+  scheduleMemoryReview,
+} from "./src/memory";
 import {
   Article,
   ExamId,
   HistoryRecord,
+  MemoryRating,
   SavedWord,
   WordInfo,
 } from "./src/types";
@@ -704,7 +710,9 @@ function ReaderScreen({
                   <Text>☝</Text>
                 </View>
                 <Text style={styles.longPressHintText}>
-                  长按任意单词，查看翻译并加入生词库
+                  {Platform.OS === "web"
+                    ? "鼠标按住任意单词，查看翻译并加入生词库"
+                    : "长按任意单词，查看翻译并加入生词库"}
                 </Text>
               </View>
               {article.paragraphs.map((paragraph, pIndex) => (
@@ -720,9 +728,8 @@ function ReaderScreen({
                     const clean = token.toLowerCase().replace(/[^a-z'-]/g, "");
                     const marked = clean && isSaved(clean);
                     return (
-                      <Text
+                      <LongPressWord
                         key={`${pIndex}-${index}`}
-                        accessibilityRole="button"
                         accessibilityHint="长按查看中文释义和例句"
                         onLongPress={() => clean && openWord(token, paragraph)}
                         onPressIn={() => clean && setPressedWord(clean)}
@@ -733,13 +740,14 @@ function ReaderScreen({
                         }
                         style={[
                           styles.interactiveWord,
+                          Platform.OS === "web" && styles.webInteractiveWord,
                           marked && styles.markedWord,
                           pressedWord === clean && styles.pressedWord,
                           selectedWord?.word === clean && styles.selectedInlineWord,
                         ]}
                       >
                         {token}
-                      </Text>
+                      </LongPressWord>
                     );
                   })}
                 </Text>
@@ -1119,27 +1127,250 @@ function HistoryScreen({
   );
 }
 
+const memoryRatings: Array<{
+  id: MemoryRating;
+  label: string;
+  hint: string;
+}> = [
+  { id: "again", label: "忘记", hint: "重新学习" },
+  { id: "hard", label: "模糊", hint: "加强记忆" },
+  { id: "good", label: "记住", hint: "正常推进" },
+  { id: "easy", label: "熟练", hint: "延长间隔" },
+];
+
+function MemoryReviewSession({
+  words,
+  onClose,
+  onReview,
+}: {
+  words: SavedWord[];
+  onClose: () => void;
+  onReview: (word: SavedWord, rating: MemoryRating) => Promise<SavedWord>;
+}) {
+  const { width } = useWindowDimensions();
+  const [index, setIndex] = useState(0);
+  const [revealed, setRevealed] = useState(false);
+  const [submittingRating, setSubmittingRating] = useState<MemoryRating | null>(
+    null,
+  );
+  const current = words[index];
+  const finished = index >= words.length;
+  const progress = words.length ? Math.min(100, (index / words.length) * 100) : 0;
+  const cardWidth = Math.min(620, width - (width >= 768 ? 120 : 28));
+
+  const rateWord = async (rating: MemoryRating) => {
+    if (!current || submittingRating) return;
+    setSubmittingRating(rating);
+    try {
+      await onReview(current, rating);
+      setIndex((value) => value + 1);
+      setRevealed(false);
+    } catch {
+      // The parent restores the previous state and presents the sync error.
+    } finally {
+      setSubmittingRating(null);
+    }
+  };
+
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.memoryReviewSafe}>
+        <ExpoStatusBar style="dark" />
+        <View style={styles.memoryReviewHeader}>
+          <Pressable
+            accessibilityLabel="退出记忆卡复习"
+            onPress={onClose}
+            style={styles.iconButton}
+          >
+            <X size={21} color={colors.ink} />
+          </Pressable>
+          <View style={styles.memoryReviewHeaderCenter}>
+            <Text style={styles.memoryReviewHeaderTitle}>记忆卡复习</Text>
+            <Text style={styles.memoryReviewHeaderMeta}>
+              {finished ? words.length : index + 1} / {words.length}
+            </Text>
+          </View>
+          <View style={styles.memoryReviewHeaderSpacer} />
+        </View>
+        <View style={styles.memoryProgressTrack}>
+          <View
+            style={[
+              styles.memoryProgressFill,
+              { width: `${finished ? 100 : progress}%` },
+            ]}
+          />
+        </View>
+
+        {finished ? (
+          <View style={styles.memoryComplete}>
+            <View style={styles.memoryCompleteIcon}>
+              <Check size={34} color="#fff" strokeWidth={2.5} />
+            </View>
+            <Text style={styles.memoryCompleteTitle}>本轮复习完成</Text>
+            <Text style={styles.memoryCompleteText}>
+              已复习 {words.length} 个生词。系统会根据记忆反馈，在合适的时间再次提醒你。
+            </Text>
+            <Pressable
+              onPress={onClose}
+              style={({ pressed }) => [
+                styles.memoryCompleteButton,
+                pressed && styles.primaryButtonPressed,
+              ]}
+            >
+              <Text style={styles.memoryCompleteButtonText}>返回生词库</Text>
+            </Pressable>
+          </View>
+        ) : current ? (
+          <ScrollView
+            contentContainerStyle={styles.memoryReviewContent}
+            showsVerticalScrollIndicator={false}
+          >
+            <Text style={styles.memoryReviewEyebrow}>
+              {revealed ? "查看答案并评价记忆程度" : "先在脑中回想它的含义"}
+            </Text>
+            <Pressable
+              accessibilityLabel={
+                revealed ? `${current.word} 的释义已显示` : `翻开 ${current.word} 记忆卡`
+              }
+              onPress={() => setRevealed(true)}
+              style={({ pressed }) => [
+                styles.memoryCard,
+                { width: cardWidth },
+                revealed && styles.memoryCardRevealed,
+                pressed && !revealed && styles.cardPressed,
+              ]}
+            >
+              <View style={styles.memoryCardBadge}>
+                <Text style={styles.memoryCardBadgeText}>
+                  {revealed ? "BACK · 释义" : "FRONT · 单词"}
+                </Text>
+              </View>
+              <Text style={styles.memoryCardWord}>{current.word}</Text>
+              <Text style={styles.memoryCardPhonetic}>{current.phonetic}</Text>
+              <Pressable
+                accessibilityLabel={`播放 ${current.word} 的发音`}
+                onPress={() => playWord(current.word)}
+                style={styles.memoryAudioButton}
+              >
+                <Volume2 size={19} color={colors.primary} />
+                <Text style={styles.memoryAudioText}>播放发音</Text>
+              </Pressable>
+
+              {revealed ? (
+                <View style={styles.memoryAnswer}>
+                  <Text style={styles.memoryTranslation}>{current.translation}</Text>
+                  {!!current.partOfSpeech && (
+                    <Text style={styles.memoryPartOfSpeech}>
+                      {current.partOfSpeech}
+                    </Text>
+                  )}
+                  {!!current.definition && (
+                    <Text style={styles.memoryDefinition}>{current.definition}</Text>
+                  )}
+                  {!!current.example && (
+                    <View style={styles.memoryExample}>
+                      <Text style={styles.memoryExampleEnglish}>
+                        {current.example}
+                      </Text>
+                      {!!current.exampleTranslation && (
+                        <Text style={styles.memoryExampleChinese}>
+                          {current.exampleTranslation}
+                        </Text>
+                      )}
+                    </View>
+                  )}
+                </View>
+              ) : (
+                <View style={styles.memoryRevealHint}>
+                  <Text style={styles.memoryRevealHintText}>点击卡片查看释义</Text>
+                  <ChevronRight size={16} color={colors.inkMuted} />
+                </View>
+              )}
+            </Pressable>
+
+            {revealed && (
+              <View style={[styles.memoryRatingArea, { width: cardWidth }]}>
+                <Text style={styles.memoryRatingTitle}>你记得怎么样？</Text>
+                <View style={styles.memoryRatingGrid}>
+                  {memoryRatings.map((rating) => (
+                    <Pressable
+                      key={rating.id}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${rating.label}，下次复习间隔 ${reviewIntervalLabel(current.memoryStage ?? 0, rating.id)}`}
+                      disabled={!!submittingRating}
+                      onPress={() => rateWord(rating.id)}
+                      style={({ pressed }) => [
+                        styles.memoryRatingButton,
+                        styles[`memoryRating_${rating.id}`],
+                        pressed && styles.pressed,
+                        submittingRating && styles.disabledButton,
+                      ]}
+                    >
+                      {submittingRating === rating.id ? (
+                        <ActivityIndicator size="small" color={colors.ink} />
+                      ) : (
+                        <>
+                          <Text style={styles.memoryRatingLabel}>{rating.label}</Text>
+                          <Text style={styles.memoryRatingHint}>{rating.hint}</Text>
+                          <Text style={styles.memoryRatingInterval}>
+                            {reviewIntervalLabel(
+                              current.memoryStage ?? 0,
+                              rating.id,
+                            )}
+                          </Text>
+                        </>
+                      )}
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            )}
+          </ScrollView>
+        ) : null}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 function WordsScreen({
   words,
   activeExam,
   onRemove,
+  onReview,
 }: {
   words: SavedWord[];
   activeExam: ExamId;
-  onRemove: (word: SavedWord) => void;
+  onRemove: (word: SavedWord) => Promise<void>;
+  onReview: (word: SavedWord, rating: MemoryRating) => Promise<SavedWord>;
 }) {
   const [filter, setFilter] = useState<ExamId>(activeExam);
   const [search, setSearch] = useState("");
+  const [pendingRemove, setPendingRemove] = useState<SavedWord | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<SavedWord[] | null>(null);
+  const examWords = words.filter((word) => word.examId === filter);
+  const dueWords = examWords.filter((word) => isReviewDue(word.nextReviewAt));
   const filtered = words.filter(
     (word) =>
       word.examId === filter && word.word.includes(search.toLowerCase()),
   );
 
+  const confirmRemove = async () => {
+    if (!pendingRemove || removing) return;
+    setRemoving(true);
+    try {
+      await onRemove(pendingRemove);
+      setPendingRemove(null);
+    } finally {
+      setRemoving(false);
+    }
+  };
+
   return (
     <View style={styles.screen}>
       <ScrollView
         contentContainerStyle={styles.screenContent}
-        stickyHeaderIndices={[2]}
+        stickyHeaderIndices={[3]}
         showsVerticalScrollIndicator={false}
       >
         <Header
@@ -1168,6 +1399,38 @@ function WordsScreen({
             <Text style={styles.streakCircleLabel}>天</Text>
           </View>
         </View>
+        <Pressable
+          accessibilityLabel="开始记忆卡复习"
+          disabled={examWords.length === 0}
+          onPress={() =>
+            setReviewQueue((dueWords.length ? dueWords : examWords).slice(0, 30))
+          }
+          style={({ pressed }) => [
+            styles.memoryReviewBanner,
+            pressed && styles.cardPressed,
+            examWords.length === 0 && styles.disabledButton,
+          ]}
+        >
+          <View style={styles.memoryReviewBannerIcon}>
+            <Sparkles size={23} color={colors.accent} />
+          </View>
+          <View style={styles.flexOne}>
+            <Text style={styles.memoryReviewBannerTitle}>记忆卡复习</Text>
+            <Text style={styles.memoryReviewBannerText}>
+              {examWords.length === 0
+                ? "先在阅读中标记生词，再开始记忆练习"
+                : dueWords.length
+                  ? `${dueWords.length} 个生词已到复习时间`
+                  : "今天的到期任务已完成，可自由练习"}
+            </Text>
+          </View>
+          <View style={styles.memoryReviewBannerAction}>
+            <Text style={styles.memoryReviewBannerActionText}>
+              {dueWords.length ? "开始" : "练习"}
+            </Text>
+            <ChevronRight size={16} color="#fff" />
+          </View>
+        </Pressable>
         <View style={styles.stickyArea}>
           <ScrollView
             horizontal
@@ -1259,10 +1522,12 @@ function WordsScreen({
                         <Volume2 size={17} color={colors.primary} />
                       </Pressable>
                       <Pressable
-                        onPress={() => onRemove(item)}
+                        accessibilityLabel={`移出生词库：${item.word}`}
+                        accessibilityHint="打开移出生词库确认框"
+                        onPress={() => setPendingRemove(item)}
                         style={styles.miniRoundButton}
                       >
-                        <MoreHorizontal size={18} color={colors.inkMuted} />
+                        <X size={18} color={colors.inkMuted} />
                       </Pressable>
                     </View>
                   </View>
@@ -1293,6 +1558,69 @@ function WordsScreen({
           </View>
         )}
       </ScrollView>
+
+      <Modal
+        visible={!!pendingRemove}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !removing && setPendingRemove(null)}
+      >
+        <View style={styles.confirmModalRoot}>
+          <Pressable
+            accessibilityLabel="取消移除"
+            style={styles.confirmBackdrop}
+            onPress={() => !removing && setPendingRemove(null)}
+          />
+          <View
+            accessibilityRole="alert"
+            accessibilityViewIsModal
+            style={styles.confirmDialog}
+          >
+            <View style={styles.confirmIcon}>
+              <BookMarked size={22} color={colors.danger} />
+            </View>
+            <Text style={styles.confirmTitle}>移出生词库？</Text>
+            <Text style={styles.confirmText}>
+              “{pendingRemove?.word}” 将不再在文章中高亮。
+            </Text>
+            <View style={styles.confirmActions}>
+              <Pressable
+                disabled={removing}
+                onPress={() => setPendingRemove(null)}
+                style={({ pressed }) => [
+                  styles.confirmCancelButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.confirmCancelText}>取消</Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel={`确认移除 ${pendingRemove?.word ?? "生词"}`}
+                disabled={removing}
+                onPress={confirmRemove}
+                style={({ pressed }) => [
+                  styles.confirmRemoveButton,
+                  pressed && styles.pressed,
+                  removing && styles.disabledButton,
+                ]}
+              >
+                {removing ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={styles.confirmRemoveText}>移除</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+      {reviewQueue && (
+        <MemoryReviewSession
+          words={reviewQueue}
+          onClose={() => setReviewQueue(null)}
+          onReview={onReview}
+        />
+      )}
     </View>
   );
 }
@@ -1644,6 +1972,11 @@ export default function App() {
       examId: article.examId,
       articleId: article.id,
       savedAt: new Date().toISOString(),
+      memoryStage: 0,
+      nextReviewAt: new Date().toISOString(),
+      lastReviewedAt: null,
+      reviewCount: 0,
+      lapseCount: 0,
     };
     const next = existing
       ? savedWords.filter(
@@ -1671,33 +2004,60 @@ export default function App() {
     }
   };
 
-  const removeWord = (word: SavedWord) => {
-    Alert.alert("移出生词库？", `“${word.word}” 将不再在文章中高亮。`, [
-      { text: "取消", style: "cancel" },
-      {
-        text: "移除",
-        style: "destructive",
-        onPress: async () => {
-          const next = savedWords.filter(
-            (item) => !(item.examId === word.examId && item.word === word.word),
-          );
-          setSavedWords(next);
-          await storage.setWords(next);
-          if (apiOnline) {
-            try {
-              await api.removeWord(word);
-            } catch (error) {
-              setSavedWords(savedWords);
-              await storage.setWords(savedWords);
-              Alert.alert(
-                "移除失败",
-                error instanceof Error ? error.message : "请稍后再试",
-              );
-            }
-          }
-        },
-      },
-    ]);
+  const removeWord = async (word: SavedWord) => {
+    const next = savedWords.filter(
+      (item) => !(item.examId === word.examId && item.word === word.word),
+    );
+    setSavedWords(next);
+    await storage.setWords(next);
+    if (apiOnline) {
+      try {
+        await api.removeWord(word);
+      } catch (error) {
+        setSavedWords(savedWords);
+        await storage.setWords(savedWords);
+        Alert.alert(
+          "移除失败",
+          error instanceof Error ? error.message : "请稍后再试",
+        );
+      }
+    }
+  };
+
+  const reviewWord = async (word: SavedWord, rating: MemoryRating) => {
+    const schedule = scheduleMemoryReview(word.memoryStage ?? 0, rating);
+    const optimistic: SavedWord = {
+      ...word,
+      ...schedule,
+      reviewCount: (word.reviewCount ?? 0) + 1,
+      lapseCount: (word.lapseCount ?? 0) + (rating === "again" ? 1 : 0),
+    };
+    const replaceWord = (items: SavedWord[], replacement: SavedWord) =>
+      items.map((item) =>
+        item.examId === word.examId && item.word === word.word
+          ? replacement
+          : item,
+      );
+    const optimisticWords = replaceWord(savedWords, optimistic);
+    setSavedWords(optimisticWords);
+    await storage.setWords(optimisticWords);
+
+    if (!apiOnline) return optimistic;
+    try {
+      const synced = await api.reviewWord(word, rating);
+      const syncedWords = replaceWord(optimisticWords, synced);
+      setSavedWords(syncedWords);
+      await storage.setWords(syncedWords);
+      return synced;
+    } catch (error) {
+      setSavedWords(savedWords);
+      await storage.setWords(savedWords);
+      Alert.alert(
+        "复习记录同步失败",
+        error instanceof Error ? error.message : "请稍后再试",
+      );
+      throw error;
+    }
   };
 
   const submitArticle = async (article: Article, answers: number[]) => {
@@ -1801,6 +2161,7 @@ export default function App() {
         words={savedWords}
         activeExam={examId}
         onRemove={removeWord}
+        onReview={reviewWord}
       />
     ) : (
       <ProfileScreen examId={examId} onChangeExam={selectExam} />
@@ -2336,6 +2697,10 @@ const styles = StyleSheet.create({
     textDecorationStyle: "dotted",
     textDecorationColor: "#A9B8B3",
   },
+  webInteractiveWord: {
+    cursor: "pointer",
+    userSelect: "none",
+  },
   markedWord: { backgroundColor: colors.highlight, color: "#4B3A13" },
   pressedWord: {
     backgroundColor: "#D9EEE8",
@@ -2591,6 +2956,73 @@ const styles = StyleSheet.create({
   },
   saveWordText: { color: "#fff", fontSize: 15, fontWeight: "700" },
   removeWordText: { color: colors.danger },
+  confirmModalRoot: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: spacing.lg,
+  },
+  confirmBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(20,30,27,0.46)",
+  },
+  confirmDialog: {
+    width: "100%",
+    maxWidth: 400,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: 22,
+    alignItems: "center",
+    ...shadows.card,
+  },
+  confirmIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFF4F1",
+    marginBottom: 14,
+  },
+  confirmTitle: {
+    color: colors.ink,
+    fontSize: 20,
+    fontWeight: "800",
+  },
+  confirmText: {
+    color: colors.inkMuted,
+    fontSize: 13,
+    lineHeight: 21,
+    textAlign: "center",
+    marginTop: 8,
+  },
+  confirmActions: {
+    width: "100%",
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 22,
+  },
+  confirmCancelButton: {
+    flex: 1,
+    height: 46,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceMuted,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  confirmCancelText: { color: colors.ink, fontSize: 14, fontWeight: "700" },
+  confirmRemoveButton: {
+    flex: 1,
+    height: 46,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.danger,
+  },
+  confirmRemoveText: { color: "#fff", fontSize: 14, fontWeight: "800" },
+  disabledButton: { opacity: 0.58 },
 
   historySummary: {
     backgroundColor: colors.primary,
@@ -2654,6 +3086,214 @@ const styles = StyleSheet.create({
   },
   historyArticleTitle: { color: colors.ink, fontSize: 14, fontWeight: "700" },
   historyArticleMeta: { color: colors.inkMuted, fontSize: 10, marginTop: 4 },
+  memoryReviewSafe: { flex: 1, backgroundColor: colors.background },
+  memoryReviewHeader: {
+    height: 62,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  memoryReviewHeaderCenter: { flex: 1, alignItems: "center" },
+  memoryReviewHeaderTitle: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  memoryReviewHeaderMeta: {
+    color: colors.inkMuted,
+    fontSize: 10,
+    marginTop: 2,
+  },
+  memoryReviewHeaderSpacer: { width: 42 },
+  memoryProgressTrack: { height: 4, backgroundColor: colors.surfaceMuted },
+  memoryProgressFill: { height: 4, backgroundColor: colors.accent },
+  memoryReviewContent: {
+    alignItems: "center",
+    paddingTop: 28,
+    paddingBottom: 40,
+    paddingHorizontal: 14,
+  },
+  memoryReviewEyebrow: {
+    color: colors.inkMuted,
+    fontSize: 11,
+    fontWeight: "700",
+    marginBottom: 14,
+  },
+  memoryCard: {
+    minHeight: 370,
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: colors.line,
+    paddingHorizontal: 28,
+    paddingVertical: 30,
+    alignItems: "center",
+    justifyContent: "center",
+    ...shadows.card,
+  },
+  memoryCardRevealed: {
+    borderColor: "#B9D8D0",
+    justifyContent: "flex-start",
+  },
+  memoryCardBadge: {
+    alignSelf: "center",
+    borderRadius: radius.pill,
+    paddingHorizontal: 11,
+    paddingVertical: 5,
+    backgroundColor: colors.primarySoft,
+    marginBottom: 24,
+  },
+  memoryCardBadgeText: {
+    color: colors.primary,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  memoryCardWord: {
+    color: colors.ink,
+    fontSize: 42,
+    lineHeight: 52,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  memoryCardPhonetic: {
+    color: colors.primary,
+    fontSize: 15,
+    marginTop: 5,
+    textAlign: "center",
+  },
+  memoryAudioButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 13,
+    height: 38,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primarySoft,
+    marginTop: 18,
+  },
+  memoryAudioText: { color: colors.primary, fontSize: 11, fontWeight: "700" },
+  memoryRevealHint: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 56,
+  },
+  memoryRevealHintText: { color: colors.inkMuted, fontSize: 12 },
+  memoryAnswer: {
+    width: "100%",
+    alignItems: "center",
+    marginTop: 24,
+    paddingTop: 22,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+  },
+  memoryTranslation: {
+    color: colors.ink,
+    fontSize: 20,
+    lineHeight: 30,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  memoryPartOfSpeech: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "800",
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.pill,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    marginTop: 10,
+  },
+  memoryDefinition: {
+    color: colors.inkMuted,
+    fontSize: 13,
+    lineHeight: 21,
+    textAlign: "center",
+    marginTop: 10,
+  },
+  memoryExample: {
+    width: "100%",
+    backgroundColor: "#F4F7F5",
+    borderRadius: radius.md,
+    padding: 14,
+    marginTop: 18,
+  },
+  memoryExampleEnglish: { color: colors.ink, fontSize: 13, lineHeight: 21 },
+  memoryExampleChinese: {
+    color: colors.inkMuted,
+    fontSize: 12,
+    lineHeight: 20,
+    marginTop: 5,
+  },
+  memoryRatingArea: { marginTop: 22 },
+  memoryRatingTitle: {
+    color: colors.ink,
+    fontSize: 13,
+    fontWeight: "800",
+    textAlign: "center",
+    marginBottom: 11,
+  },
+  memoryRatingGrid: { flexDirection: "row", flexWrap: "wrap", gap: 9 },
+  memoryRatingButton: {
+    flexBasis: "47%",
+    flexGrow: 1,
+    minHeight: 78,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    justifyContent: "center",
+  },
+  memoryRating_again: { backgroundColor: "#FFF2EF", borderColor: "#F0C5BD" },
+  memoryRating_hard: { backgroundColor: "#FFF8E8", borderColor: "#F0D59C" },
+  memoryRating_good: { backgroundColor: "#EDF7F4", borderColor: "#B9D8D0" },
+  memoryRating_easy: { backgroundColor: "#EEF3FF", borderColor: "#C3D1EC" },
+  memoryRatingLabel: { color: colors.ink, fontSize: 14, fontWeight: "800" },
+  memoryRatingHint: { color: colors.inkMuted, fontSize: 9, marginTop: 2 },
+  memoryRatingInterval: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "800",
+    marginTop: 5,
+  },
+  memoryComplete: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 32,
+  },
+  memoryCompleteIcon: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    marginBottom: 22,
+  },
+  memoryCompleteTitle: { color: colors.ink, fontSize: 25, fontWeight: "800" },
+  memoryCompleteText: {
+    maxWidth: 460,
+    color: colors.inkMuted,
+    fontSize: 13,
+    lineHeight: 22,
+    textAlign: "center",
+    marginTop: 10,
+  },
+  memoryCompleteButton: {
+    height: 50,
+    minWidth: 190,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    marginTop: 26,
+  },
+  memoryCompleteButtonText: { color: "#fff", fontSize: 14, fontWeight: "800" },
   wordStatsCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -2689,6 +3329,41 @@ const styles = StyleSheet.create({
     lineHeight: 15,
   },
   streakCircleLabel: { color: colors.inkMuted, fontSize: 8 },
+  memoryReviewBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 15,
+    borderRadius: radius.lg,
+    backgroundColor: colors.primary,
+    marginBottom: 20,
+    ...shadows.card,
+  },
+  memoryReviewBannerIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.12)",
+  },
+  memoryReviewBannerTitle: { color: "#fff", fontSize: 14, fontWeight: "800" },
+  memoryReviewBannerText: {
+    color: "#CBE0DA",
+    fontSize: 10,
+    lineHeight: 16,
+    marginTop: 3,
+  },
+  memoryReviewBannerAction: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+    borderRadius: radius.pill,
+    paddingHorizontal: 11,
+    height: 34,
+    backgroundColor: "rgba(255,255,255,0.14)",
+  },
+  memoryReviewBannerActionText: { color: "#fff", fontSize: 11, fontWeight: "800" },
   stickyArea: { backgroundColor: colors.background, paddingBottom: 12 },
   examFilters: { gap: 8, paddingRight: 20 },
   filterPill: {

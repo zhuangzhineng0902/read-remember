@@ -85,6 +85,11 @@ export function createDatabase(filename: string): AppDatabase {
       example_zh TEXT NOT NULL DEFAULT '',
       article_id TEXT NOT NULL REFERENCES articles(id),
       saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      memory_stage INTEGER NOT NULL DEFAULT 0,
+      next_review_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_reviewed_at TEXT,
+      review_count INTEGER NOT NULL DEFAULT 0,
+      lapse_count INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY(user_id, exam_id, word)
     );
 
@@ -188,6 +193,16 @@ export function createDatabase(filename: string): AppDatabase {
   ensureColumn("vocabulary", "part_of_speech", "part_of_speech TEXT NOT NULL DEFAULT ''");
   ensureColumn("vocabulary", "example_en", "example_en TEXT NOT NULL DEFAULT ''");
   ensureColumn("vocabulary", "example_zh", "example_zh TEXT NOT NULL DEFAULT ''");
+  ensureColumn("vocabulary", "memory_stage", "memory_stage INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("vocabulary", "next_review_at", "next_review_at TEXT NOT NULL DEFAULT ''");
+  ensureColumn("vocabulary", "last_reviewed_at", "last_reviewed_at TEXT");
+  ensureColumn("vocabulary", "review_count", "review_count INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("vocabulary", "lapse_count", "lapse_count INTEGER NOT NULL DEFAULT 0");
+  db.exec(`
+    UPDATE vocabulary
+    SET next_review_at = saved_at
+    WHERE next_review_at = '' OR next_review_at IS NULL
+  `);
 
   seedContent(db);
   return db;

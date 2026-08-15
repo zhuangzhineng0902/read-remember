@@ -21,6 +21,7 @@ import {
   pronunciationAudio,
 } from "./pronunciation";
 import { ensureDailyPushForUser, localDateParts } from "./daily-push";
+import { scheduleMemoryReview } from "../../client/src/memory";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -453,6 +454,11 @@ export function createApp(
         v.exam_id AS examId,
         v.article_id AS articleId,
         v.saved_at AS savedAt,
+        v.memory_stage AS memoryStage,
+        v.next_review_at AS nextReviewAt,
+        v.last_reviewed_at AS lastReviewedAt,
+        v.review_count AS reviewCount,
+        v.lapse_count AS lapseCount,
         a.title AS articleTitle
       FROM vocabulary v
       JOIN articles a ON a.id = v.article_id
@@ -532,12 +538,75 @@ export function createApp(
       SELECT word, phonetic, translation, definition_en AS definition,
         part_of_speech AS partOfSpeech, example_en AS example,
         example_zh AS exampleTranslation, exam_id AS examId,
-        article_id AS articleId, saved_at AS savedAt
+        article_id AS articleId, saved_at AS savedAt,
+        memory_stage AS memoryStage, next_review_at AS nextReviewAt,
+        last_reviewed_at AS lastReviewedAt, review_count AS reviewCount,
+        lapse_count AS lapseCount
       FROM vocabulary WHERE user_id = ? AND exam_id = ? AND word = ?
     `,
       )
       .get(user.id, body.examId, word);
     res.status(201).json({ data: saved });
+  });
+
+  authenticated.post("/vocabulary/:word/review", (req, res) => {
+    const body = parse(
+      z.object({
+        examId: z.enum(examIds),
+        rating: z.enum(["again", "hard", "good", "easy"]),
+      }),
+      req.body,
+    );
+    const word = decodeURIComponent(req.params.word).trim().toLowerCase();
+    if (!/^[a-z][a-z'-]{0,79}$/.test(word)) {
+      throw new ApiError(400, "INVALID_WORD", "生词格式不合法");
+    }
+    const user = currentUser(res);
+    const current = db
+      .prepare(
+        `SELECT memory_stage AS memoryStage, review_count AS reviewCount,
+          lapse_count AS lapseCount
+         FROM vocabulary
+         WHERE user_id = ? AND exam_id = ? AND word = ?`,
+      )
+      .get(user.id, body.examId, word) as
+      | { memoryStage: number; reviewCount: number; lapseCount: number }
+      | undefined;
+    if (!current) {
+      throw new ApiError(404, "WORD_NOT_FOUND", "生词不存在");
+    }
+
+    const schedule = scheduleMemoryReview(current.memoryStage, body.rating);
+    db.prepare(
+      `UPDATE vocabulary
+       SET memory_stage = ?, next_review_at = ?, last_reviewed_at = ?,
+         review_count = ?, lapse_count = ?
+       WHERE user_id = ? AND exam_id = ? AND word = ?`,
+    ).run(
+      schedule.memoryStage,
+      schedule.nextReviewAt,
+      schedule.lastReviewedAt,
+      current.reviewCount + 1,
+      current.lapseCount + (body.rating === "again" ? 1 : 0),
+      user.id,
+      body.examId,
+      word,
+    );
+
+    const reviewed = db
+      .prepare(
+        `SELECT word, phonetic, translation, definition_en AS definition,
+          part_of_speech AS partOfSpeech, example_en AS example,
+          example_zh AS exampleTranslation, exam_id AS examId,
+          article_id AS articleId, saved_at AS savedAt,
+          memory_stage AS memoryStage, next_review_at AS nextReviewAt,
+          last_reviewed_at AS lastReviewedAt, review_count AS reviewCount,
+          lapse_count AS lapseCount
+         FROM vocabulary
+         WHERE user_id = ? AND exam_id = ? AND word = ?`,
+      )
+      .get(user.id, body.examId, word);
+    res.json({ data: reviewed });
   });
 
   authenticated.delete("/vocabulary/:word", (req, res) => {

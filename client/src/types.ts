@@ -37,10 +37,17 @@ export type WordInfo = {
   exampleTranslation?: string;
 };
 
+export type MemoryRating = "again" | "hard" | "good" | "easy";
+
 export type SavedWord = WordInfo & {
   examId: ExamId;
   articleId: string;
   savedAt: string;
+  memoryStage?: number;
+  nextReviewAt?: string;
+  lastReviewedAt?: string | null;
+  reviewCount?: number;
+  lapseCount?: number;
 };
 
 export type HistoryRecord = {

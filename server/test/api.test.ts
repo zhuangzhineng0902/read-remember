@@ -188,6 +188,19 @@ test("vocabulary can be added, filtered, and removed", async () => {
   const detailedVocabulary = (await detailedList.json()).data;
   assert.equal(detailedVocabulary[0].partOfSpeech, "adjective");
   assert.equal(detailedVocabulary[0].exampleTranslation, "幼树容易受到干旱影响。");
+  assert.equal(detailedVocabulary[0].memoryStage, 0);
+  assert.equal(detailedVocabulary[0].reviewCount, 0);
+
+  const reviewed = await request("/api/v1/vocabulary/vulnerable/review", {
+    method: "POST",
+    body: JSON.stringify({ examId: "toefl", rating: "good" }),
+  });
+  assert.equal(reviewed.status, 200);
+  const reviewedWord = (await reviewed.json()).data;
+  assert.equal(reviewedWord.memoryStage, 1);
+  assert.equal(reviewedWord.reviewCount, 1);
+  assert.equal(reviewedWord.lapseCount, 0);
+  assert.ok(Date.parse(reviewedWord.nextReviewAt) > Date.now());
 
   const removed = await request("/api/v1/vocabulary/vulnerable?examId=toefl", {
     method: "DELETE",

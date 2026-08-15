@@ -1,5 +1,11 @@
 import { NativeModules, Platform } from "react-native";
-import { Article, ExamId, HistoryRecord, SavedWord } from "./types";
+import {
+  Article,
+  ExamId,
+  HistoryRecord,
+  MemoryRating,
+  SavedWord,
+} from "./types";
 
 type ApiEnvelope<T> = { data: T };
 
@@ -230,5 +236,14 @@ export const api = {
     request<void>(
       `/vocabulary/${encodeURIComponent(word.word)}?examId=${word.examId}`,
       { method: "DELETE" },
+    ),
+
+  reviewWord: (word: Pick<SavedWord, "word" | "examId">, rating: MemoryRating) =>
+    request<SavedWord>(
+      `/vocabulary/${encodeURIComponent(word.word)}/review`,
+      {
+        method: "POST",
+        body: JSON.stringify({ examId: word.examId, rating }),
+      },
     ),
 };
