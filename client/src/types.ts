@@ -70,6 +70,40 @@ export type HistoryRecord = {
   date: string;
   examId: ExamId;
   articleIds: string[];
+  articles?: HistoryArticle[];
+};
+
+export type HistoryArticle = Pick<
+  Article,
+  "id" | "examId" | "year" | "title" | "eyebrow" | "readMinutes" | "difficulty"
+> & {
+  completed: boolean;
+  score: number | null;
+  total: number | null;
+  readingRatio: number;
+};
+
+export type LearningStats = {
+  completedArticles: number;
+  learningDays: number;
+  readingSeconds: number;
+  streakDays: number;
+  savedWords: number;
+  dueWords: number;
+  answeredQuestions: number;
+  correctAnswers: number;
+};
+
+export type MistakeItem = {
+  id: string;
+  article: Omit<Article, "paragraphs" | "questions">;
+  questionId: number;
+  prompt: string;
+  options: string[];
+  selectedAnswer: number;
+  correctAnswer: number;
+  explanation: string;
+  completedAt: string;
 };
 
 export type ReaderSettings = {
@@ -100,5 +134,12 @@ export type UserProfile = {
 export type ReadingProgress = {
   offsetY: number;
   ratio: number;
+  readingSeconds?: number;
+  updatedAt: string;
+};
+
+export type UserPreferences = {
+  learning: LearningSettings;
+  reader: ReaderSettings;
   updatedAt: string;
 };

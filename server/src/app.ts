@@ -21,7 +21,11 @@ import {
   serializeArticleSummary,
   type ArticleRow,
 } from "./serializers";
-import type { Question } from "../../client/src/types";
+import type {
+  LearningSettings,
+  Question,
+  ReaderSettings,
+} from "../../client/src/types";
 import {
   lookupPronunciation,
   pronunciationAudio,
@@ -32,6 +36,33 @@ import { scheduleMemoryReview } from "../../client/src/memory";
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const usernamePattern = /^[a-zA-Z0-9_]{3,24}$/;
+
+const defaultLearningSettings: LearningSettings = {
+  dailyReminderEnabled: true,
+  reminderTime: "20:30",
+  pronunciationAccent: "us",
+  dailyGoal: 3,
+};
+const defaultReaderSettings: ReaderSettings = {
+  fontScale: 1,
+  lineSpacing: "standard",
+  fontFamily: "serif",
+  pageTone: "paper",
+  columnWidth: "standard",
+};
+const learningSettingsSchema = z.object({
+  dailyReminderEnabled: z.boolean(),
+  reminderTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  pronunciationAccent: z.enum(["us", "uk"]),
+  dailyGoal: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+});
+const readerSettingsSchema = z.object({
+  fontScale: z.number().min(0.8).max(1.4),
+  lineSpacing: z.enum(["compact", "standard", "relaxed"]),
+  fontFamily: z.enum(["serif", "sans"]),
+  pageTone: z.enum(["paper", "white", "green"]),
+  columnWidth: z.enum(["narrow", "standard", "wide"]),
+});
 
 const publicUserSelect = `
   id, device_id AS deviceId, token, exam_id AS examId,
@@ -113,6 +144,28 @@ function articleAnswerState(
     results,
     updatedAt: stored
       ? sqliteTimestampToIso(stored.updatedAt)
+      : new Date(0).toISOString(),
+  };
+}
+
+function userPreferences(db: AppDatabase, userId: string) {
+  const row = db
+    .prepare(
+      `SELECT learning_json AS learningJson, reader_json AS readerJson,
+        updated_at AS updatedAt FROM user_preferences WHERE user_id = ?`,
+    )
+    .get(userId) as
+    | { learningJson: string; readerJson: string; updatedAt: string }
+    | undefined;
+  return {
+    learning: row
+      ? { ...defaultLearningSettings, ...JSON.parse(row.learningJson) }
+      : defaultLearningSettings,
+    reader: row
+      ? { ...defaultReaderSettings, ...JSON.parse(row.readerJson) }
+      : defaultReaderSettings,
+    updatedAt: row
+      ? sqliteTimestampToIso(row.updatedAt)
       : new Date(0).toISOString(),
   };
 }
@@ -346,6 +399,91 @@ export function createApp(
 
   authenticated.use(requireRegistered);
 
+  authenticated.get("/users/me/preferences", (_req, res) => {
+    const user = currentUser(res);
+    res.json({ data: userPreferences(db, user.id) });
+  });
+
+  authenticated.patch("/users/me/preferences", (req, res) => {
+    const body = parse(
+      z.object({
+        learning: learningSettingsSchema.optional(),
+        reader: readerSettingsSchema.optional(),
+      }),
+      req.body,
+    );
+    const user = currentUser(res);
+    const current = userPreferences(db, user.id);
+    const learning = body.learning ?? current.learning;
+    const reader = body.reader ?? current.reader;
+    db.prepare(
+      `INSERT INTO user_preferences(user_id, learning_json, reader_json)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         learning_json = excluded.learning_json,
+         reader_json = excluded.reader_json,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).run(user.id, JSON.stringify(learning), JSON.stringify(reader));
+    res.json({ data: userPreferences(db, user.id) });
+  });
+
+  authenticated.get("/users/me/stats", (_req, res) => {
+    const user = currentUser(res);
+    const totals = db
+      .prepare(
+        `SELECT COUNT(*) AS completedArticles,
+          COUNT(DISTINCT date(p.completed_at)) AS learningDays,
+          COALESCE(SUM(p.total), 0) AS answeredQuestions,
+          COALESCE(SUM(p.score), 0) AS correctAnswers,
+          COALESCE(SUM(CASE
+            WHEN COALESCE(r.reading_seconds, 0) > 0 THEN r.reading_seconds
+            ELSE a.read_minutes * 60
+          END), 0) AS readingSeconds
+         FROM article_progress p
+         JOIN articles a ON a.id = p.article_id
+         LEFT JOIN article_reading_states r
+           ON r.user_id = p.user_id AND r.article_id = p.article_id
+         WHERE p.user_id = ?`,
+      )
+      .get(user.id) as {
+      completedArticles: number;
+      learningDays: number;
+      answeredQuestions: number;
+      correctAnswers: number;
+      readingSeconds: number;
+    };
+    const vocabulary = db
+      .prepare(
+        `SELECT COUNT(*) AS savedWords,
+          SUM(CASE WHEN datetime(next_review_at) <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END) AS dueWords
+         FROM vocabulary WHERE user_id = ?`,
+      )
+      .get(user.id) as { savedWords: number; dueWords: number | null };
+    const activityDates = db
+      .prepare(
+        `SELECT DISTINCT date(completed_at) AS date
+         FROM article_progress WHERE user_id = ? ORDER BY date DESC`,
+      )
+      .all(user.id) as Array<{ date: string }>;
+    const activeDates = new Set(activityDates.map((item) => item.date));
+    const cursor = new Date();
+    const today = cursor.toISOString().slice(0, 10);
+    if (!activeDates.has(today)) cursor.setUTCDate(cursor.getUTCDate() - 1);
+    let streakDays = 0;
+    while (activeDates.has(cursor.toISOString().slice(0, 10))) {
+      streakDays += 1;
+      cursor.setUTCDate(cursor.getUTCDate() - 1);
+    }
+    res.json({
+      data: {
+        ...totals,
+        streakDays,
+        savedWords: vocabulary.savedWords,
+        dueWords: vocabulary.dueWords ?? 0,
+      },
+    });
+  });
+
   authenticated.patch("/users/me/exam", (req, res) => {
     const body = parse(z.object({ examId: z.enum(examIds) }), req.body);
     const user = currentUser(res);
@@ -560,6 +698,70 @@ export function createApp(
     res.json({ data: serializeArticle(row) });
   });
 
+  authenticated.get("/articles/:id/reading-state", (req, res) => {
+    const user = currentUser(res);
+    if (!hasArticleAccess(db, user.id, req.params.id)) {
+      throw new ApiError(403, "ARTICLE_NOT_DELIVERED", "该文章尚未推送给当前用户");
+    }
+    const state = db
+      .prepare(
+        `SELECT offset_y AS offsetY, ratio, reading_seconds AS readingSeconds,
+          updated_at AS updatedAt
+         FROM article_reading_states WHERE user_id = ? AND article_id = ?`,
+      )
+      .get(user.id, req.params.id) as
+      | { offsetY: number; ratio: number; readingSeconds: number; updatedAt: string }
+      | undefined;
+    res.json({
+      data: state
+        ? { ...state, updatedAt: sqliteTimestampToIso(state.updatedAt) }
+        : {
+            offsetY: 0,
+            ratio: 0,
+            readingSeconds: 0,
+            updatedAt: new Date(0).toISOString(),
+          },
+    });
+  });
+
+  authenticated.put("/articles/:id/reading-state", (req, res) => {
+    const body = parse(
+      z.object({
+        offsetY: z.number().min(0).max(1_000_000),
+        ratio: z.number().min(0).max(1),
+        sessionSeconds: z.number().int().min(0).max(3600).default(0),
+      }),
+      req.body,
+    );
+    const user = currentUser(res);
+    if (!hasArticleAccess(db, user.id, req.params.id)) {
+      throw new ApiError(403, "ARTICLE_NOT_DELIVERED", "该文章尚未推送给当前用户");
+    }
+    db.prepare(
+      `INSERT INTO article_reading_states(
+        user_id, article_id, offset_y, ratio, reading_seconds
+       ) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, article_id) DO UPDATE SET
+         offset_y = excluded.offset_y,
+         ratio = excluded.ratio,
+         reading_seconds = article_reading_states.reading_seconds + excluded.reading_seconds,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).run(user.id, req.params.id, body.offsetY, body.ratio, body.sessionSeconds);
+    const state = db
+      .prepare(
+        `SELECT offset_y AS offsetY, ratio, reading_seconds AS readingSeconds,
+          updated_at AS updatedAt
+         FROM article_reading_states WHERE user_id = ? AND article_id = ?`,
+      )
+      .get(user.id, req.params.id) as {
+      offsetY: number;
+      ratio: number;
+      readingSeconds: number;
+      updatedAt: string;
+    };
+    res.json({ data: { ...state, updatedAt: sqliteTimestampToIso(state.updatedAt) } });
+  });
+
   authenticated.get("/articles/:id/answers", (req, res) => {
     const user = currentUser(res);
     if (!hasArticleAccess(db, user.id, req.params.id)) {
@@ -664,6 +866,17 @@ export function createApp(
     }));
     const score = results.filter((item) => item.correct).length;
     db.prepare(
+      `INSERT INTO article_attempts(
+        user_id, article_id, answers_json, score, total
+       ) VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      user.id,
+      row.id,
+      JSON.stringify(body.answers),
+      score,
+      questions.length,
+    );
+    db.prepare(
       `
       INSERT INTO article_progress(user_id, article_id, answers_json, score, total)
       VALUES (?, ?, ?, ?, ?)
@@ -719,10 +932,13 @@ export function createApp(
         ${articleSelect},
         p.score,
         p.total,
-        p.completed_at AS completedAt
+        p.completed_at AS completedAt,
+        r.ratio AS readingRatio,
+        r.reading_seconds AS readingSeconds
       FROM deliveries d
       JOIN articles a ON a.id = d.article_id
       LEFT JOIN article_progress p ON p.user_id = d.user_id AND p.article_id = d.article_id
+      LEFT JOIN article_reading_states r ON r.user_id = d.user_id AND r.article_id = d.article_id
       WHERE ${conditions.join(" AND ")}
       ORDER BY d.delivery_date DESC, d.slot ASC
       LIMIT ? OFFSET ?
@@ -735,6 +951,8 @@ export function createApp(
         score: number | null;
         total: number | null;
         completedAt: string | null;
+        readingRatio: number | null;
+        readingSeconds: number | null;
       }
     >;
 
@@ -744,7 +962,13 @@ export function createApp(
         slot: row.slot,
         article: serializeArticleSummary(row),
         progress: row.completedAt
-          ? { score: row.score, total: row.total, completedAt: row.completedAt }
+          ? {
+              score: row.score,
+              total: row.total,
+              completedAt: row.completedAt,
+              readingRatio: row.readingRatio ?? 0,
+              readingSeconds: row.readingSeconds ?? 0,
+            }
           : null,
       })),
       pagination: {
@@ -753,6 +977,44 @@ export function createApp(
         hasMore: rows.length === query.limit,
       },
     });
+  });
+
+  authenticated.get("/mistakes", (req, res) => {
+    const user = currentUser(res);
+    const rows = db
+      .prepare(
+        `SELECT ${articleSelect}, p.answers_json AS answersJson,
+          p.completed_at AS completedAt
+         FROM article_progress p
+         JOIN articles a ON a.id = p.article_id
+         WHERE p.user_id = ?
+         ORDER BY p.completed_at DESC`,
+      )
+      .all(user.id) as unknown as Array<
+      ArticleRow & { answersJson: string; completedAt: string }
+    >;
+    const mistakes = rows.flatMap((row) => {
+      const questions = JSON.parse(row.questionsJson) as Question[];
+      const answers = JSON.parse(row.answersJson) as number[];
+      return questions.flatMap((question, questionId) =>
+        answers[questionId] === question.answer
+          ? []
+          : [
+              {
+                id: `${row.id}:${questionId}`,
+                article: serializeArticleSummary(row),
+                questionId,
+                prompt: question.prompt,
+                options: question.options,
+                selectedAnswer: answers[questionId],
+                correctAnswer: question.answer,
+                explanation: question.explanation,
+                completedAt: sqliteTimestampToIso(row.completedAt),
+              },
+            ],
+      );
+    });
+    res.json({ data: mistakes });
   });
 
   authenticated.get("/vocabulary", (req, res) => {

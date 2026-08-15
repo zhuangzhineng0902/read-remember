@@ -60,19 +60,23 @@ export const storage = {
     readJson<ReaderSettings | null>(KEYS.readerSettings, null),
   setReaderSettings: (settings: ReaderSettings) =>
     AsyncStorage.setItem(KEYS.readerSettings, JSON.stringify(settings)),
-  async getReadingProgress(articleId: string) {
+  async getReadingProgress(userId: string, articleId: string) {
     const progress = await readJson<Record<string, ReadingProgress>>(
       KEYS.readingProgress,
       {},
     );
-    return progress[articleId] ?? null;
+    return progress[`${userId}:${articleId}`] ?? null;
   },
-  async setReadingProgress(articleId: string, value: ReadingProgress) {
+  async setReadingProgress(
+    userId: string,
+    articleId: string,
+    value: ReadingProgress,
+  ) {
     const progress = await readJson<Record<string, ReadingProgress>>(
       KEYS.readingProgress,
       {},
     );
-    progress[articleId] = value;
+    progress[`${userId}:${articleId}`] = value;
     await AsyncStorage.setItem(KEYS.readingProgress, JSON.stringify(progress));
   },
   async getArticleAnswerState(userId: string, articleId: string) {

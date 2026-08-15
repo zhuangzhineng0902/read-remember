@@ -207,6 +207,27 @@ test("anonymous account can register, login, and update profile", async () => {
     }),
   });
   assert.equal(relogin.status, 200);
+
+  const preferences = await request("/api/v1/users/me/preferences", {
+    method: "PATCH",
+    body: JSON.stringify({
+      learning: {
+        dailyReminderEnabled: true,
+        reminderTime: "08:00",
+        pronunciationAccent: "uk",
+        dailyGoal: 2,
+      },
+      reader: {
+        fontScale: 1.1,
+        lineSpacing: "relaxed",
+        fontFamily: "sans",
+        pageTone: "green",
+        columnWidth: "wide",
+      },
+    }),
+  });
+  assert.equal(preferences.status, 200);
+  assert.equal((await preferences.json()).data.learning.dailyGoal, 2);
 });
 
 test("daily delivery is idempotent and never repeats across dates", async () => {
@@ -256,9 +277,30 @@ test("article answers can be submitted and appear in history", async () => {
   assert.equal(restoredDraftData.submitted, false);
   assert.deepEqual(restoredDraftData.answers, draftAnswers);
 
+  const readingState = await request(
+    `/api/v1/articles/${articleId}/reading-state`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ offsetY: 480, ratio: 0.6, sessionSeconds: 95 }),
+    },
+  );
+  assert.equal(readingState.status, 200);
+  assert.equal((await readingState.json()).data.readingSeconds, 95);
+
+  const storedQuestions = JSON.parse(
+    (
+      db
+        .prepare("SELECT questions_json AS questionsJson FROM articles WHERE id = ?")
+        .get(articleId) as { questionsJson: string }
+    ).questionsJson,
+  ) as Array<{ answer: number; options: string[] }>;
+  const wrongAnswers = storedQuestions.map(
+    (question) => (question.answer + 1) % question.options.length,
+  );
+
   const completion = await request(`/api/v1/articles/${articleId}/complete`, {
     method: "POST",
-    body: JSON.stringify({ answers: article.questions.map(() => 0) }),
+    body: JSON.stringify({ answers: wrongAnswers }),
   });
   assert.equal(completion.status, 200);
   assert.equal((await completion.json()).data.total, article.questions.length);
@@ -271,8 +313,17 @@ test("article answers can be submitted and appear in history", async () => {
   assert.equal(restoredCompletionData.results.length, article.questions.length);
   assert.deepEqual(
     restoredCompletionData.answers,
-    article.questions.map(() => 0),
+    wrongAnswers,
   );
+
+  const stats = await request("/api/v1/users/me/stats");
+  const statsData = (await stats.json()).data;
+  assert.equal(statsData.completedArticles, 1);
+  assert.equal(statsData.readingSeconds, 95);
+  assert.equal(statsData.correctAnswers, 0);
+
+  const mistakes = await request("/api/v1/mistakes");
+  assert.equal((await mistakes.json()).data.length, article.questions.length);
 
   const history = await request("/api/v1/history");
   const historyData = (await history.json()).data;

@@ -7,9 +7,15 @@ import {
   ArticleAnswerState,
   ExamId,
   HistoryRecord,
+  LearningSettings,
+  LearningStats,
   MemoryRating,
+  MistakeItem,
+  ReaderSettings,
+  ReadingProgress,
   SavedWord,
   UserProfile,
+  UserPreferences,
 } from "./types";
 
 type ApiEnvelope<T> = { data: T };
@@ -68,7 +74,13 @@ type HistoryItem = {
   date: string;
   slot: number;
   article: ArticleSummary;
-  progress: { score: number; total: number; completedAt: string } | null;
+  progress: {
+    score: number;
+    total: number;
+    completedAt: string;
+    readingRatio: number;
+    readingSeconds: number;
+  } | null;
 };
 
 function hostnameFrom(value?: string | null) {
@@ -293,6 +305,21 @@ export const api = {
       body: JSON.stringify({ examId }),
     }),
 
+  getPreferences: () => request<UserPreferences>("/users/me/preferences"),
+
+  updatePreferences: (input: {
+    learning?: LearningSettings;
+    reader?: ReaderSettings;
+  }) =>
+    request<UserPreferences>("/users/me/preferences", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+
+  getLearningStats: () => request<LearningStats>("/users/me/stats"),
+
+  getMistakes: () => request<MistakeItem[]>("/mistakes"),
+
   async getDaily(date?: string): Promise<Article[]> {
     const query = date ? `?date=${encodeURIComponent(date)}` : "";
     const daily = await request<{
@@ -311,6 +338,25 @@ export const api = {
       await request<ApiArticle>(`/articles/${encodeURIComponent(id)}`),
     );
   },
+
+  getReadingProgress: (id: string) =>
+    request<ReadingProgress & { readingSeconds: number }>(
+      `/articles/${encodeURIComponent(id)}/reading-state`,
+    ),
+
+  saveReadingProgress: (
+    id: string,
+    input: Pick<ReadingProgress, "offsetY" | "ratio"> & {
+      sessionSeconds?: number;
+    },
+  ) =>
+    request<ReadingProgress & { readingSeconds: number }>(
+      `/articles/${encodeURIComponent(id)}/reading-state`,
+      {
+        method: "PUT",
+        body: JSON.stringify(input),
+      },
+    ),
 
   getPushes: () => request<ManualPush[]>("/pushes"),
 
@@ -352,8 +398,16 @@ export const api = {
         date: item.date,
         examId: item.article.examId,
         articleIds: [],
+        articles: [],
       };
       record.articleIds.push(item.article.id);
+      record.articles?.push({
+        ...item.article,
+        completed: Boolean(item.progress),
+        score: item.progress?.score ?? null,
+        total: item.progress?.total ?? null,
+        readingRatio: item.progress?.readingRatio ?? 0,
+      });
       grouped.set(key, record);
       if (item.progress) completedIds.push(item.article.id);
     }

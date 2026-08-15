@@ -289,10 +289,18 @@ const vocabulary: Record<string, [string, string]> = {
 
 export function lookupWord(raw: string): WordInfo {
   const word = raw.toLowerCase().replace(/[^a-z'-]/g, "");
-  const entry = vocabulary[word];
+  const candidates = [
+    word,
+    word.endsWith("ies") ? `${word.slice(0, -3)}y` : "",
+    word.endsWith("es") ? word.slice(0, -2) : "",
+    word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : "",
+    word.endsWith("ed") ? word.slice(0, -2) : "",
+    word.endsWith("ing") ? word.slice(0, -3) : "",
+  ].filter(Boolean);
+  const entry = candidates.map((candidate) => vocabulary[candidate]).find(Boolean);
   return {
     word,
-    phonetic: entry?.[0] ?? "/ pronunciation /",
+    phonetic: entry?.[0] ?? "",
     translation: entry?.[1] ?? "正在查询中文释义…",
   };
 }

@@ -13,6 +13,17 @@ const DICTIONARY_TIMEOUT_MS = 4_000;
 const TRANSLATION_TIMEOUT_MS = 3_500;
 const AUDIO_TIMEOUT_MS = 4_000;
 
+function lexicalCandidates(word: string) {
+  return [
+    word,
+    word.endsWith("ies") ? `${word.slice(0, -3)}y` : "",
+    word.endsWith("es") ? word.slice(0, -2) : "",
+    word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : "",
+    word.endsWith("ed") ? word.slice(0, -2) : "",
+    word.endsWith("ing") ? word.slice(0, -3) : "",
+  ].filter((candidate, index, items) => candidate && items.indexOf(candidate) === index);
+}
+
 export type PronunciationAccent = "us" | "uk";
 
 type CachedPronunciation = {
@@ -299,17 +310,27 @@ async function lookupPronunciationUncached(
       : Promise.resolve("");
 
   let entries: DictionaryEntry[] = [];
-  try {
-    const response = await fetch(`${DICTIONARY_API}/${encodeURIComponent(word)}`, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(DICTIONARY_TIMEOUT_MS),
-    });
-    if (response.ok) {
-      const payload: unknown = await response.json();
-      entries = Array.isArray(payload) ? (payload as DictionaryEntry[]) : [];
+  let resolvedWord = word;
+  for (const candidate of lexicalCandidates(word)) {
+    try {
+      const response = await fetch(
+        `${DICTIONARY_API}/${encodeURIComponent(candidate)}`,
+        {
+          headers: { accept: "application/json" },
+          signal: AbortSignal.timeout(DICTIONARY_TIMEOUT_MS),
+        },
+      );
+      if (response.ok) {
+        const payload: unknown = await response.json();
+        entries = Array.isArray(payload) ? (payload as DictionaryEntry[]) : [];
+        if (entries.length > 0) {
+          resolvedWord = candidate;
+          break;
+        }
+      }
+    } catch {
+      if (prior) return publicResult(prior, true);
     }
-  } catch {
-    if (prior) return publicResult(prior, true);
   }
 
   const { candidates: dictionaryAudio, selected, text } = phoneticCandidates(
@@ -331,7 +352,7 @@ async function lookupPronunciationUncached(
   });
   const audioCandidates: AudioCandidate[] = [
     ...matchingDictionaryAudio.map(toAudioCandidate),
-    alternateAudioCandidate(word, accent),
+    alternateAudioCandidate(resolvedWord, accent),
     ...otherDictionaryAudio.map(toAudioCandidate),
   ];
   const downloadedAudio = includeAudio

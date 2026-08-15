@@ -5,6 +5,7 @@ import {
   Animated,
   Easing,
   FlatList,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
@@ -54,6 +55,7 @@ import {
   lookupWord,
 } from "./src/data";
 import { storage } from "./src/storage";
+import { syncDailyReminder } from "./src/notifications";
 import { colors, radius, shadows, spacing } from "./src/theme";
 import { LongPressWord } from "./src/components/LongPressWord";
 import {
@@ -68,7 +70,9 @@ import {
   ExamId,
   HistoryRecord,
   LearningSettings,
+  LearningStats,
   MemoryRating,
+  MistakeItem,
   ReaderSettings,
   SavedWord,
   UserProfile,
@@ -107,6 +111,17 @@ const DEFAULT_LEARNING_SETTINGS: LearningSettings = {
   reminderTime: "20:30",
   pronunciationAccent: "us",
   dailyGoal: 3,
+};
+
+const EMPTY_LEARNING_STATS: LearningStats = {
+  completedArticles: 0,
+  learningDays: 0,
+  readingSeconds: 0,
+  streakDays: 0,
+  savedWords: 0,
+  dueWords: 0,
+  answeredQuestions: 0,
+  correctAnswers: 0,
 };
 
 const USE_NATIVE_DRIVER = Platform.OS !== "web";
@@ -413,6 +428,7 @@ function AccountSheet({
   onClose,
   onAuthenticated,
   onProfileUpdated,
+  onLogout,
 }: {
   user: UserProfile | null;
   deviceId: string;
@@ -421,6 +437,7 @@ function AccountSheet({
   onClose: () => void;
   onAuthenticated: (session: UserProfile & { token: string }) => Promise<void>;
   onProfileUpdated: (profile: UserProfile) => void;
+  onLogout: () => void;
 }) {
   const { width } = useWindowDimensions();
   const tablet = width >= 768;
@@ -537,14 +554,15 @@ function AccountSheet({
     <Modal
       visible
       transparent
-      animationType={tablet ? "fade" : "slide"}
+      animationType="fade"
       onRequestClose={() => dismissible && onClose()}
       statusBarTranslucent
     >
-      <View
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={[
           styles.nativeModalRoot,
-          tablet && styles.nativeModalRootDesktop,
+          styles.accountModalRoot,
         ]}
       >
         {dismissible ? (
@@ -559,7 +577,6 @@ function AccountSheet({
             tablet && styles.accountSheetDesktop,
           ]}
         >
-          {!tablet && <View style={styles.nativeSheetHandle} />}
           <View style={styles.nativeSheetHeader}>
             <View style={styles.flexOne}>
               <Text style={styles.nativeSheetTitle}>{formTitle}</Text>
@@ -637,7 +654,7 @@ function AccountSheet({
                 <TextInput
                   value={email}
                   onChangeText={setEmail}
-                  placeholder="用于找回与账号通知"
+                  placeholder="用于账号联系"
                   placeholderTextColor="#98A09D"
                   style={styles.accountInput}
                   autoCapitalize="none"
@@ -740,11 +757,21 @@ function AccountSheet({
               >
                 <Text style={styles.accountSwitchText}>登录其他账号</Text>
               </Pressable>
+              <Pressable
+                accessibilityLabel="退出当前账号"
+                onPress={onLogout}
+                style={({ pressed }) => [
+                  styles.accountLogoutButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.accountLogoutText}>退出当前账号</Text>
+              </Pressable>
               </View>
             )}
           </ScrollView>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -1036,6 +1063,7 @@ function TodayScreen({
   examId,
   daily,
   dailyGoal,
+  streakDays,
   manualPushes,
   completed,
   onOpen,
@@ -1045,6 +1073,7 @@ function TodayScreen({
   examId: ExamId;
   daily: Article[];
   dailyGoal: LearningSettings["dailyGoal"];
+  streakDays: number;
   manualPushes: ManualPush[];
   completed: string[];
   onOpen: (a: Article) => void;
@@ -1083,7 +1112,7 @@ function TodayScreen({
           </View>
           <View style={styles.streakPill}>
             <Flame size={15} color={colors.accent} fill={colors.accent} />
-            <Text style={styles.streakText}>连续 7 天</Text>
+            <Text style={styles.streakText}>连续 {streakDays} 天</Text>
           </View>
         </View>
         <View style={styles.progressTrack}>
@@ -1285,11 +1314,14 @@ function ReaderScreen({
   sequencePosition,
   sequenceTotal,
   navigatingArticle,
+  initialReaderSettings,
+  practiceMode,
   onPreviousArticle,
   onNextArticle,
   onBack,
   onToggleWord,
   onSubmit,
+  onChangeReaderSettings,
 }: {
   userId: string;
   article: Article;
@@ -1299,11 +1331,14 @@ function ReaderScreen({
   sequencePosition: number;
   sequenceTotal: number;
   navigatingArticle: boolean;
+  initialReaderSettings: ReaderSettings;
+  practiceMode: boolean;
   onPreviousArticle?: () => void;
   onNextArticle?: () => void;
   onBack: () => void;
   onToggleWord: (word: WordInfo, article: Article) => void;
   onSubmit: (article: Article, answers: number[]) => Promise<AnswerResult[]>;
+  onChangeReaderSettings: (settings: ReaderSettings) => void;
 }) {
   const { width, height } = useWindowDimensions();
   const reducedMotion = useReducedMotion();
@@ -1312,6 +1347,7 @@ function ReaderScreen({
   const scrollProgressRef = useRef(0);
   const questionsOffsetRef = useRef(0);
   const scrollSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const readingSyncAtRef = useRef(Date.now());
   const answerSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingAnswersRef = useRef<Array<number | null> | null>(null);
   const selectedAnswersRef = useRef<Record<number, number>>({});
@@ -1344,7 +1380,7 @@ function ReaderScreen({
     (AppNotice & { kind: "incomplete" | "submit-error" }) | null
   >(null);
   const [readerSettings, setReaderSettings] = useState<ReaderSettings>(
-    DEFAULT_READER_SETTINGS,
+    initialReaderSettings,
   );
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [showReaderHint, setShowReaderHint] = useState(false);
@@ -1417,6 +1453,28 @@ function ReaderScreen({
     setSelectedAnswers(restored);
     setSubmitted(state.submitted);
     setAnswerResults(state.submitted ? state.results : []);
+  };
+
+  const persistReadingState = (offsetY: number, ratio: number) => {
+    const now = Date.now();
+    const sessionSeconds = Math.max(
+      0,
+      Math.min(3600, Math.floor((now - readingSyncAtRef.current) / 1000)),
+    );
+    readingSyncAtRef.current = now;
+    const localProgress = {
+      offsetY,
+      ratio,
+      updatedAt: new Date(now).toISOString(),
+    };
+    void storage.setReadingProgress(userId, article.id, localProgress);
+    void api
+      .saveReadingProgress(article.id, {
+        offsetY,
+        ratio,
+        sessionSeconds,
+      })
+      .catch(() => undefined);
   };
 
   useEffect(() => {
@@ -1510,25 +1568,45 @@ function ReaderScreen({
   useEffect(() => {
     let active = true;
     Promise.all([
-      storage.getReaderSettings(),
-      storage.getReadingProgress(article.id),
+      storage.getReadingProgress(userId, article.id),
+      api.getReadingProgress(article.id).catch(() => null),
       storage.getReaderHintSeen(),
-    ]).then(([settings, progress, hintSeen]) => {
+    ]).then(([localProgress, remoteProgress, hintSeen]) => {
       if (!active) return;
-      if (settings) setReaderSettings({ ...DEFAULT_READER_SETTINGS, ...settings });
+      const progress =
+        !localProgress
+          ? remoteProgress
+          : !remoteProgress
+            ? localProgress
+            : Date.parse(localProgress.updatedAt) > Date.parse(remoteProgress.updatedAt)
+              ? localProgress
+              : remoteProgress;
+      setReaderSettings(initialReaderSettings);
       setRestoredOffset(progress?.offsetY ?? 0);
       setReadingProgress(progress?.ratio ?? 0);
       scrollProgressRef.current = progress?.ratio ?? 0;
+      readingSyncAtRef.current = Date.now();
       setShowReaderHint(!hintSeen);
     });
     return () => {
       active = false;
     };
-  }, [article.id]);
+  }, [article.id, initialReaderSettings, userId]);
 
   useEffect(() => {
     let active = true;
     setAnswersRestored(false);
+    if (practiceMode) {
+      selectedAnswersRef.current = {};
+      setSelectedAnswers({});
+      setSubmitted(false);
+      setAnswerResults([]);
+      setReaderTab("article");
+      setAnswersRestored(true);
+      return () => {
+        active = false;
+      };
+    }
     Promise.allSettled([
       storage.getArticleAnswerState(userId, article.id),
       api.getArticleAnswerState(article.id),
@@ -1570,20 +1648,14 @@ function ReaderScreen({
     return () => {
       active = false;
     };
-  }, [article.id, userId]);
+  }, [article.id, practiceMode, userId]);
 
   useEffect(
     () => () => {
       if (scrollSaveTimerRef.current) clearTimeout(scrollSaveTimerRef.current);
-      if (scrollOffsetRef.current > 0) {
-        void storage.setReadingProgress(article.id, {
-          offsetY: scrollOffsetRef.current,
-          ratio: scrollProgressRef.current,
-          updatedAt: new Date().toISOString(),
-        });
-      }
+      persistReadingState(scrollOffsetRef.current, scrollProgressRef.current);
     },
-    [article.id],
+    [article.id, userId],
   );
 
   useEffect(
@@ -1634,6 +1706,7 @@ function ReaderScreen({
   const updateReaderSettings = (next: ReaderSettings) => {
     setReaderSettings(next);
     void storage.setReaderSettings(next);
+    onChangeReaderSettings(next);
   };
 
   const dismissReaderHint = () => {
@@ -1828,6 +1901,20 @@ function ReaderScreen({
     }
   };
 
+  const beginRetry = () => {
+    selectedAnswersRef.current = {};
+    setSelectedAnswers({});
+    setAnswerResults([]);
+    setSubmitted(false);
+    setReaderTab("article");
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({
+        y: Math.max(0, questionsOffsetRef.current - 20),
+        animated: true,
+      });
+    });
+  };
+
   const closeReader = () => {
     if (reducedMotion) {
       onBack();
@@ -1968,12 +2055,8 @@ function ReaderScreen({
           setReadingProgress(ratio);
           if (scrollSaveTimerRef.current) clearTimeout(scrollSaveTimerRef.current);
           scrollSaveTimerRef.current = setTimeout(() => {
-            void storage.setReadingProgress(article.id, {
-              offsetY,
-              ratio,
-              updatedAt: new Date().toISOString(),
-            });
-          }, 500);
+            persistReadingState(offsetY, ratio);
+          }, 900);
         }}
         contentContainerStyle={[
           styles.readerScroll,
@@ -2290,6 +2373,11 @@ function ReaderScreen({
                   </View>
                 );
               })}
+              {submitted && (
+                <Pressable onPress={beginRetry} style={styles.retryArticleButton}>
+                  <Text style={styles.retryArticleButtonText}>重新练习这篇文章</Text>
+                </Pressable>
+              )}
               </View>
             )}
           </Animated.View>
@@ -2390,7 +2478,9 @@ function ReaderScreen({
             <View style={styles.wordTop}>
               <View>
                 <Text style={styles.wordTitle}>{selectedWord.word}</Text>
-                <Text style={styles.phonetic}>{selectedWord.phonetic}</Text>
+                <Text style={styles.phonetic}>
+                  {selectedWord.phonetic || "音标查询中"}
+                </Text>
               </View>
               <View style={styles.wordActions}>
                 <Pressable
@@ -2781,20 +2871,40 @@ function ReaderScreen({
 
 function HistoryScreen({
   history,
+  mistakes,
+  stats,
   onOpen,
 }: {
   history: HistoryRecord[];
-  onOpen: (articleId: string) => void;
+  mistakes: MistakeItem[];
+  stats: LearningStats;
+  onOpen: (articleId: string, retry?: boolean) => void;
 }) {
-  const records = history.length
-    ? history
-    : [
-        {
-          date: formatDateKey(),
-          examId: "toefl" as ExamId,
-          articleIds: getDailyArticles("toefl").map((a) => a.id),
-        },
-      ];
+  const [mode, setMode] = useState<"history" | "mistakes">("history");
+  const [filter, setFilter] = useState<"all" | "completed" | "pending">("all");
+  const records = history
+    .map((record) => {
+      const historyArticles =
+        record.articles ??
+        record.articleIds.flatMap((id) => {
+          const article = articles.find((item) => item.id === id);
+          return article
+            ? [{ ...article, completed: false, score: null, total: null, readingRatio: 0 }]
+            : [];
+        });
+      return {
+        ...record,
+        articles: historyArticles.filter((article) =>
+          filter === "all"
+            ? true
+            : filter === "completed"
+              ? article.completed
+              : !article.completed,
+        ),
+      };
+    })
+    .filter((record) => record.articles.length > 0);
+  const readingMinutes = Math.round(stats.readingSeconds / 60);
   return (
     <ScrollView
       style={styles.screen}
@@ -2812,64 +2922,132 @@ function HistoryScreen({
       />
       <View style={styles.historySummary}>
         <View>
-          <Text style={styles.summaryValue}>
-            {new Set(history.flatMap((h) => h.articleIds)).size}
-          </Text>
+          <Text style={styles.summaryValue}>{stats.completedArticles}</Text>
           <Text style={styles.summaryLabel}>累计阅读</Text>
         </View>
         <View style={styles.summaryDivider} />
         <View>
-          <Text style={styles.summaryValue}>{history.length}</Text>
+          <Text style={styles.summaryValue}>{stats.learningDays}</Text>
           <Text style={styles.summaryLabel}>学习天数</Text>
         </View>
         <View style={styles.summaryDivider} />
         <View>
-          <Text style={styles.summaryValue}>
-            {Math.max(0, history.flatMap((h) => h.articleIds).length * 6)}
-          </Text>
+          <Text style={styles.summaryValue}>{readingMinutes}</Text>
           <Text style={styles.summaryLabel}>阅读分钟</Text>
         </View>
       </View>
-      {records.map((record) => (
-        <View
-          key={`${record.date}-${record.examId}`}
-          style={styles.historyGroup}
-        >
-          <View style={styles.historyDateRow}>
-            <View style={styles.timelineDot} />
-            <Text style={styles.historyDate}>
-              {record.date === formatDateKey() ? "今天" : record.date}
+      <View style={styles.historyModeTabs}>
+        {([
+          ["history", "阅读记录"],
+          ["mistakes", `错题本 ${mistakes.length}`],
+        ] as const).map(([id, label]) => (
+          <Pressable
+            key={id}
+            onPress={() => setMode(id)}
+            style={[styles.historyModeTab, mode === id && styles.historyModeTabActive]}
+          >
+            <Text style={[styles.historyModeText, mode === id && styles.historyModeTextActive]}>
+              {label}
             </Text>
-            <Text style={styles.historyExam}>
-              {getExam(record.examId).name}
-            </Text>
-          </View>
-          {record.articleIds.map((id) => {
-            const article = articles.find((item) => item.id === id);
-            if (!article) return null;
-            return (
+          </Pressable>
+        ))}
+      </View>
+      {mode === "history" ? (
+        <>
+          <View style={styles.historyFilters}>
+            {([
+              ["all", "全部"],
+              ["completed", "已完成"],
+              ["pending", "未完成"],
+            ] as const).map(([id, label]) => (
               <Pressable
                 key={id}
-                onPress={() => onOpen(article.id)}
-                style={styles.historyArticle}
+                onPress={() => setFilter(id)}
+                style={[styles.historyFilter, filter === id && styles.historyFilterActive]}
               >
-                <View style={styles.historyArticleIcon}>
-                  <BookOpen size={18} color={colors.primary} />
-                </View>
-                <View style={styles.flexOne}>
-                  <Text style={styles.historyArticleTitle}>
-                    {article.title}
-                  </Text>
-                  <Text style={styles.historyArticleMeta}>
-                    {article.eyebrow} · {article.readMinutes} 分钟
-                  </Text>
-                </View>
-                <ChevronRight size={18} color={colors.inkMuted} />
+                <Text style={[styles.historyFilterText, filter === id && styles.historyFilterTextActive]}>
+                  {label}
+                </Text>
               </Pressable>
-            );
-          })}
+            ))}
+          </View>
+          {records.length === 0 && (
+            <View style={styles.historyEmpty}>
+              <BookOpen size={28} color={colors.inkMuted} />
+              <Text style={styles.historyEmptyTitle}>暂无符合条件的文章</Text>
+              <Text style={styles.historyEmptyText}>完成一篇阅读后会自动出现在这里</Text>
+            </View>
+          )}
+          {records.map((record) => (
+            <View key={`${record.date}-${record.examId}`} style={styles.historyGroup}>
+              <View style={styles.historyDateRow}>
+                <View style={styles.timelineDot} />
+                <Text style={styles.historyDate}>
+                  {record.date === formatDateKey() ? "今天" : record.date}
+                </Text>
+                <Text style={styles.historyExam}>{getExam(record.examId).name}</Text>
+              </View>
+              {record.articles.map((article) => (
+                <Pressable
+                  key={article.id}
+                  onPress={() => onOpen(article.id)}
+                  style={styles.historyArticle}
+                >
+                  <View style={styles.historyArticleIcon}>
+                    <BookOpen size={18} color={colors.primary} />
+                  </View>
+                  <View style={styles.flexOne}>
+                    <Text style={styles.historyArticleTitle}>{article.title}</Text>
+                    <Text style={styles.historyArticleMeta}>
+                      {article.eyebrow} · {article.readMinutes} 分钟
+                    </Text>
+                  </View>
+                  <View style={styles.historyArticleStatus}>
+                    <Text style={article.completed ? styles.historyCompletedText : styles.historyPendingText}>
+                      {article.completed
+                        ? `${article.score ?? 0}/${article.total ?? 0}`
+                        : article.readingRatio > 0
+                          ? `${Math.round(article.readingRatio * 100)}%`
+                          : "未开始"}
+                    </Text>
+                    <ChevronRight size={17} color={colors.inkMuted} />
+                  </View>
+                </Pressable>
+              ))}
+            </View>
+          ))}
+        </>
+      ) : mistakes.length === 0 ? (
+        <View style={styles.historyEmpty}>
+          <Check size={28} color={colors.primary} />
+          <Text style={styles.historyEmptyTitle}>目前没有错题</Text>
+          <Text style={styles.historyEmptyText}>继续保持，新的作答结果会自动整理</Text>
         </View>
-      ))}
+      ) : (
+        <View style={styles.mistakeList}>
+          {mistakes.map((mistake) => (
+            <View key={mistake.id} style={styles.mistakeCard}>
+              <Text style={styles.mistakeSource}>{mistake.article.title}</Text>
+              <Text style={styles.mistakePrompt}>{mistake.prompt}</Text>
+              <Text style={styles.mistakeWrong}>
+                你的答案：{String.fromCharCode(65 + mistake.selectedAnswer)} · {mistake.options[mistake.selectedAnswer]}
+              </Text>
+              <Text style={styles.mistakeCorrect}>
+                正确答案：{String.fromCharCode(65 + mistake.correctAnswer)} · {mistake.options[mistake.correctAnswer]}
+              </Text>
+              <Text style={styles.mistakeExplanation}>{mistake.explanation}</Text>
+              <Pressable
+                accessibilityLabel={`重新练习：${mistake.article.title}`}
+                onPress={() => onOpen(mistake.article.id, true)}
+                style={styles.mistakeRetry}
+              >
+                <Text style={styles.mistakeRetryText}>重新练习整篇</Text>
+                <ChevronRight size={16} color={colors.primary} />
+              </Pressable>
+            </View>
+          ))}
+        </View>
+      )}
     </ScrollView>
   );
 }
@@ -2995,7 +3173,11 @@ function MemoryReviewSession({
                 </Text>
               </View>
               <Text style={styles.memoryCardWord}>{current.word}</Text>
-              <Text style={styles.memoryCardPhonetic}>{current.phonetic}</Text>
+              <Text style={styles.memoryCardPhonetic}>
+                {current.phonetic && current.phonetic !== "/ pronunciation /"
+                  ? current.phonetic
+                  : "音标待更新"}
+              </Text>
               <Pressable
                 accessibilityLabel={`播放 ${current.word} 的发音`}
                 onPress={() =>
@@ -3265,7 +3447,9 @@ function WordsScreen({
                     <View>
                       <Text style={styles.wordCardTitle}>{item.word}</Text>
                       <Text style={styles.wordCardPhonetic}>
-                        {item.phonetic}
+                        {item.phonetic && item.phonetic !== "/ pronunciation /"
+                          ? item.phonetic
+                          : "音标待更新"}
                       </Text>
                     </View>
                     <View style={styles.wordCardActions}>
@@ -3717,6 +3901,7 @@ export default function App() {
   const [reader, setReader] = useState<Article | null>(null);
   const [readerQueue, setReaderQueue] = useState<string[]>([]);
   const [readerNavigating, setReaderNavigating] = useState(false);
+  const [readerPracticeMode, setReaderPracticeMode] = useState(false);
   const [savedWords, setSavedWords] = useState<SavedWord[]>([]);
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [completed, setCompleted] = useState<string[]>([]);
@@ -3726,6 +3911,13 @@ export default function App() {
   const [learningSettings, setLearningSettings] = useState<LearningSettings>(
     DEFAULT_LEARNING_SETTINGS,
   );
+  const [readerPreferences, setReaderPreferences] = useState<ReaderSettings>(
+    DEFAULT_READER_SETTINGS,
+  );
+  const [learningStats, setLearningStats] = useState<LearningStats>(
+    EMPTY_LEARNING_STATS,
+  );
+  const [mistakes, setMistakes] = useState<MistakeItem[]>([]);
   const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [currentDeviceId, setCurrentDeviceId] = useState("");
@@ -3742,6 +3934,7 @@ export default function App() {
         deviceId,
         token,
         cachedLearningSettings,
+        cachedReaderSettings,
       ] = await Promise.all([
         storage.getExam(),
         storage.getWords(),
@@ -3750,6 +3943,7 @@ export default function App() {
         storage.getDeviceId(),
         storage.getAuthToken(),
         storage.getLearningSettings(),
+        storage.getReaderSettings(),
       ]);
 
       setExamId(savedExam);
@@ -3761,6 +3955,12 @@ export default function App() {
         setLearningSettings({
           ...DEFAULT_LEARNING_SETTINGS,
           ...cachedLearningSettings,
+        });
+      }
+      if (cachedReaderSettings) {
+        setReaderPreferences({
+          ...DEFAULT_READER_SETTINGS,
+          ...cachedReaderSettings,
         });
       }
       if (savedExam) {
@@ -3789,12 +3989,23 @@ export default function App() {
           setCurrentUser(updated);
         }
         if (savedExam) {
-          const [remoteDaily, remoteHistory, remoteWords, pushes] =
+          const [
+            remoteDaily,
+            remoteHistory,
+            remoteWords,
+            pushes,
+            preferences,
+            stats,
+            remoteMistakes,
+          ] =
             await Promise.all([
               api.getDaily(),
               api.getHistory(),
               api.getVocabulary(),
               api.getPushes(),
+              api.getPreferences(),
+              api.getLearningStats(),
+              api.getMistakes(),
             ]);
           const completedIds = [
             ...new Set([
@@ -3809,10 +4020,17 @@ export default function App() {
           setHistory(remoteHistory.records);
           setCompleted(completedIds);
           setSavedWords(remoteWords);
+          setLearningSettings(preferences.learning);
+          setReaderPreferences(preferences.reader);
+          setLearningStats(stats);
+          setMistakes(remoteMistakes);
+          void syncDailyReminder(preferences.learning).catch(() => undefined);
           await Promise.all([
             storage.setHistory(remoteHistory.records),
             storage.setCompleted(completedIds),
             storage.setWords(remoteWords),
+            storage.setLearningSettings(preferences.learning),
+            storage.setReaderSettings(preferences.reader),
           ]);
         }
         setApiOnline(true);
@@ -3840,17 +4058,141 @@ export default function App() {
     return () => clearInterval(timer);
   }, [apiOnline, examId]);
 
+  useEffect(() => {
+    if (!apiOnline) return;
+    const missing = savedWords
+      .filter(
+        (word) => !word.phonetic || word.phonetic === "/ pronunciation /",
+      )
+      .slice(0, 6);
+    if (missing.length === 0) return;
+    let active = true;
+    Promise.all(
+      missing.map(async (word) => {
+        const result = await api
+          .getPronunciation(
+            word.word,
+            learningSettings.pronunciationAccent,
+            word.example ?? "",
+          )
+          .catch(() => null);
+        if (!result?.phonetic) return null;
+        const enriched: SavedWord = {
+          ...word,
+          phonetic: result.phonetic,
+          translation: result.translation || word.translation,
+          definition: result.definition || word.definition,
+          partOfSpeech: result.partOfSpeech || word.partOfSpeech,
+          example: result.example || word.example,
+          exampleTranslation:
+            result.exampleTranslation || word.exampleTranslation,
+        };
+        await api.saveWord(enriched).catch(() => enriched);
+        return enriched;
+      }),
+    ).then((enriched) => {
+      if (!active) return;
+      const replacements = new Map(
+        enriched
+          .filter((word): word is SavedWord => Boolean(word))
+          .map((word) => [`${word.examId}:${word.word}`, word]),
+      );
+      if (replacements.size === 0) return;
+      setSavedWords((current) => {
+        const next = current.map(
+          (word) => replacements.get(`${word.examId}:${word.word}`) ?? word,
+        );
+        void storage.setWords(next);
+        return next;
+      });
+    });
+    return () => {
+      active = false;
+    };
+  }, [apiOnline, learningSettings.pronunciationAccent, savedWords]);
+
   const updateLearningSettings = (next: LearningSettings) => {
     setLearningSettings(next);
     void storage.setLearningSettings(next);
+    if (apiOnline) {
+      void api.updatePreferences({ learning: next }).catch((error) =>
+        setAppNotice({
+          title: "设置已保存在本机",
+          message: error instanceof Error ? error.message : "账号同步暂时失败",
+        }),
+      );
+    }
+    const permissionRequested =
+      next.dailyReminderEnabled &&
+      (!learningSettings.dailyReminderEnabled ||
+        next.reminderTime !== learningSettings.reminderTime);
+    void syncDailyReminder(next, permissionRequested)
+      .then((status) => {
+        if (status === "unsupported" && permissionRequested) {
+          setAppNotice({
+            title: "提醒将在手机端生效",
+            message: "Web 端不支持系统定时提醒，请在 iOS 或 Android 设备上开启。",
+          });
+        }
+        if (status === "denied" && permissionRequested) {
+          const disabled = { ...next, dailyReminderEnabled: false };
+          setLearningSettings(disabled);
+          void storage.setLearningSettings(disabled);
+          if (apiOnline) void api.updatePreferences({ learning: disabled });
+          setAppNotice({
+            title: "未获得通知权限",
+            message: "请在系统设置中允许拾词发送通知后，再开启每日提醒。",
+          });
+        }
+      })
+      .catch((error) =>
+        setAppNotice({
+          title: "提醒设置失败",
+          message: error instanceof Error ? error.message : "请稍后重试",
+          tone: "error",
+        }),
+      );
+  };
+
+  const updateReaderPreferences = (next: ReaderSettings) => {
+    setReaderPreferences(next);
+    void storage.setReaderSettings(next);
+    if (apiOnline) {
+      void api.updatePreferences({ reader: next }).catch(() => undefined);
+    }
+  };
+
+  const refreshInsights = async () => {
+    if (!apiOnline) return;
+    try {
+      const [stats, remoteMistakes] = await Promise.all([
+        api.getLearningStats(),
+        api.getMistakes(),
+      ]);
+      setLearningStats(stats);
+      setMistakes(remoteMistakes);
+    } catch {
+      // Keep the latest successful insight snapshot while temporarily offline.
+    }
   };
 
   const applyRemoteSnapshot = async () => {
-    const [remoteDaily, remoteHistory, remoteWords, pushes] = await Promise.all([
+    const [
+      remoteDaily,
+      remoteHistory,
+      remoteWords,
+      pushes,
+      preferences,
+      stats,
+      remoteMistakes,
+    ] = await Promise.all([
       api.getDaily(),
       api.getHistory(),
       api.getVocabulary(),
       api.getPushes(),
+      api.getPreferences(),
+      api.getLearningStats(),
+      api.getMistakes(),
     ]);
     const completedIds = [
       ...new Set([
@@ -3865,10 +4207,17 @@ export default function App() {
     setHistory(remoteHistory.records);
     setCompleted(completedIds);
     setSavedWords(remoteWords);
+    setLearningSettings(preferences.learning);
+    setReaderPreferences(preferences.reader);
+    setLearningStats(stats);
+    setMistakes(remoteMistakes);
+    void syncDailyReminder(preferences.learning).catch(() => undefined);
     await Promise.all([
       storage.setHistory(remoteHistory.records),
       storage.setCompleted(completedIds),
       storage.setWords(remoteWords),
+      storage.setLearningSettings(preferences.learning),
+      storage.setReaderSettings(preferences.reader),
     ]);
   };
 
@@ -3882,6 +4231,15 @@ export default function App() {
     await applyRemoteSnapshot();
     setApiOnline(true);
     setAuthRequired(false);
+  };
+
+  const logout = async () => {
+    api.clearAuthentication();
+    await storage.clearAuthToken();
+    setCurrentUser(null);
+    setReader(null);
+    setAccountMode(null);
+    setAuthRequired(true);
   };
 
   const selectExam = async (nextExam: ExamId, navigateToToday = true) => {
@@ -3934,7 +4292,7 @@ export default function App() {
       (item) => item.examId === article.examId && item.word === word.word,
     );
     let enrichedWord = word;
-    if (word.phonetic === "/ pronunciation /") {
+    if (!word.phonetic || word.phonetic === "/ pronunciation /") {
       try {
         const pronunciation = await api.getPronunciation(
           word.word,
@@ -4066,9 +4424,11 @@ export default function App() {
     setCompleted(next);
     await storage.setCompleted(next);
     if (apiOnline) {
-      const [remoteHistory, pushes] = await Promise.all([
+      const [remoteHistory, pushes, stats, remoteMistakes] = await Promise.all([
         api.getHistory(),
         api.getPushes(),
+        api.getLearningStats(),
+        api.getMistakes(),
       ]);
       const completedIds = [
         ...new Set([...remoteHistory.completedIds, article.id]),
@@ -4076,6 +4436,8 @@ export default function App() {
       setHistory(remoteHistory.records);
       setManualPushes(pushes);
       setCompleted(completedIds);
+      setLearningStats(stats);
+      setMistakes(remoteMistakes);
       await Promise.all([
         storage.setHistory(remoteHistory.records),
         storage.setCompleted(completedIds),
@@ -4084,7 +4446,8 @@ export default function App() {
     return results;
   };
 
-  const openHistoryArticle = async (articleId: string) => {
+  const openHistoryArticle = async (articleId: string, retry = false) => {
+    setReaderPracticeMode(retry);
     const defaultQueue = history.flatMap((record) => record.articleIds);
     const queue = defaultQueue.includes(articleId) ? defaultQueue : [articleId];
     const cached = daily.find((item) => item.id === articleId);
@@ -4111,11 +4474,13 @@ export default function App() {
   };
 
   const openDailyArticle = (article: Article) => {
+    setReaderPracticeMode(false);
     setReaderQueue(daily.map((item) => item.id));
     setReader(article);
   };
 
   const openPushedArticle = async (articleId: string) => {
+    setReaderPracticeMode(false);
     const queue = manualPushes.map((push) => push.article.id);
     try {
       const loaded =
@@ -4137,6 +4502,7 @@ export default function App() {
   };
 
   const openWordSourceArticle = async (articleId: string, sourceExam: ExamId) => {
+    setReaderPracticeMode(false);
     const queue = [
       ...new Set(
         savedWords
@@ -4169,6 +4535,7 @@ export default function App() {
     const targetId = readerQueue[readerIndex + offset];
     if (!targetId) return;
     setReaderNavigating(true);
+    setReaderPracticeMode(false);
     try {
       const loaded =
         daily.find((item) => item.id === targetId) ??
@@ -4219,6 +4586,7 @@ export default function App() {
           onClose={() => {}}
           onAuthenticated={handleAuthenticated}
           onProfileUpdated={() => {}}
+          onLogout={() => {}}
         />
       </SafeAreaView>
     );
@@ -4236,15 +4604,21 @@ export default function App() {
           sequencePosition={Math.max(1, readerIndex + 1)}
           sequenceTotal={Math.max(1, readerQueue.length)}
           navigatingArticle={readerNavigating}
+          initialReaderSettings={readerPreferences}
+          practiceMode={readerPracticeMode}
           onPreviousArticle={readerIndex > 0 ? () => void navigateReader(-1) : undefined}
           onNextArticle={
             readerIndex >= 0 && readerIndex < readerQueue.length - 1
               ? () => void navigateReader(1)
               : undefined
           }
-          onBack={() => setReader(null)}
+          onBack={() => {
+            setReader(null);
+            void refreshInsights();
+          }}
           onToggleWord={toggleWord}
           onSubmit={submitArticle}
+          onChangeReaderSettings={updateReaderPreferences}
         />
         <NativeNoticeModal
           notice={appNotice}
@@ -4259,6 +4633,7 @@ export default function App() {
         examId={examId}
         daily={daily}
         dailyGoal={learningSettings.dailyGoal}
+        streakDays={learningStats.streakDays}
         manualPushes={manualPushes}
         completed={completed}
         onOpen={openDailyArticle}
@@ -4266,7 +4641,12 @@ export default function App() {
         onNavigate={setTab}
       />
     ) : tab === "history" ? (
-      <HistoryScreen history={history} onOpen={openHistoryArticle} />
+      <HistoryScreen
+        history={history}
+        mistakes={mistakes}
+        stats={learningStats}
+        onOpen={openHistoryArticle}
+      />
     ) : tab === "words" ? (
       <WordsScreen
         words={savedWords}
@@ -4316,6 +4696,7 @@ export default function App() {
           onClose={() => setAccountMode(null)}
           onAuthenticated={handleAuthenticated}
           onProfileUpdated={setCurrentUser}
+          onLogout={() => void logout()}
         />
       )}
     </SafeAreaView>
@@ -4551,20 +4932,26 @@ const styles = StyleSheet.create({
   nativeNoticePrimaryText: { color: "#fff", fontSize: 14, fontWeight: "800" },
   accountSheet: {
     width: "100%",
-    maxHeight: "94%",
+    maxWidth: 520,
+    maxHeight: "90%",
     backgroundColor: colors.surface,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+    borderRadius: 28,
     paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: Platform.OS === "ios" ? 28 : 20,
+    paddingTop: 22,
+    paddingBottom: 20,
+    ...shadows.card,
+  },
+  accountModalRoot: {
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 24,
   },
   accountSheetDesktop: {
     width: 520,
     maxHeight: "88%",
     borderRadius: 24,
     padding: 24,
-    ...shadows.card,
   },
   accountModeTabs: {
     flexDirection: "row",
@@ -4652,6 +5039,13 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   accountSwitchText: { color: colors.inkMuted, fontSize: 13, fontWeight: "700" },
+  accountLogoutButton: {
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 2,
+  },
+  accountLogoutText: { color: colors.danger, fontSize: 13, fontWeight: "700" },
 
   logoRow: { flexDirection: "row", gap: 12, alignItems: "center" },
   logoMark: {
@@ -5255,6 +5649,17 @@ const styles = StyleSheet.create({
   },
   answerCtaDisabled: { backgroundColor: "#AAB5B1" },
   answerCtaText: { color: "#fff", fontSize: 14, fontWeight: "700" },
+  retryArticleButton: {
+    minHeight: 48,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+    marginTop: 4,
+  },
+  retryArticleButtonText: { color: colors.primary, fontSize: 13, fontWeight: "800" },
   questions: { marginTop: 22, gap: 18 },
   answerIntro: {
     flexDirection: "row",
@@ -5733,6 +6138,37 @@ const styles = StyleSheet.create({
     justifyContent: "space-around",
     marginBottom: 28,
   },
+  historyModeTabs: {
+    flexDirection: "row",
+    padding: 4,
+    borderRadius: 15,
+    backgroundColor: colors.surfaceMuted,
+    marginBottom: 14,
+  },
+  historyModeTab: {
+    flex: 1,
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+  },
+  historyModeTabActive: { backgroundColor: colors.surface, ...shadows.card },
+  historyModeText: { color: colors.inkMuted, fontSize: 13, fontWeight: "700" },
+  historyModeTextActive: { color: colors.primary, fontWeight: "800" },
+  historyFilters: { flexDirection: "row", gap: 8, marginBottom: 20 },
+  historyFilter: {
+    paddingHorizontal: 14,
+    minHeight: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 18,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  historyFilterActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  historyFilterText: { color: colors.inkMuted, fontSize: 12, fontWeight: "700" },
+  historyFilterTextActive: { color: "#fff" },
   summaryValue: {
     color: "#fff",
     fontSize: 24,
@@ -5785,6 +6221,43 @@ const styles = StyleSheet.create({
   },
   historyArticleTitle: { color: colors.ink, fontSize: 14, fontWeight: "700" },
   historyArticleMeta: { color: colors.inkMuted, fontSize: 10, marginTop: 4 },
+  historyArticleStatus: { flexDirection: "row", alignItems: "center", gap: 3 },
+  historyCompletedText: { color: colors.primary, fontSize: 11, fontWeight: "800" },
+  historyPendingText: { color: colors.inkMuted, fontSize: 11, fontWeight: "700" },
+  historyEmpty: {
+    minHeight: 190,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.lg,
+    backgroundColor: colors.surface,
+    padding: 24,
+  },
+  historyEmptyTitle: { color: colors.ink, fontSize: 15, fontWeight: "800", marginTop: 12 },
+  historyEmptyText: { color: colors.inkMuted, fontSize: 11, marginTop: 5, textAlign: "center" },
+  mistakeList: { gap: 12 },
+  mistakeCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  mistakeSource: { color: colors.primary, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 },
+  mistakePrompt: { color: colors.ink, fontSize: 15, lineHeight: 22, fontWeight: "800", marginTop: 8 },
+  mistakeWrong: { color: colors.danger, fontSize: 12, lineHeight: 19, marginTop: 12 },
+  mistakeCorrect: { color: colors.primary, fontSize: 12, lineHeight: 19, marginTop: 4 },
+  mistakeExplanation: { color: colors.inkMuted, fontSize: 11, lineHeight: 18, marginTop: 10 },
+  mistakeRetry: {
+    minHeight: 40,
+    borderRadius: 12,
+    backgroundColor: colors.primarySoft,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    marginTop: 14,
+  },
+  mistakeRetryText: { color: colors.primary, fontSize: 12, fontWeight: "800" },
   memoryReviewSafe: { flex: 1, backgroundColor: colors.background },
   memoryReviewHeader: {
     height: 62,

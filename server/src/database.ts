@@ -86,6 +86,33 @@ export function createDatabase(filename: string): AppDatabase {
       PRIMARY KEY(user_id, article_id)
     );
 
+    CREATE TABLE IF NOT EXISTS user_preferences (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      learning_json TEXT NOT NULL DEFAULT '{}',
+      reader_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS article_reading_states (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+      offset_y REAL NOT NULL DEFAULT 0,
+      ratio REAL NOT NULL DEFAULT 0,
+      reading_seconds INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_id, article_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS article_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+      answers_json TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      total INTEGER NOT NULL,
+      completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS vocabulary (
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       exam_id TEXT NOT NULL REFERENCES exams(id),
@@ -186,6 +213,8 @@ export function createDatabase(filename: string): AppDatabase {
     CREATE INDEX IF NOT EXISTS idx_daily_auto_push_date ON daily_auto_pushes(delivery_date);
     CREATE INDEX IF NOT EXISTS idx_progress_completed ON article_progress(completed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_answer_states_updated ON article_answer_states(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_reading_states_updated ON article_reading_states(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_attempts_user_completed ON article_attempts(user_id, completed_at DESC);
   `);
 
   // CREATE TABLE IF NOT EXISTS does not add columns to an existing local DB.
