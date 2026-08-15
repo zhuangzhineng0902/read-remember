@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   ActivityIndicator,
-  Alert,
   Animated,
   Easing,
   FlatList,
@@ -13,6 +12,7 @@ import {
   ScrollView,
   StatusBar,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   useWindowDimensions,
@@ -64,6 +64,7 @@ import {
   Article,
   ExamId,
   HistoryRecord,
+  LearningSettings,
   MemoryRating,
   ReaderSettings,
   SavedWord,
@@ -95,6 +96,27 @@ const DEFAULT_READER_SETTINGS: ReaderSettings = {
   fontFamily: "serif",
   pageTone: "paper",
   columnWidth: "standard",
+};
+
+const DEFAULT_LEARNING_SETTINGS: LearningSettings = {
+  dailyReminderEnabled: true,
+  reminderTime: "20:30",
+  pronunciationAccent: "us",
+  dailyGoal: 3,
+};
+
+const USE_NATIVE_DRIVER = Platform.OS !== "web";
+
+type ChoiceOption = {
+  id: string;
+  label: string;
+  description?: string;
+};
+
+type AppNotice = {
+  title: string;
+  message: string;
+  tone?: "info" | "error";
 };
 
 const readerTone = {
@@ -140,7 +162,7 @@ function PageTransition({
       toValue: 1,
       duration: 240,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: USE_NATIVE_DRIVER,
     }).start();
   }, [progress, reducedMotion, transitionKey]);
 
@@ -164,6 +186,216 @@ function PageTransition({
     >
       {children}
     </Animated.View>
+  );
+}
+
+function NativeChoiceSheet({
+  visible,
+  title,
+  subtitle,
+  options,
+  selectedId,
+  onSelect,
+  onClose,
+}: {
+  visible: boolean;
+  title: string;
+  subtitle?: string;
+  options: ChoiceOption[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  onClose: () => void;
+}) {
+  const { width } = useWindowDimensions();
+  const tablet = width >= 768;
+
+  return (
+    <Modal
+      animationType={tablet ? "fade" : "slide"}
+      transparent
+      visible={visible}
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <View
+        style={[
+          styles.nativeModalRoot,
+          tablet && styles.nativeModalRootDesktop,
+        ]}
+      >
+        <Pressable
+          accessibilityLabel="关闭选择面板"
+          onPress={onClose}
+          style={styles.nativeModalBackdrop}
+        />
+        <View
+          accessibilityViewIsModal
+          style={[
+            styles.nativeSheet,
+            tablet && styles.nativeSheetDesktop,
+          ]}
+        >
+          {!tablet && <View style={styles.nativeSheetHandle} />}
+          <View style={styles.nativeSheetHeader}>
+            <View style={styles.flexOne}>
+              <Text style={styles.nativeSheetTitle}>{title}</Text>
+              {!!subtitle && (
+                <Text style={styles.nativeSheetSubtitle}>{subtitle}</Text>
+              )}
+            </View>
+            <Pressable
+              accessibilityLabel="关闭"
+              hitSlop={8}
+              onPress={onClose}
+              style={({ pressed }) => [
+                styles.nativeSheetClose,
+                pressed && styles.pressed,
+              ]}
+            >
+              <X size={18} color={colors.inkMuted} />
+            </Pressable>
+          </View>
+          <View style={styles.nativeChoiceList}>
+            {options.map((option) => {
+              const selected = option.id === selectedId;
+              return (
+                <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: selected }}
+                  key={option.id}
+                  onPress={() => onSelect(option.id)}
+                  style={({ pressed }) => [
+                    styles.nativeChoiceItem,
+                    selected && styles.nativeChoiceItemSelected,
+                    pressed && styles.nativeChoiceItemPressed,
+                  ]}
+                >
+                  <View style={styles.flexOne}>
+                    <Text
+                      style={[
+                        styles.nativeChoiceLabel,
+                        selected && styles.nativeChoiceLabelSelected,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                    {!!option.description && (
+                      <Text style={styles.nativeChoiceDescription}>
+                        {option.description}
+                      </Text>
+                    )}
+                  </View>
+                  <View
+                    style={[
+                      styles.nativeChoiceCheck,
+                      selected && styles.nativeChoiceCheckSelected,
+                    ]}
+                  >
+                    {selected && <Check size={15} color="#fff" strokeWidth={3} />}
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function NativeNoticeModal({
+  notice,
+  primaryLabel = "知道了",
+  secondaryLabel,
+  onPrimary,
+  onSecondary,
+  onClose,
+}: {
+  notice: AppNotice | null;
+  primaryLabel?: string;
+  secondaryLabel?: string;
+  onPrimary?: () => void;
+  onSecondary?: () => void;
+  onClose: () => void;
+}) {
+  const { width } = useWindowDimensions();
+  const tablet = width >= 768;
+  if (!notice) return null;
+
+  const tone = notice.tone ?? "info";
+  const primary = () => {
+    onClose();
+    onPrimary?.();
+  };
+  const secondary = () => {
+    onClose();
+    onSecondary?.();
+  };
+
+  return (
+    <Modal
+      animationType={tablet ? "fade" : "slide"}
+      transparent
+      visible
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <View
+        style={[
+          styles.nativeModalRoot,
+          tablet && styles.nativeModalRootDesktop,
+        ]}
+      >
+        <Pressable onPress={onClose} style={styles.nativeModalBackdrop} />
+        <View
+          accessibilityViewIsModal
+          style={[
+            styles.nativeNoticeSheet,
+            tablet && styles.nativeNoticeSheetDesktop,
+          ]}
+        >
+          {!tablet && <View style={styles.nativeSheetHandle} />}
+          <View
+            style={[
+              styles.nativeNoticeIcon,
+              tone === "error" && styles.nativeNoticeIconError,
+            ]}
+          >
+            {tone === "error" ? (
+              <X size={22} color={colors.danger} strokeWidth={2.5} />
+            ) : (
+              <Sparkles size={22} color={colors.primary} />
+            )}
+          </View>
+          <Text style={styles.nativeNoticeTitle}>{notice.title}</Text>
+          <Text style={styles.nativeNoticeText}>{notice.message}</Text>
+          <View style={styles.nativeNoticeActions}>
+            {!!secondaryLabel && (
+              <Pressable
+                onPress={secondary}
+                style={({ pressed }) => [
+                  styles.nativeNoticeSecondary,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.nativeNoticeSecondaryText}>
+                  {secondaryLabel}
+                </Text>
+              </Pressable>
+            )}
+            <Pressable
+              onPress={primary}
+              style={({ pressed }) => [
+                styles.nativeNoticePrimary,
+                pressed && styles.primaryButtonPressed,
+              ]}
+            >
+              <Text style={styles.nativeNoticePrimaryText}>{primaryLabel}</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -453,6 +685,7 @@ function Header({
 function TodayScreen({
   examId,
   daily,
+  dailyGoal,
   manualPushes,
   completed,
   onOpen,
@@ -461,6 +694,7 @@ function TodayScreen({
 }: {
   examId: ExamId;
   daily: Article[];
+  dailyGoal: LearningSettings["dailyGoal"];
   manualPushes: ManualPush[];
   completed: string[];
   onOpen: (a: Article) => void;
@@ -469,6 +703,8 @@ function TodayScreen({
 }) {
   const exam = getExam(examId);
   const done = daily.filter((item) => completed.includes(item.id)).length;
+  const goalDone = Math.min(done, dailyGoal);
+  const remaining = Math.max(0, dailyGoal - goalDone);
 
   return (
     <ScrollView
@@ -490,7 +726,9 @@ function TodayScreen({
           <View>
             <Text style={styles.goalEyebrow}>今日阅读计划</Text>
             <Text style={styles.goalTitle}>
-              {done === 3 ? "今天的计划完成了" : `还剩 ${3 - done} 篇，慢慢来`}
+              {remaining === 0
+                ? "今天的计划完成了"
+                : `还剩 ${remaining} 篇，慢慢来`}
             </Text>
           </View>
           <View style={styles.streakPill}>
@@ -502,12 +740,12 @@ function TodayScreen({
           <View
             style={[
               styles.progressFill,
-              { width: `${Math.max(5, (done / 3) * 100)}%` },
+              { width: `${Math.max(5, (goalDone / dailyGoal) * 100)}%` },
             ]}
           />
         </View>
         <View style={styles.goalBottom}>
-          <Text style={styles.goalProgress}>{done} / 3 篇</Text>
+          <Text style={styles.goalProgress}>{goalDone} / {dailyGoal} 篇</Text>
           <Text style={styles.goalExam}>{exam.name}</Text>
         </View>
       </View>
@@ -518,7 +756,7 @@ function TodayScreen({
           <Text style={styles.sectionSubtitle}>根据你的目标与进度智能匹配</Text>
         </View>
         <View style={styles.countPill}>
-          <Text style={styles.countPillText}>3 篇</Text>
+          <Text style={styles.countPillText}>{daily.length} 篇</Text>
         </View>
       </View>
 
@@ -692,6 +930,7 @@ function ReaderScreen({
   article,
   savedWords,
   completed,
+  pronunciationAccent,
   onBack,
   onToggleWord,
   onSubmit,
@@ -699,6 +938,7 @@ function ReaderScreen({
   article: Article;
   savedWords: SavedWord[];
   completed: boolean;
+  pronunciationAccent: LearningSettings["pronunciationAccent"];
   onBack: () => void;
   onToggleWord: (word: WordInfo, article: Article) => void;
   onSubmit: (article: Article, answers: number[]) => Promise<AnswerResult[]>;
@@ -708,6 +948,7 @@ function ReaderScreen({
   const scrollRef = useRef<ScrollView>(null);
   const scrollOffsetRef = useRef(0);
   const scrollProgressRef = useRef(0);
+  const questionsOffsetRef = useRef(0);
   const scrollSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoredProgressRef = useRef(false);
   const screenTransition = useRef(new Animated.Value(0)).current;
@@ -733,6 +974,9 @@ function ReaderScreen({
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [answerResults, setAnswerResults] = useState<AnswerResult[]>([]);
+  const [readerNotice, setReaderNotice] = useState<
+    (AppNotice & { kind: "incomplete" | "submit-error" }) | null
+  >(null);
   const [readerSettings, setReaderSettings] = useState<ReaderSettings>(
     DEFAULT_READER_SETTINGS,
   );
@@ -797,7 +1041,7 @@ function ReaderScreen({
       damping: 22,
       stiffness: 240,
       mass: 0.9,
-      useNativeDriver: true,
+      useNativeDriver: USE_NATIVE_DRIVER,
     }).start();
   }, [reducedMotion, screenTransition]);
 
@@ -815,13 +1059,13 @@ function ReaderScreen({
         damping: 24,
         stiffness: 280,
         mass: 0.8,
-        useNativeDriver: true,
+        useNativeDriver: USE_NATIVE_DRIVER,
       }),
       Animated.timing(tabContentTransition, {
         toValue: 1,
         duration: 210,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: USE_NATIVE_DRIVER,
       }),
     ]).start();
   }, [readerTab, reducedMotion, tabContentTransition, tabIndicator]);
@@ -839,7 +1083,7 @@ function ReaderScreen({
       damping: 20,
       stiffness: 260,
       mass: 0.78,
-      useNativeDriver: true,
+      useNativeDriver: USE_NATIVE_DRIVER,
     }).start();
   }, [reducedMotion, selectedWord?.word, wordCardTransition]);
 
@@ -861,13 +1105,13 @@ function ReaderScreen({
           toValue: 1,
           duration: 760,
           easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
+          useNativeDriver: USE_NATIVE_DRIVER,
         }),
         Animated.timing(audioPulse, {
           toValue: 0,
           duration: 760,
           easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
+          useNativeDriver: USE_NATIVE_DRIVER,
         }),
       ]),
     );
@@ -964,10 +1208,10 @@ function ReaderScreen({
       if (items.length >= 18) break;
     }
     const timer = setTimeout(() => {
-      void api.prefetchPronunciations(items, 3);
+      void api.prefetchPronunciations(items, 3, pronunciationAccent);
     }, 350);
     return () => clearTimeout(timer);
-  }, [article.id, article.paragraphs]);
+  }, [article.id, article.paragraphs, pronunciationAccent]);
 
   const openWord = (
     token: string,
@@ -987,7 +1231,7 @@ function ReaderScreen({
     api
       .getPronunciation(
         localWord.word,
-        "us",
+        pronunciationAccent,
         sentenceContainingWord(paragraph, localWord.word),
       )
       .then((pronunciation) => {
@@ -1038,7 +1282,7 @@ function ReaderScreen({
       toValue: 0,
       duration: 150,
       easing: Easing.in(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: USE_NATIVE_DRIVER,
     }).start(finish);
   };
 
@@ -1054,7 +1298,7 @@ function ReaderScreen({
       onPlaying: () => setAudioState("playing"),
       onFinished: () => setAudioState("idle"),
       onError: () => setAudioState("error"),
-    });
+    }, pronunciationAccent);
   };
 
   const openAnswers = async () => {
@@ -1063,7 +1307,14 @@ function ReaderScreen({
       return;
     }
     if (!allAnswered) {
-      Alert.alert("还有题目未完成", "请先在文章下方选择每道题的答案。");
+      const unanswered = article.questions.filter(
+        (_, index) => selectedAnswers[index] === undefined,
+      ).length;
+      setReaderNotice({
+        kind: "incomplete",
+        title: `还有 ${unanswered} 道题未完成`,
+        message: "完成全部题目后即可查看答案解析。点击继续，我们会带你回到答题区域。",
+      });
       return;
     }
     setSubmitting(true);
@@ -1076,10 +1327,12 @@ function ReaderScreen({
       setSubmitted(true);
       setReaderTab("answer");
     } catch (error) {
-      Alert.alert(
-        "提交失败",
-        error instanceof Error ? error.message : "请稍后再试",
-      );
+      setReaderNotice({
+        kind: "submit-error",
+        title: "提交失败",
+        message: error instanceof Error ? error.message : "请稍后再试",
+        tone: "error",
+      });
     } finally {
       setSubmitting(false);
     }
@@ -1094,7 +1347,7 @@ function ReaderScreen({
       toValue: 0,
       duration: 180,
       easing: Easing.inOut(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: USE_NATIVE_DRIVER,
     }).start(onBack);
   };
 
@@ -1152,7 +1405,10 @@ function ReaderScreen({
           />
           <Pressable
             onPress={() => setReaderTab("article")}
-            style={styles.readerTab}
+            style={({ pressed }) => [
+              styles.readerTab,
+              pressed && styles.readerTabPressed,
+            ]}
           >
             <Text
               style={[
@@ -1165,7 +1421,10 @@ function ReaderScreen({
           </Pressable>
           <Pressable
             onPress={openAnswers}
-            style={styles.readerTab}
+            style={({ pressed }) => [
+              styles.readerTab,
+              pressed && styles.readerTabPressed,
+            ]}
           >
             <Text
               style={[
@@ -1352,7 +1611,12 @@ function ReaderScreen({
                 </Text>
               ))}
 
-              <View style={styles.practiceHeader}>
+              <View
+                onLayout={({ nativeEvent }) => {
+                  questionsOffsetRef.current = nativeEvent.layout.y;
+                }}
+                style={styles.practiceHeader}
+              >
                 <Text style={styles.practiceEyebrow}>READING QUESTIONS</Text>
                 <Text style={styles.practiceTitle}>根据文章选择正确答案</Text>
                 <Text style={styles.practiceHint}>
@@ -1950,6 +2214,29 @@ function ReaderScreen({
           </View>
         </ScrollView>
       </Modal>
+      <NativeNoticeModal
+        notice={readerNotice}
+        primaryLabel={
+          readerNotice?.kind === "submit-error" ? "重新提交" : "继续答题"
+        }
+        secondaryLabel={
+          readerNotice?.kind === "submit-error" ? "稍后再试" : "留在文章"
+        }
+        onClose={() => setReaderNotice(null)}
+        onPrimary={() => {
+          if (readerNotice?.kind === "submit-error") {
+            void openAnswers();
+            return;
+          }
+          setReaderTab("article");
+          requestAnimationFrame(() => {
+            scrollRef.current?.scrollTo({
+              y: Math.max(0, questionsOffsetRef.current - 20),
+              animated: true,
+            });
+          });
+        }}
+      />
     </AnimatedSafeAreaView>
   );
 }
@@ -2062,10 +2349,12 @@ const memoryRatings: Array<{
 
 function MemoryReviewSession({
   words,
+  pronunciationAccent,
   onClose,
   onReview,
 }: {
   words: SavedWord[];
+  pronunciationAccent: LearningSettings["pronunciationAccent"];
   onClose: () => void;
   onReview: (word: SavedWord, rating: MemoryRating) => Promise<SavedWord>;
 }) {
@@ -2171,7 +2460,9 @@ function MemoryReviewSession({
               <Text style={styles.memoryCardPhonetic}>{current.phonetic}</Text>
               <Pressable
                 accessibilityLabel={`播放 ${current.word} 的发音`}
-                onPress={() => playWord(current.word)}
+                onPress={() =>
+                  playWord(current.word, undefined, pronunciationAccent)
+                }
                 style={styles.memoryAudioButton}
               >
                 <Volume2 size={19} color={colors.primary} />
@@ -2257,11 +2548,13 @@ function MemoryReviewSession({
 function WordsScreen({
   words,
   activeExam,
+  pronunciationAccent,
   onRemove,
   onReview,
 }: {
   words: SavedWord[];
   activeExam: ExamId;
+  pronunciationAccent: LearningSettings["pronunciationAccent"];
   onRemove: (word: SavedWord) => Promise<void>;
   onReview: (word: SavedWord, rating: MemoryRating) => Promise<SavedWord>;
 }) {
@@ -2438,7 +2731,9 @@ function WordsScreen({
                     <View style={styles.wordCardActions}>
                       <Pressable
                         accessibilityLabel={`播放 ${item.word} 的发音`}
-                        onPress={() => playWord(item.word)}
+                        onPress={() =>
+                          playWord(item.word, undefined, pronunciationAccent)
+                        }
                         style={styles.miniRoundButton}
                       >
                         <Volume2 size={17} color={colors.primary} />
@@ -2539,6 +2834,7 @@ function WordsScreen({
       {reviewQueue && (
         <MemoryReviewSession
           words={reviewQueue}
+          pronunciationAccent={pronunciationAccent}
           onClose={() => setReviewQueue(null)}
           onReview={onReview}
         />
@@ -2549,108 +2845,213 @@ function WordsScreen({
 
 function ProfileScreen({
   examId,
+  settings,
   onChangeExam,
+  onChangeSettings,
 }: {
   examId: ExamId;
+  settings: LearningSettings;
   onChangeExam: (id: ExamId) => void;
+  onChangeSettings: (settings: LearningSettings) => void;
 }) {
-  const [showExamPicker, setShowExamPicker] = useState(false);
+  const [activePicker, setActivePicker] = useState<
+    "exam" | "time" | "accent" | "goal" | null
+  >(null);
+  const accentName =
+    settings.pronunciationAccent === "us" ? "美式发音" : "英式发音";
+  const pickerConfig =
+    activePicker === "exam"
+      ? {
+          title: "选择考试目标",
+          subtitle: "后续文章推荐与生词分类会按此目标更新",
+          selectedId: examId,
+          options: exams.map((exam) => ({
+            id: exam.id,
+            label: exam.name,
+            description: exam.subtitle,
+          })),
+        }
+      : activePicker === "time"
+        ? {
+            title: "每日提醒时间",
+            subtitle: "选择一个适合你安静阅读的时间",
+            selectedId: settings.reminderTime,
+            options: [
+              { id: "08:00", label: "08:00", description: "早间阅读" },
+              { id: "12:30", label: "12:30", description: "午间复习" },
+              { id: "20:30", label: "20:30", description: "晚间学习" },
+              { id: "22:00", label: "22:00", description: "睡前巩固" },
+            ],
+          }
+        : activePicker === "accent"
+          ? {
+              title: "选择单词发音",
+              subtitle: "会应用到文章、生词库和记忆卡",
+              selectedId: settings.pronunciationAccent,
+              options: [
+                { id: "us", label: "美式发音", description: "English (US)" },
+                { id: "uk", label: "英式发音", description: "English (UK)" },
+              ],
+            }
+          : {
+              title: "每日阅读目标",
+              subtitle: "每天仍会推荐 3 篇文章，目标只影响进度计划",
+              selectedId: String(settings.dailyGoal),
+              options: [
+                { id: "1", label: "每天 1 篇", description: "轻松保持连续学习" },
+                { id: "2", label: "每天 2 篇", description: "稳步提升阅读量" },
+                { id: "3", label: "每天 3 篇", description: "完成全部每日推荐" },
+              ],
+            };
+
+  const handlePickerSelect = (id: string) => {
+    if (activePicker === "exam") {
+      onChangeExam(id as ExamId);
+    } else if (activePicker === "time") {
+      onChangeSettings({ ...settings, reminderTime: id });
+    } else if (activePicker === "accent") {
+      onChangeSettings({
+        ...settings,
+        pronunciationAccent: id as "us" | "uk",
+      });
+    } else if (activePicker === "goal") {
+      onChangeSettings({
+        ...settings,
+        dailyGoal: Number(id) as LearningSettings["dailyGoal"],
+      });
+    }
+    setActivePicker(null);
+  };
+
   return (
-    <ScrollView
-      style={styles.screen}
-      contentContainerStyle={styles.screenContent}
-      showsVerticalScrollIndicator={false}
-    >
-      <Header title="我的学习" subtitle="保持节奏，持续积累" />
-      <View style={styles.profileCard}>
-        <View style={styles.profileAvatar}>
-          <Text style={styles.profileAvatarText}>R</Text>
-        </View>
-        <View style={styles.flexOne}>
-          <Text style={styles.profileName}>阅读学习者</Text>
-          <Text style={styles.profileSubtitle}>已连续学习 7 天</Text>
-        </View>
-        <View style={styles.levelBadge}>
-          <Text style={styles.levelBadgeText}>Lv. 3</Text>
-        </View>
-      </View>
-      <Text style={styles.settingsTitle}>学习设置</Text>
-      <View style={styles.settingsGroup}>
-        <Pressable
-          onPress={() => setShowExamPicker(!showExamPicker)}
-          style={styles.settingRow}
-        >
-          <View style={styles.settingIcon}>
-            <Target size={19} color={colors.primary} />
+    <View style={styles.flexOne}>
+      <ScrollView
+        style={styles.screen}
+        contentContainerStyle={styles.screenContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <Header title="我的学习" subtitle="保持节奏，持续积累" />
+        <View style={styles.profileCard}>
+          <View style={styles.profileAvatar}>
+            <Text style={styles.profileAvatarText}>R</Text>
           </View>
           <View style={styles.flexOne}>
-            <Text style={styles.settingLabel}>考试目标</Text>
-            <Text style={styles.settingValue}>{getExam(examId).name}</Text>
+            <Text style={styles.profileName}>阅读学习者</Text>
+            <Text style={styles.profileSubtitle}>已连续学习 7 天</Text>
           </View>
-          <ChevronRight size={18} color={colors.inkMuted} />
-        </Pressable>
-        {showExamPicker && (
-          <View style={styles.inlineExamPicker}>
-            {exams.map((exam) => (
-              <Pressable
-                key={exam.id}
-                onPress={() => {
-                  onChangeExam(exam.id);
-                  setShowExamPicker(false);
-                }}
-                style={[
-                  styles.inlineExamItem,
-                  exam.id === examId && styles.inlineExamItemActive,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.inlineExamText,
-                    exam.id === examId && styles.inlineExamTextActive,
-                  ]}
-                >
-                  {exam.name}
+          <View style={styles.levelBadge}>
+            <Text style={styles.levelBadgeText}>Lv. 3</Text>
+          </View>
+        </View>
+        <Text style={styles.settingsTitle}>学习设置</Text>
+        <View style={styles.settingsGroup}>
+          <Pressable
+            accessibilityLabel="修改考试目标"
+            onPress={() => setActivePicker("exam")}
+            style={({ pressed }) => [
+              styles.settingRow,
+              pressed && styles.settingRowPressed,
+            ]}
+          >
+            <View style={styles.settingIcon}>
+              <Target size={19} color={colors.primary} />
+            </View>
+            <View style={styles.flexOne}>
+              <Text style={styles.settingLabel}>考试目标</Text>
+              <Text style={styles.settingValue}>{getExam(examId).name}</Text>
+            </View>
+            <ChevronRight size={18} color={colors.inkMuted} />
+          </Pressable>
+          <View style={styles.settingSeparator} />
+          <View style={styles.settingRow}>
+            <Pressable
+              accessibilityLabel="修改每日提醒时间"
+              onPress={() => setActivePicker("time")}
+              style={({ pressed }) => [
+                styles.settingRowMain,
+                pressed && styles.settingRowPressed,
+              ]}
+            >
+              <View style={styles.settingIcon}>
+                <Bell size={19} color={colors.primary} />
+              </View>
+              <View style={styles.flexOne}>
+                <Text style={styles.settingLabel}>每日提醒</Text>
+                <Text style={styles.settingValue}>
+                  {settings.dailyReminderEnabled
+                    ? `每天 ${settings.reminderTime}`
+                    : `已关闭 · ${settings.reminderTime}`}
                 </Text>
-                {exam.id === examId && (
-                  <Check size={17} color={colors.primary} />
-                )}
-              </Pressable>
-            ))}
+              </View>
+            </Pressable>
+            <Switch
+              accessibilityLabel="每日提醒开关"
+              value={settings.dailyReminderEnabled}
+              onValueChange={(dailyReminderEnabled) =>
+                onChangeSettings({ ...settings, dailyReminderEnabled })
+              }
+              trackColor={{ false: "#D6DCD9", true: colors.primary }}
+              thumbColor="#FFFFFF"
+              ios_backgroundColor="#D6DCD9"
+            />
           </View>
-        )}
-        <View style={styles.settingSeparator} />
-        <View style={styles.settingRow}>
-          <View style={styles.settingIcon}>
-            <Bell size={19} color={colors.primary} />
-          </View>
-          <View style={styles.flexOne}>
-            <Text style={styles.settingLabel}>每日提醒</Text>
-            <Text style={styles.settingValue}>每天 20:30</Text>
-          </View>
-          <View style={styles.toggle}>
-            <View style={styles.toggleKnob} />
-          </View>
+          <View style={styles.settingSeparator} />
+          <Pressable
+            accessibilityLabel="修改单词发音"
+            onPress={() => setActivePicker("accent")}
+            style={({ pressed }) => [
+              styles.settingRow,
+              pressed && styles.settingRowPressed,
+            ]}
+          >
+            <View style={styles.settingIcon}>
+              <Headphones size={19} color={colors.primary} />
+            </View>
+            <View style={styles.flexOne}>
+              <Text style={styles.settingLabel}>英式 / 美式发音</Text>
+              <Text style={styles.settingValue}>{accentName}</Text>
+            </View>
+            <ChevronRight size={18} color={colors.inkMuted} />
+          </Pressable>
+          <View style={styles.settingSeparator} />
+          <Pressable
+            accessibilityLabel="修改每日阅读目标"
+            onPress={() => setActivePicker("goal")}
+            style={({ pressed }) => [
+              styles.settingRow,
+              pressed && styles.settingRowPressed,
+            ]}
+          >
+            <View style={styles.settingIcon}>
+              <BookOpen size={19} color={colors.primary} />
+            </View>
+            <View style={styles.flexOne}>
+              <Text style={styles.settingLabel}>每日阅读目标</Text>
+              <Text style={styles.settingValue}>每天 {settings.dailyGoal} 篇</Text>
+            </View>
+            <ChevronRight size={18} color={colors.inkMuted} />
+          </Pressable>
         </View>
-        <View style={styles.settingSeparator} />
-        <View style={styles.settingRow}>
-          <View style={styles.settingIcon}>
-            <Headphones size={19} color={colors.primary} />
-          </View>
-          <View style={styles.flexOne}>
-            <Text style={styles.settingLabel}>英式 / 美式发音</Text>
-            <Text style={styles.settingValue}>美式发音</Text>
-          </View>
-          <ChevronRight size={18} color={colors.inkMuted} />
+        <View style={styles.quoteCard}>
+          <Text style={styles.quoteMark}>“</Text>
+          <Text style={styles.quoteText}>
+            A reader lives a thousand lives before he dies.
+          </Text>
+          <Text style={styles.quoteAuthor}>— George R. R. Martin</Text>
         </View>
-      </View>
-      <View style={styles.quoteCard}>
-        <Text style={styles.quoteMark}>“</Text>
-        <Text style={styles.quoteText}>
-          A reader lives a thousand lives before he dies.
-        </Text>
-        <Text style={styles.quoteAuthor}>— George R. R. Martin</Text>
-      </View>
-    </ScrollView>
+      </ScrollView>
+      {activePicker && (
+        <NativeChoiceSheet
+          visible
+          title={pickerConfig.title}
+          subtitle={pickerConfig.subtitle}
+          options={pickerConfig.options}
+          selectedId={pickerConfig.selectedId}
+          onSelect={handlePickerSelect}
+          onClose={() => setActivePicker(null)}
+        />
+      )}
+    </View>
   );
 }
 
@@ -2673,9 +3074,10 @@ function Navigation({
               accessibilityLabel={label}
               key={id}
               onPress={() => onChange(id)}
-              style={[
+              style={({ pressed }) => [
                 styles.sideNavItem,
                 active === id && styles.sideNavItemActive,
+                pressed && styles.navItemPressed,
               ]}
             >
               <Icon
@@ -2707,7 +3109,10 @@ function Navigation({
           accessibilityLabel={label}
           key={id}
           onPress={() => onChange(id)}
-          style={styles.bottomNavItem}
+          style={({ pressed }) => [
+            styles.bottomNavItem,
+            pressed && styles.bottomNavItemPressed,
+          ]}
         >
           <View
             style={[
@@ -2748,6 +3153,10 @@ export default function App() {
   const [daily, setDaily] = useState<Article[]>([]);
   const [manualPushes, setManualPushes] = useState<ManualPush[]>([]);
   const [apiOnline, setApiOnline] = useState(false);
+  const [learningSettings, setLearningSettings] = useState<LearningSettings>(
+    DEFAULT_LEARNING_SETTINGS,
+  );
+  const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -2758,6 +3167,7 @@ export default function App() {
         cachedCompleted,
         deviceId,
         token,
+        cachedLearningSettings,
       ] = await Promise.all([
         storage.getExam(),
         storage.getWords(),
@@ -2765,12 +3175,19 @@ export default function App() {
         storage.getCompleted(),
         storage.getDeviceId(),
         storage.getAuthToken(),
+        storage.getLearningSettings(),
       ]);
 
       setExamId(savedExam);
       setSavedWords(cachedWords);
       setHistory(cachedHistory);
       setCompleted(cachedCompleted);
+      if (cachedLearningSettings) {
+        setLearningSettings({
+          ...DEFAULT_LEARNING_SETTINGS,
+          ...cachedLearningSettings,
+        });
+      }
       if (savedExam) {
         setDaily(getDailyArticles(savedExam));
       }
@@ -2832,11 +3249,16 @@ export default function App() {
     return () => clearInterval(timer);
   }, [apiOnline, examId]);
 
-  const selectExam = async (nextExam: ExamId) => {
+  const updateLearningSettings = (next: LearningSettings) => {
+    setLearningSettings(next);
+    void storage.setLearningSettings(next);
+  };
+
+  const selectExam = async (nextExam: ExamId, navigateToToday = true) => {
     setExamId(nextExam);
     await storage.setExam(nextExam);
     setDaily(getDailyArticles(nextExam));
-    setTab("today");
+    if (navigateToToday) setTab("today");
     try {
       await api.setExam(nextExam);
       const [remoteDaily, remoteHistory, remoteWords, pushes] =
@@ -2867,10 +3289,11 @@ export default function App() {
       ]);
     } catch (error) {
       setApiOnline(false);
-      Alert.alert(
-        "正在使用离线内容",
-        error instanceof Error ? error.message : "暂时无法连接服务器",
-      );
+      setAppNotice({
+        title: "正在使用离线内容",
+        message:
+          error instanceof Error ? error.message : "暂时无法连接服务器",
+      });
     }
   };
 
@@ -2881,7 +3304,10 @@ export default function App() {
     let enrichedWord = word;
     if (word.phonetic === "/ pronunciation /") {
       try {
-        const pronunciation = await api.getPronunciation(word.word);
+        const pronunciation = await api.getPronunciation(
+          word.word,
+          learningSettings.pronunciationAccent,
+        );
         if (pronunciation.phonetic) {
           enrichedWord = { ...word, phonetic: pronunciation.phonetic };
         }
@@ -2918,10 +3344,11 @@ export default function App() {
       } catch (error) {
         setSavedWords(savedWords);
         await storage.setWords(savedWords);
-        Alert.alert(
-          "生词同步失败",
-          error instanceof Error ? error.message : "请稍后再试",
-        );
+        setAppNotice({
+          title: "生词同步失败",
+          message: error instanceof Error ? error.message : "请稍后再试",
+          tone: "error",
+        });
       }
     }
   };
@@ -2938,10 +3365,11 @@ export default function App() {
       } catch (error) {
         setSavedWords(savedWords);
         await storage.setWords(savedWords);
-        Alert.alert(
-          "移除失败",
-          error instanceof Error ? error.message : "请稍后再试",
-        );
+        setAppNotice({
+          title: "移除失败",
+          message: error instanceof Error ? error.message : "请稍后再试",
+          tone: "error",
+        });
       }
     }
   };
@@ -2974,10 +3402,11 @@ export default function App() {
     } catch (error) {
       setSavedWords(savedWords);
       await storage.setWords(savedWords);
-      Alert.alert(
-        "复习记录同步失败",
-        error instanceof Error ? error.message : "请稍后再试",
-      );
+      setAppNotice({
+        title: "复习记录同步失败",
+        message: error instanceof Error ? error.message : "请稍后再试",
+        tone: "error",
+      });
       throw error;
     }
   };
@@ -3035,10 +3464,11 @@ export default function App() {
           : (articles.find((item) => item.id === articleId) ?? null),
       );
     } catch (error) {
-      Alert.alert(
-        "文章加载失败",
-        error instanceof Error ? error.message : "请稍后再试",
-      );
+      setAppNotice({
+        title: "文章加载失败",
+        message: error instanceof Error ? error.message : "请稍后再试",
+        tone: "error",
+      });
     }
   };
 
@@ -3052,17 +3482,24 @@ export default function App() {
         />
       </View>
     );
-  if (!examId) return <Onboarding onSelect={selectExam} />;
+  if (!examId) return <Onboarding onSelect={(id) => void selectExam(id)} />;
   if (reader)
     return (
-      <ReaderScreen
-        article={reader}
-        savedWords={savedWords}
-        completed={completed.includes(reader.id)}
-        onBack={() => setReader(null)}
-        onToggleWord={toggleWord}
-        onSubmit={submitArticle}
-      />
+      <>
+        <ReaderScreen
+          article={reader}
+          savedWords={savedWords}
+          completed={completed.includes(reader.id)}
+          pronunciationAccent={learningSettings.pronunciationAccent}
+          onBack={() => setReader(null)}
+          onToggleWord={toggleWord}
+          onSubmit={submitArticle}
+        />
+        <NativeNoticeModal
+          notice={appNotice}
+          onClose={() => setAppNotice(null)}
+        />
+      </>
     );
 
   const content =
@@ -3070,6 +3507,7 @@ export default function App() {
       <TodayScreen
         examId={examId}
         daily={daily}
+        dailyGoal={learningSettings.dailyGoal}
         manualPushes={manualPushes}
         completed={completed}
         onOpen={setReader}
@@ -3082,11 +3520,17 @@ export default function App() {
       <WordsScreen
         words={savedWords}
         activeExam={examId}
+        pronunciationAccent={learningSettings.pronunciationAccent}
         onRemove={removeWord}
         onReview={reviewWord}
       />
     ) : (
-      <ProfileScreen examId={examId} onChangeExam={selectExam} />
+      <ProfileScreen
+        examId={examId}
+        settings={learningSettings}
+        onChangeExam={(id) => void selectExam(id, false)}
+        onChangeSettings={updateLearningSettings}
+      />
     );
 
   return (
@@ -3101,6 +3545,10 @@ export default function App() {
           <Navigation active={tab} tablet={false} onChange={setTab} />
         )}
       </View>
+      <NativeNoticeModal
+        notice={appNotice}
+        onClose={() => setAppNotice(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -3137,6 +3585,172 @@ const styles = StyleSheet.create({
     maxWidth: 1050,
     alignSelf: "center",
   },
+  nativeModalRoot: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+  nativeModalRootDesktop: {
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  nativeModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(20,30,27,0.48)",
+  },
+  nativeSheet: {
+    width: "100%",
+    maxHeight: "88%",
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "ios" ? 30 : 20,
+  },
+  nativeSheetDesktop: {
+    maxWidth: 480,
+    borderRadius: 24,
+    padding: 22,
+    ...shadows.card,
+  },
+  nativeSheetHandle: {
+    width: 42,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "#D7DCDA",
+    alignSelf: "center",
+    marginBottom: 13,
+  },
+  nativeSheetHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 14,
+    marginBottom: 16,
+  },
+  nativeSheetTitle: { color: colors.ink, fontSize: 21, fontWeight: "800" },
+  nativeSheetSubtitle: {
+    color: colors.inkMuted,
+    fontSize: 12,
+    lineHeight: 19,
+    marginTop: 5,
+  },
+  nativeSheetClose: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceMuted,
+  },
+  nativeChoiceList: { gap: 8 },
+  nativeChoiceItem: {
+    minHeight: 62,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  nativeChoiceItemSelected: {
+    borderColor: colors.primary,
+    backgroundColor: "#F2F8F6",
+  },
+  nativeChoiceItemPressed: { opacity: 0.88, transform: [{ scale: 0.995 }] },
+  nativeChoiceLabel: { color: colors.ink, fontSize: 14, fontWeight: "700" },
+  nativeChoiceLabelSelected: { color: colors.primaryDark, fontWeight: "800" },
+  nativeChoiceDescription: {
+    color: colors.inkMuted,
+    fontSize: 11,
+    marginTop: 3,
+  },
+  nativeChoiceCheck: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: "#C7CECB",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  nativeChoiceCheckSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  nativeNoticeSheet: {
+    width: "100%",
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingHorizontal: 22,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "ios" ? 30 : 22,
+    alignItems: "center",
+  },
+  nativeNoticeSheetDesktop: {
+    maxWidth: 410,
+    borderRadius: 24,
+    padding: 24,
+    ...shadows.card,
+  },
+  nativeNoticeIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primarySoft,
+    marginTop: 5,
+  },
+  nativeNoticeIconError: { backgroundColor: "#FFF1EE" },
+  nativeNoticeTitle: {
+    color: colors.ink,
+    fontSize: 21,
+    fontWeight: "800",
+    textAlign: "center",
+    marginTop: 15,
+  },
+  nativeNoticeText: {
+    color: colors.inkMuted,
+    fontSize: 13,
+    lineHeight: 21,
+    textAlign: "center",
+    marginTop: 8,
+  },
+  nativeNoticeActions: {
+    width: "100%",
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 22,
+  },
+  nativeNoticeSecondary: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceMuted,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  nativeNoticeSecondaryText: {
+    color: colors.ink,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  nativeNoticePrimary: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+  },
+  nativeNoticePrimaryText: { color: "#fff", fontSize: 14, fontWeight: "800" },
 
   logoRow: { flexDirection: "row", gap: 12, alignItems: "center" },
   logoMark: {
@@ -3554,6 +4168,7 @@ const styles = StyleSheet.create({
     borderRadius: 9,
     zIndex: 1,
   },
+  readerTabPressed: { opacity: 0.7 },
   readerTabActive: { backgroundColor: colors.surface },
   readerTabText: { color: colors.inkMuted, fontSize: 12, fontWeight: "600" },
   readerTabTextActive: { color: colors.ink, fontWeight: "800" },
@@ -4648,6 +5263,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     paddingHorizontal: 15,
+    overflow: "hidden",
   },
   settingRow: {
     flexDirection: "row",
@@ -4655,6 +5271,16 @@ const styles = StyleSheet.create({
     minHeight: 68,
     gap: 12,
   },
+  settingRowMain: {
+    flex: 1,
+    minHeight: 68,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginLeft: -15,
+    paddingLeft: 15,
+  },
+  settingRowPressed: { backgroundColor: "#F3F7F5" },
   settingIcon: {
     width: 38,
     height: 38,
@@ -4740,6 +5366,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 2,
   },
+  bottomNavItemPressed: { opacity: 0.65 },
   bottomIconWrap: {
     height: 29,
     minWidth: 39,
@@ -4769,6 +5396,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
   },
   sideNavItemActive: { backgroundColor: colors.primarySoft },
+  navItemPressed: { opacity: 0.72 },
   sideNavText: { color: colors.inkMuted, fontSize: 12, fontWeight: "600" },
   sideNavTextActive: { color: colors.primary, fontWeight: "800" },
   sideNavFooter: {

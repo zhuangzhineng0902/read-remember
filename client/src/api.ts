@@ -336,6 +336,7 @@ export const api = {
   async prefetchPronunciations(
     items: Array<{ word: string; context: string }>,
     concurrency = 3,
+    accent: "us" | "uk" = "us",
   ) {
     const unique = [
       ...new Map(
@@ -346,7 +347,7 @@ export const api = {
     const worker = async () => {
       while (cursor < unique.length) {
         const item = unique[cursor++];
-        await this.getPronunciation(item.word, "us", item.context).catch(
+        await this.getPronunciation(item.word, accent, item.context).catch(
           () => null,
         );
       }

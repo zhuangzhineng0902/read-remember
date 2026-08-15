@@ -64,6 +64,13 @@ export type ReaderSettings = {
   columnWidth: "narrow" | "standard" | "wide";
 };
 
+export type LearningSettings = {
+  dailyReminderEnabled: boolean;
+  reminderTime: string;
+  pronunciationAccent: "us" | "uk";
+  dailyGoal: 1 | 2 | 3;
+};
+
 export type ReadingProgress = {
   offsetY: number;
   ratio: number;

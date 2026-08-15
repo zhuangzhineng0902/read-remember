@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ExamId,
   HistoryRecord,
+  LearningSettings,
   ReaderSettings,
   ReadingProgress,
   SavedWord,
@@ -18,6 +19,7 @@ const KEYS = {
   readerSettings: "rr:reader-settings",
   readingProgress: "rr:reading-progress",
   readerHintSeen: "rr:reader-hint-seen",
+  learningSettings: "rr:learning-settings",
 };
 
 async function readJson<T>(key: string, fallback: T): Promise<T> {
@@ -74,4 +76,8 @@ export const storage = {
     return (await AsyncStorage.getItem(KEYS.readerHintSeen)) === "true";
   },
   setReaderHintSeen: () => AsyncStorage.setItem(KEYS.readerHintSeen, "true"),
+  getLearningSettings: () =>
+    readJson<LearningSettings | null>(KEYS.learningSettings, null),
+  setLearningSettings: (settings: LearningSettings) =>
+    AsyncStorage.setItem(KEYS.learningSettings, JSON.stringify(settings)),
 };
