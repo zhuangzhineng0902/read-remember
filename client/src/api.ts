@@ -1,4 +1,5 @@
 import { NativeModules, Platform } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   Article,
   ExamId,
@@ -62,6 +63,11 @@ export type Pronunciation = {
   exampleTranslation: string;
 };
 
+type PronunciationCacheEntry = {
+  cachedAt: number;
+  value: Pronunciation;
+};
+
 type HistoryItem = {
   date: string;
   slot: number;
@@ -86,6 +92,11 @@ export const API_BASE_URL =
     : `http://${developmentHost()}:4000/api/v1`);
 
 let authToken: string | null = null;
+const PRONUNCIATION_CACHE_PREFIX = "rr:pronunciation:";
+const PRONUNCIATION_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const PRONUNCIATION_REVALIDATE_MS = 24 * 60 * 60 * 1000;
+const pronunciationMemoryCache = new Map<string, PronunciationCacheEntry>();
+const pronunciationRequests = new Map<string, Promise<Pronunciation>>();
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
@@ -106,6 +117,81 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (response.status === 204) return undefined as T;
   return ((await response.json()) as ApiEnvelope<T>).data;
 }
+
+const pronunciationCacheKey = (word: string, accent: "us" | "uk") =>
+  `${accent}:${word.toLowerCase()}`;
+
+async function readPronunciationCache(word: string, accent: "us" | "uk") {
+  const key = pronunciationCacheKey(word, accent);
+  const memoryEntry = pronunciationMemoryCache.get(key);
+  if (
+    memoryEntry &&
+    Date.now() - memoryEntry.cachedAt < PRONUNCIATION_CACHE_MAX_AGE_MS
+  ) {
+    return memoryEntry;
+  }
+  try {
+    const raw = await AsyncStorage.getItem(`${PRONUNCIATION_CACHE_PREFIX}${key}`);
+    if (!raw) return null;
+    const entry = JSON.parse(raw) as PronunciationCacheEntry;
+    if (Date.now() - entry.cachedAt >= PRONUNCIATION_CACHE_MAX_AGE_MS) {
+      void AsyncStorage.removeItem(`${PRONUNCIATION_CACHE_PREFIX}${key}`);
+      return null;
+    }
+    pronunciationMemoryCache.set(key, entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+async function writePronunciationCache(value: Pronunciation) {
+  const key = pronunciationCacheKey(value.word, value.accent);
+  const entry: PronunciationCacheEntry = { cachedAt: Date.now(), value };
+  pronunciationMemoryCache.set(key, entry);
+  try {
+    await AsyncStorage.setItem(
+      `${PRONUNCIATION_CACHE_PREFIX}${key}`,
+      JSON.stringify(entry),
+    );
+  } catch {
+    // Memory caching still speeds up the current reading session.
+  }
+}
+
+function requestPronunciation(
+  word: string,
+  accent: "us" | "uk",
+  context: string,
+  includeAudio: boolean,
+) {
+  const normalizedContext = context.slice(0, 450);
+  const params = new URLSearchParams({
+    accent,
+    context: normalizedContext,
+    includeAudio: String(includeAudio),
+  });
+  const key = `${word.toLowerCase()}:${accent}:${includeAudio}:${normalizedContext}`;
+  const existing = pronunciationRequests.get(key);
+  if (existing) return existing;
+  const pending = request<Pronunciation>(
+    `/pronunciations/${encodeURIComponent(word)}?${params.toString()}`,
+  )
+    .then((result) => {
+      if (!includeAudio) void writePronunciationCache(result);
+      return result;
+    })
+    .finally(() => pronunciationRequests.delete(key));
+  pronunciationRequests.set(key, pending);
+  return pending;
+}
+
+const withAudioUrl = (pronunciation: Pronunciation) => ({
+  ...pronunciation,
+  audioUrl: pronunciation.audioPath
+    ? `${API_BASE_URL}${pronunciation.audioPath}`
+    : null,
+});
 
 function hydrateArticle(article: ApiArticle): Article {
   return {
@@ -205,16 +291,47 @@ export const api = {
     word: string,
     accent: "us" | "uk" = "us",
     context = "",
+    includeAudio = false,
   ): Promise<Pronunciation & { audioUrl: string | null }> {
-    const pronunciation = await request<Pronunciation>(
-      `/pronunciations/${encodeURIComponent(word)}?${new URLSearchParams({ accent, context }).toString()}`,
+    if (includeAudio) {
+      return withAudioUrl(
+        await requestPronunciation(word, accent, context, true),
+      );
+    }
+
+    const cached = await readPronunciationCache(word, accent);
+    if (cached) {
+      if (Date.now() - cached.cachedAt >= PRONUNCIATION_REVALIDATE_MS) {
+        void requestPronunciation(word, accent, context, false).catch(() => {});
+      }
+      return withAudioUrl(cached.value);
+    }
+    return withAudioUrl(
+      await requestPronunciation(word, accent, context, false),
     );
-    return {
-      ...pronunciation,
-      audioUrl: pronunciation.audioPath
-        ? `${API_BASE_URL}${pronunciation.audioPath}`
-        : null,
+  },
+
+  async prefetchPronunciations(
+    items: Array<{ word: string; context: string }>,
+    concurrency = 3,
+  ) {
+    const unique = [
+      ...new Map(
+        items.map((item) => [item.word.toLowerCase(), item] as const),
+      ).values(),
+    ];
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < unique.length) {
+        const item = unique[cursor++];
+        await this.getPronunciation(item.word, "us", item.context).catch(
+          () => null,
+        );
+      }
     };
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, unique.length) }, worker),
+    );
   },
 
   saveWord: (word: SavedWord) =>

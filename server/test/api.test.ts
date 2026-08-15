@@ -99,6 +99,34 @@ test("pronunciation metadata and cached audio are public", async () => {
   assert.deepEqual([...new Uint8Array(await audio.arrayBuffer())], [73, 68, 51]);
 });
 
+test("partial pronunciation cache returns immediately without requiring examples", async () => {
+  db.prepare(
+    `INSERT INTO pronunciation_cache(
+      word, accent, phonetic, status, definition_en, translation_zh,
+      part_of_speech, example_en, example_zh
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "partial",
+    "us",
+    "/ˈpɑːrʃəl/",
+    "tts_only",
+    "Existing only in part.",
+    "部分的",
+    "adjective",
+    "",
+    "",
+  );
+
+  const response = await request(
+    "/api/v1/pronunciations/partial?accent=us&context=This%20is%20a%20partial%20example.",
+  );
+  assert.equal(response.status, 200);
+  const value = (await response.json()).data;
+  assert.equal(value.cached, true);
+  assert.equal(value.translation, "部分的");
+  assert.equal(value.example, "");
+});
+
 test("anonymous device login returns a reusable token", async () => {
   const response = await request("/api/v1/auth/anonymous", {
     method: "POST",

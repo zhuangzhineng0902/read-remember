@@ -81,13 +81,26 @@ export function createApp(
   const pronunciationQuery = z.object({
     accent: z.enum(["us", "uk"]).default("us"),
     context: z.string().trim().max(450).default(""),
+    includeAudio: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
   });
 
   app.get("/api/v1/pronunciations/:word", async (req, res, next) => {
     try {
       const { word } = parse(pronunciationParams, req.params);
-      const { accent, context } = parse(pronunciationQuery, req.query);
-      const result = await lookupPronunciation(db, word, accent, context);
+      const { accent, context, includeAudio } = parse(
+        pronunciationQuery,
+        req.query,
+      );
+      const result = await lookupPronunciation(
+        db,
+        word,
+        accent,
+        context,
+        includeAudio,
+      );
       res.json({
         data: {
           ...result,

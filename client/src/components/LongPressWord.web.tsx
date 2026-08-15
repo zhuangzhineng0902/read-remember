@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { StyleSheet } from "react-native";
 import type { LongPressWordProps } from "./LongPressWord";
 
-const LONG_PRESS_DELAY_MS = 550;
+const LONG_PRESS_DELAY_MS = 380;
 
 export function LongPressWord({
   children,

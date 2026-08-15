@@ -84,12 +84,23 @@ const formatDateKey = (date = new Date()) => {
 const formatChineseDate = (date = new Date()) =>
   `${date.getMonth() + 1}月${date.getDate()}日 · ${["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()]}`;
 
+function sentenceContainingWord(paragraph: string, word: string) {
+  const sentences = paragraph.match(/[^.!?]+[.!?]?/g) ?? [paragraph];
+  const matched = sentences.find((sentence) =>
+    sentence
+      .toLowerCase()
+      .split(/[^a-z'-]+/)
+      .includes(word),
+  );
+  return (matched ?? paragraph).trim().slice(0, 450);
+}
+
 let pronunciationPlayer: AudioPlayer | null = null;
 let pronunciationReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function playWord(word: string, accent: "us" | "uk" = "us") {
   try {
-    const pronunciation = await api.getPronunciation(word, accent);
+    const pronunciation = await api.getPronunciation(word, accent, "", true);
     const matchesRequestedAccent =
       !pronunciation.actualAccent ||
       pronunciation.actualAccent === "unknown" ||
@@ -559,14 +570,73 @@ function ReaderScreen({
   );
   const correctCount = answerResults.filter((result) => result.correct).length;
 
+  useEffect(() => {
+    const commonWords = new Set([
+      "about",
+      "after",
+      "again",
+      "because",
+      "before",
+      "could",
+      "every",
+      "first",
+      "from",
+      "have",
+      "into",
+      "other",
+      "should",
+      "their",
+      "there",
+      "these",
+      "they",
+      "this",
+      "through",
+      "were",
+      "which",
+      "while",
+      "with",
+      "would",
+    ]);
+    const seen = new Set<string>();
+    const items: Array<{ word: string; context: string }> = [];
+    for (const paragraph of article.paragraphs) {
+      for (const token of paragraph.split(/\s+/)) {
+        const word = token.toLowerCase().replace(/[^a-z'-]/g, "");
+        if (
+          word.length < 5 ||
+          commonWords.has(word) ||
+          seen.has(word)
+        ) {
+          continue;
+        }
+        seen.add(word);
+        items.push({ word, context: sentenceContainingWord(paragraph, word) });
+        if (items.length >= 18) break;
+      }
+      if (items.length >= 18) break;
+    }
+    const timer = setTimeout(() => {
+      void api.prefetchPronunciations(items, 3);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [article.id, article.paragraphs]);
+
   const openWord = (token: string, paragraph: string) => {
-    const localWord = lookupWord(token);
+    const normalized = token.toLowerCase().replace(/[^a-z'-]/g, "");
+    const savedWord = savedWords.find(
+      (item) => item.examId === article.examId && item.word === normalized,
+    );
+    const localWord: WordInfo = savedWord ?? lookupWord(token);
     if (!localWord.word) return;
     setSelectedWord(localWord);
     setPressedWord(localWord.word);
     setWordLoading(true);
     api
-      .getPronunciation(localWord.word, "us", paragraph)
+      .getPronunciation(
+        localWord.word,
+        "us",
+        sentenceContainingWord(paragraph, localWord.word),
+      )
       .then((pronunciation) => {
         setSelectedWord((current) =>
           current?.word === localWord.word

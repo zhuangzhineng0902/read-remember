@@ -9,6 +9,9 @@ const READY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // definitions, and an alternate provider may become available quickly.
 const MISS_TTL_MS = 15 * 60 * 1000;
 const MAX_AUDIO_BYTES = 2_000_000;
+const DICTIONARY_TIMEOUT_MS = 4_000;
+const TRANSLATION_TIMEOUT_MS = 3_500;
+const AUDIO_TIMEOUT_MS = 4_000;
 
 export type PronunciationAccent = "us" | "uk";
 
@@ -169,7 +172,7 @@ async function downloadAudio(candidates: AudioCandidate[]) {
     try {
       const response = await fetch(candidate.url, {
         headers: { accept: "audio/*" },
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(AUDIO_TIMEOUT_MS),
       });
       const contentLength = Number(response.headers.get("content-length") ?? 0);
       const contentType = response.headers.get("content-type") ?? "";
@@ -246,7 +249,7 @@ async function translateToChinese(text: string) {
     url.searchParams.set("langpair", "en|zh-CN");
     const response = await fetch(url, {
       headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(8_000),
+      signal: AbortSignal.timeout(TRANSLATION_TIMEOUT_MS),
     });
     if (!response.ok) return "";
     const payload = (await response.json()) as {
@@ -261,26 +264,45 @@ async function translateToChinese(text: string) {
   }
 }
 
-export async function lookupPronunciation(
+const pronunciationLookups = new Map<string, Promise<PronunciationResult>>();
+
+async function lookupPronunciationUncached(
   db: AppDatabase,
   word: string,
   accent: PronunciationAccent,
   context = "",
+  includeAudio = false,
 ): Promise<PronunciationResult> {
   const prior = cachedRow(db, word, accent);
+  const hasLexicalCache = !!(
+    prior?.phonetic ||
+    prior?.translation ||
+    prior?.definition
+  );
   if (
     prior &&
     isFresh(prior) &&
-    (!context || (prior.translation && prior.example && prior.exampleTranslation))
+    hasLexicalCache &&
+    (!includeAudio || !!prior.audioBlob)
   ) {
     return publicResult(prior, true);
   }
+
+  const contextualExample = context.trim();
+  const wordTranslation = prior?.translation
+    ? Promise.resolve(prior.translation)
+    : translateToChinese(word);
+  const contextualTranslation = prior?.exampleTranslation
+    ? Promise.resolve(prior.exampleTranslation)
+    : contextualExample
+      ? translateToChinese(contextualExample)
+      : Promise.resolve("");
 
   let entries: DictionaryEntry[] = [];
   try {
     const response = await fetch(`${DICTIONARY_API}/${encodeURIComponent(word)}`, {
       headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(8_000),
+      signal: AbortSignal.timeout(DICTIONARY_TIMEOUT_MS),
     });
     if (response.ok) {
       const payload: unknown = await response.json();
@@ -312,7 +334,9 @@ export async function lookupPronunciation(
     alternateAudioCandidate(word, accent),
     ...otherDictionaryAudio.map(toAudioCandidate),
   ];
-  const downloadedAudio = await downloadAudio(audioCandidates);
+  const downloadedAudio = includeAudio
+    ? await downloadAudio(audioCandidates)
+    : null;
 
   const entry = selected?.entry ?? entries[0];
   const meaning = entries
@@ -321,35 +345,44 @@ export async function lookupPronunciation(
   const definitionItem =
     meaning?.definitions?.find((item) => item.example) ??
     meaning?.definitions?.find((item) => item.definition);
-  const definition = definitionItem?.definition?.trim() ?? "";
-  const example = definitionItem?.example?.trim() ?? context.trim();
-  const [translation, exampleTranslation] = await Promise.all([
-    translateToChinese(definition),
-    translateToChinese(example),
-  ]);
+  const definition =
+    prior?.definition || definitionItem?.definition?.trim() || "";
+  const example =
+    prior?.example || contextualExample || definitionItem?.example?.trim() || "";
+  const translation = await wordTranslation;
+  const exampleTranslation =
+    (await contextualTranslation) ||
+    (example ? await translateToChinese(example) : "");
+  const audioBlob = downloadedAudio?.data ?? prior?.audioBlob ?? null;
+  const audioMime = downloadedAudio?.mime ?? prior?.audioMime ?? null;
   const row: Omit<CachedPronunciation, "updatedAt"> = {
     word,
     accent,
-    phonetic: text ? (text.startsWith("/") ? text : `/${text}/`) : "",
-    actualAccent: downloadedAudio?.accent ?? null,
+    phonetic:
+      prior?.phonetic ||
+      (text ? (text.startsWith("/") ? text : `/${text}/`) : ""),
+    actualAccent: downloadedAudio?.accent ?? prior?.actualAccent ?? null,
     sourceUrl:
       downloadedAudio?.sourceUrl ??
+      prior?.sourceUrl ??
       selected?.phonetic.sourceUrl ??
       entry?.sourceUrls?.[0] ??
       null,
     licenseName:
       downloadedAudio?.licenseName ??
+      prior?.licenseName ??
       selected?.phonetic.license?.name ??
       entry?.license?.name ??
       null,
     licenseUrl:
       downloadedAudio?.licenseUrl ??
+      prior?.licenseUrl ??
       selected?.phonetic.license?.url ??
       entry?.license?.url ??
       null,
-    audioMime: downloadedAudio?.mime ?? null,
-    audioBlob: downloadedAudio?.data ?? null,
-    status: downloadedAudio ? "ready" : "tts_only",
+    audioMime,
+    audioBlob,
+    status: audioBlob ? "ready" : "tts_only",
     definition,
     translation,
     partOfSpeech: meaning?.partOfSpeech?.trim() ?? "",
@@ -360,14 +393,35 @@ export async function lookupPronunciation(
   return publicResult({ ...row, updatedAt: new Date().toISOString() }, false);
 }
 
+export function lookupPronunciation(
+  db: AppDatabase,
+  word: string,
+  accent: PronunciationAccent,
+  context = "",
+  includeAudio = false,
+): Promise<PronunciationResult> {
+  const key = `${word}:${accent}:${includeAudio ? "audio" : "lexical"}:${context}`;
+  const existing = pronunciationLookups.get(key);
+  if (existing) return existing;
+  const lookup = lookupPronunciationUncached(
+    db,
+    word,
+    accent,
+    context,
+    includeAudio,
+  ).finally(() => pronunciationLookups.delete(key));
+  pronunciationLookups.set(key, lookup);
+  return lookup;
+}
+
 export async function pronunciationAudio(
   db: AppDatabase,
   word: string,
   accent: PronunciationAccent,
 ) {
   let row = cachedRow(db, word, accent);
-  if (!row || !isFresh(row)) {
-    await lookupPronunciation(db, word, accent);
+  if (!row?.audioBlob || !isFresh(row)) {
+    await lookupPronunciation(db, word, accent, "", true);
     row = cachedRow(db, word, accent);
   }
   if (!row?.audioBlob) {
