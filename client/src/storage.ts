@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
+  ArticleAnswerState,
   ExamId,
   HistoryRecord,
   LearningSettings,
@@ -18,6 +19,7 @@ const KEYS = {
   authToken: "rr:auth-token",
   readerSettings: "rr:reader-settings",
   readingProgress: "rr:reading-progress",
+  articleAnswers: "rr:article-answers",
   readerHintSeen: "rr:reader-hint-seen",
   learningSettings: "rr:learning-settings",
 };
@@ -72,6 +74,25 @@ export const storage = {
     );
     progress[articleId] = value;
     await AsyncStorage.setItem(KEYS.readingProgress, JSON.stringify(progress));
+  },
+  async getArticleAnswerState(userId: string, articleId: string) {
+    const states = await readJson<Record<string, ArticleAnswerState>>(
+      KEYS.articleAnswers,
+      {},
+    );
+    return states[`${userId}:${articleId}`] ?? null;
+  },
+  async setArticleAnswerState(
+    userId: string,
+    articleId: string,
+    value: ArticleAnswerState,
+  ) {
+    const states = await readJson<Record<string, ArticleAnswerState>>(
+      KEYS.articleAnswers,
+      {},
+    );
+    states[`${userId}:${articleId}`] = value;
+    await AsyncStorage.setItem(KEYS.articleAnswers, JSON.stringify(states));
   },
   async getReaderHintSeen() {
     return (await AsyncStorage.getItem(KEYS.readerHintSeen)) === "true";

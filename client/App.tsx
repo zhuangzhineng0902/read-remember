@@ -45,7 +45,7 @@ import {
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { createAudioPlayer, type AudioPlayer } from "expo-audio";
 import * as Speech from "expo-speech";
-import { api, type AnswerResult, type ManualPush } from "./src/api";
+import { api, type ManualPush } from "./src/api";
 import {
   articles,
   exams,
@@ -62,7 +62,9 @@ import {
   scheduleMemoryReview,
 } from "./src/memory";
 import {
+  AnswerResult,
   Article,
+  ArticleAnswerState,
   ExamId,
   HistoryRecord,
   LearningSettings,
@@ -1275,6 +1277,7 @@ function Difficulty({ value }: { value: number }) {
 }
 
 function ReaderScreen({
+  userId,
   article,
   savedWords,
   completed,
@@ -1288,6 +1291,7 @@ function ReaderScreen({
   onToggleWord,
   onSubmit,
 }: {
+  userId: string;
   article: Article;
   savedWords: SavedWord[];
   completed: boolean;
@@ -1308,6 +1312,9 @@ function ReaderScreen({
   const scrollProgressRef = useRef(0);
   const questionsOffsetRef = useRef(0);
   const scrollSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const answerSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingAnswersRef = useRef<Array<number | null> | null>(null);
+  const selectedAnswersRef = useRef<Record<number, number>>({});
   const restoredProgressRef = useRef(false);
   const screenTransition = useRef(new Animated.Value(0)).current;
   const tabIndicator = useRef(new Animated.Value(0)).current;
@@ -1332,6 +1339,7 @@ function ReaderScreen({
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [answerResults, setAnswerResults] = useState<AnswerResult[]>([]);
+  const [answersRestored, setAnswersRestored] = useState(false);
   const [readerNotice, setReaderNotice] = useState<
     (AppNotice & { kind: "incomplete" | "submit-error" }) | null
   >(null);
@@ -1388,6 +1396,28 @@ function ReaderScreen({
     (_, index) => selectedAnswers[index] !== undefined,
   );
   const correctCount = answerResults.filter((result) => result.correct).length;
+
+  const restoreAnswerState = (state: ArticleAnswerState) => {
+    const restored = state.answers.reduce<Record<number, number>>(
+      (result, answer, index) => {
+        const question = article.questions[index];
+        if (
+          question &&
+          answer !== null &&
+          answer >= 0 &&
+          answer < question.options.length
+        ) {
+          result[index] = answer;
+        }
+        return result;
+      },
+      {},
+    );
+    selectedAnswersRef.current = restored;
+    setSelectedAnswers(restored);
+    setSubmitted(state.submitted);
+    setAnswerResults(state.submitted ? state.results : []);
+  };
 
   useEffect(() => {
     if (reducedMotion) {
@@ -1496,6 +1526,52 @@ function ReaderScreen({
     };
   }, [article.id]);
 
+  useEffect(() => {
+    let active = true;
+    setAnswersRestored(false);
+    Promise.allSettled([
+      storage.getArticleAnswerState(userId, article.id),
+      api.getArticleAnswerState(article.id),
+    ]).then((settled) => {
+      if (!active) return;
+      const local = settled[0].status === "fulfilled" ? settled[0].value : null;
+      const remote = settled[1].status === "fulfilled" ? settled[1].value : null;
+      const preferred =
+        remote?.submitted
+          ? remote
+          : local?.submitted
+            ? local
+            : !local
+              ? remote
+              : !remote
+                ? local
+                : Date.parse(local.updatedAt) > Date.parse(remote.updatedAt)
+                  ? local
+                  : remote;
+      if (preferred) {
+        restoreAnswerState(preferred);
+        void storage.setArticleAnswerState(userId, article.id, preferred);
+        if (preferred === local && !preferred.submitted) {
+          void api
+            .saveArticleAnswers(article.id, preferred.answers)
+            .then((synced) =>
+              storage.setArticleAnswerState(userId, article.id, synced),
+            )
+            .catch(() => undefined);
+        }
+      } else {
+        selectedAnswersRef.current = {};
+        setSelectedAnswers({});
+        setSubmitted(false);
+        setAnswerResults([]);
+      }
+      setAnswersRestored(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [article.id, userId]);
+
   useEffect(
     () => () => {
       if (scrollSaveTimerRef.current) clearTimeout(scrollSaveTimerRef.current);
@@ -1509,6 +1585,51 @@ function ReaderScreen({
     },
     [article.id],
   );
+
+  useEffect(
+    () => () => {
+      if (answerSaveTimerRef.current) clearTimeout(answerSaveTimerRef.current);
+      const pending = pendingAnswersRef.current;
+      if (pending) {
+        void api.saveArticleAnswers(article.id, pending).catch(() => undefined);
+      }
+    },
+    [article.id, userId],
+  );
+
+  const saveAnswerDraft = (answers: Record<number, number>) => {
+    const values = article.questions.map((_, index) => answers[index] ?? null);
+    const localState: ArticleAnswerState = {
+      answers: values,
+      submitted: false,
+      results: [],
+      updatedAt: new Date().toISOString(),
+    };
+    void storage.setArticleAnswerState(userId, article.id, localState);
+    pendingAnswersRef.current = values;
+    if (answerSaveTimerRef.current) clearTimeout(answerSaveTimerRef.current);
+    answerSaveTimerRef.current = setTimeout(() => {
+      answerSaveTimerRef.current = null;
+      pendingAnswersRef.current = null;
+      void api
+        .saveArticleAnswers(article.id, values)
+        .then((synced) =>
+          storage.setArticleAnswerState(userId, article.id, synced),
+        )
+        .catch(() => undefined);
+    }, 280);
+  };
+
+  const selectAnswer = (questionIndex: number, answerIndex: number) => {
+    if (submitted || !answersRestored) return;
+    const next = {
+      ...selectedAnswersRef.current,
+      [questionIndex]: answerIndex,
+    };
+    selectedAnswersRef.current = next;
+    setSelectedAnswers(next);
+    saveAnswerDraft(next);
+  };
 
   const updateReaderSettings = (next: ReaderSettings) => {
     setReaderSettings(next);
@@ -1681,6 +1802,17 @@ function ReaderScreen({
         (_, index) => selectedAnswers[index],
       );
       const results = await onSubmit(article, answers);
+      if (answerSaveTimerRef.current) {
+        clearTimeout(answerSaveTimerRef.current);
+        answerSaveTimerRef.current = null;
+      }
+      pendingAnswersRef.current = null;
+      await storage.setArticleAnswerState(userId, article.id, {
+        answers,
+        submitted: true,
+        results,
+        updatedAt: new Date().toISOString(),
+      });
       setAnswerResults(results);
       setSubmitted(true);
       setReaderTab("answer");
@@ -1978,8 +2110,11 @@ function ReaderScreen({
                 <Text style={styles.practiceEyebrow}>READING QUESTIONS</Text>
                 <Text style={styles.practiceTitle}>根据文章选择正确答案</Text>
                 <Text style={styles.practiceHint}>
-                  已完成 {Object.keys(selectedAnswers).length} /{" "}
-                  {article.questions.length}
+                  {!answersRestored
+                    ? "正在恢复答题记录…"
+                    : submitted
+                      ? `已恢复上次作答 · ${Object.keys(selectedAnswers).length} / ${article.questions.length}`
+                      : `已完成 ${Object.keys(selectedAnswers).length} / ${article.questions.length}`}
                 </Text>
               </View>
               <View style={styles.questions}>
@@ -1995,14 +2130,13 @@ function ReaderScreen({
                         return (
                           <Pressable
                             accessibilityRole="radio"
-                            accessibilityState={{ checked: selected }}
+                            accessibilityState={{
+                              checked: selected,
+                              disabled: submitted || !answersRestored,
+                            }}
+                            disabled={submitted || !answersRestored}
                             key={option}
-                            onPress={() =>
-                              setSelectedAnswers((current) => ({
-                                ...current,
-                                [qIndex]: index,
-                              }))
-                            }
+                            onPress={() => selectAnswer(qIndex, index)}
                             style={({ pressed }) => [
                               styles.option,
                               selected && styles.optionSelected,
@@ -2061,7 +2195,9 @@ function ReaderScreen({
                 <Text style={styles.answerCtaText}>
                   {submitting
                     ? "正在提交…"
-                    : allAnswered
+                    : submitted
+                      ? "查看上次答案解析"
+                      : allAnswered
                       ? "提交答案并查看解析"
                       : "请完成全部题目"}
                 </Text>
@@ -3464,32 +3600,6 @@ function ProfileScreen({
             <ChevronRight size={18} color={colors.inkMuted} />
           </Pressable>
         </View>
-        <Text style={styles.settingsTitle}>账号设置</Text>
-        <View style={styles.settingsGroup}>
-          <Pressable
-            accessibilityLabel={user?.isRegistered ? "修改用户信息" : "登录或注册账号"}
-            onPress={onOpenAccount}
-            style={({ pressed }) => [
-              styles.settingRow,
-              pressed && styles.settingRowPressed,
-            ]}
-          >
-            <View style={styles.settingIcon}>
-              <GraduationCap size={19} color={colors.primary} />
-            </View>
-            <View style={styles.flexOne}>
-              <Text style={styles.settingLabel}>
-                {user?.isRegistered ? "个人资料与密码" : "注册 / 登录"}
-              </Text>
-              <Text style={styles.settingValue}>
-                {user?.isRegistered
-                  ? "修改昵称、用户名、邮箱和密码"
-                  : "同步阅读历史、生词和复习进度"}
-              </Text>
-            </View>
-            <ChevronRight size={18} color={colors.inkMuted} />
-          </Pressable>
-        </View>
         <View style={styles.quoteCard}>
           <Text style={styles.quoteMark}>“</Text>
           <Text style={styles.quoteText}>
@@ -4118,6 +4228,7 @@ export default function App() {
       <>
         <ReaderScreen
           key={reader.id}
+          userId={currentUser.id}
           article={reader}
           savedWords={savedWords}
           completed={completed.includes(reader.id)}

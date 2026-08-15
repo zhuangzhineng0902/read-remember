@@ -74,6 +74,8 @@ Authorization: Bearer <token>
 | `PATCH`  | `/api/v1/users/me/exam`                 | 切换考试目标               |
 | `GET`    | `/api/v1/daily?date=YYYY-MM-DD`         | 当日 3 篇文章              |
 | `GET`    | `/api/v1/articles/:id`                  | 文章与答题选项，不泄露答案 |
+| `GET`    | `/api/v1/articles/:id/answers`          | 恢复答题记录与已提交解析   |
+| `PUT`    | `/api/v1/articles/:id/answers`          | 保存未提交的答题记录       |
 | `POST`   | `/api/v1/articles/:id/complete`         | 提交答案并获取解析         |
 | `GET`    | `/api/v1/history`                       | 阅读与答题历史             |
 | `GET`    | `/api/v1/vocabulary`                    | 按考试和关键词查询生词     |

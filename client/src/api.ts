@@ -2,7 +2,9 @@ import { NativeModules, Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import {
+  AnswerResult,
   Article,
+  ArticleAnswerState,
   ExamId,
   HistoryRecord,
   MemoryRating,
@@ -36,13 +38,7 @@ type ApiQuestion = {
 
 type ApiArticle = Omit<Article, "questions"> & { questions: ApiQuestion[] };
 
-export type AnswerResult = {
-  questionId: number;
-  selectedAnswer: number;
-  correctAnswer: number;
-  correct: boolean;
-  explanation: string;
-};
+export type { AnswerResult } from "./types";
 
 export type Pronunciation = {
   word: string;
@@ -328,6 +324,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ answers }),
     }),
+
+  getArticleAnswerState: (id: string) =>
+    request<ArticleAnswerState>(
+      `/articles/${encodeURIComponent(id)}/answers`,
+    ),
+
+  saveArticleAnswers: (id: string, answers: Array<number | null>) =>
+    request<ArticleAnswerState>(
+      `/articles/${encodeURIComponent(id)}/answers`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ answers }),
+      },
+    ),
 
   async getHistory(): Promise<{
     records: HistoryRecord[];

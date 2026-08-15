@@ -15,6 +15,21 @@ export type Question = {
   explanation: string;
 };
 
+export type AnswerResult = {
+  questionId: number;
+  selectedAnswer: number;
+  correctAnswer: number;
+  correct: boolean;
+  explanation: string;
+};
+
+export type ArticleAnswerState = {
+  answers: Array<number | null>;
+  submitted: boolean;
+  results: AnswerResult[];
+  updatedAt: string;
+};
+
 export type Article = {
   id: string;
   examId: ExamId;

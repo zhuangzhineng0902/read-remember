@@ -78,6 +78,14 @@ export function createDatabase(filename: string): AppDatabase {
       PRIMARY KEY(user_id, article_id)
     );
 
+    CREATE TABLE IF NOT EXISTS article_answer_states (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+      answers_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_id, article_id)
+    );
+
     CREATE TABLE IF NOT EXISTS vocabulary (
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       exam_id TEXT NOT NULL REFERENCES exams(id),
@@ -177,6 +185,7 @@ export function createDatabase(filename: string): AppDatabase {
     CREATE INDEX IF NOT EXISTS idx_user_push_user ON user_push_items(user_id, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_daily_auto_push_date ON daily_auto_pushes(delivery_date);
     CREATE INDEX IF NOT EXISTS idx_progress_completed ON article_progress(completed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_answer_states_updated ON article_answer_states(updated_at DESC);
   `);
 
   // CREATE TABLE IF NOT EXISTS does not add columns to an existing local DB.

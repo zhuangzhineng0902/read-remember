@@ -55,6 +55,68 @@ const articleFromId = (db: AppDatabase, id: string) =>
     .prepare(`SELECT ${articleSelect} FROM articles a WHERE a.id = ?`)
     .get(id) as ArticleRow | undefined;
 
+const hasArticleAccess = (db: AppDatabase, userId: string, articleId: string) =>
+  Boolean(
+    db
+      .prepare(
+        `SELECT 1 FROM deliveries WHERE user_id = ? AND article_id = ?
+         UNION ALL
+         SELECT 1 FROM user_push_items WHERE user_id = ? AND article_id = ?
+         LIMIT 1`,
+      )
+      .get(userId, articleId, userId, articleId),
+  );
+
+const sqliteTimestampToIso = (value: string) =>
+  new Date(`${value.replace(" ", "T")}Z`).toISOString();
+
+function articleAnswerState(
+  db: AppDatabase,
+  userId: string,
+  row: ArticleRow,
+) {
+  const questions = JSON.parse(row.questionsJson) as Question[];
+  const completed = db
+    .prepare(
+      `SELECT answers_json AS answersJson, completed_at AS updatedAt
+       FROM article_progress WHERE user_id = ? AND article_id = ?`,
+    )
+    .get(userId, row.id) as
+    | { answersJson: string; updatedAt: string }
+    | undefined;
+  const draft = completed
+    ? undefined
+    : (db
+        .prepare(
+          `SELECT answers_json AS answersJson, updated_at AS updatedAt
+           FROM article_answer_states WHERE user_id = ? AND article_id = ?`,
+        )
+        .get(userId, row.id) as
+        | { answersJson: string; updatedAt: string }
+        | undefined);
+  const stored = completed ?? draft;
+  const answers = stored
+    ? (JSON.parse(stored.answersJson) as Array<number | null>)
+    : questions.map(() => null);
+  const results = completed
+    ? questions.map((question, index) => ({
+        questionId: index,
+        selectedAnswer: answers[index] as number,
+        correctAnswer: question.answer,
+        correct: answers[index] === question.answer,
+        explanation: question.explanation,
+      }))
+    : [];
+  return {
+    answers,
+    submitted: Boolean(completed),
+    results,
+    updatedAt: stored
+      ? sqliteTimestampToIso(stored.updatedAt)
+      : new Date(0).toISOString(),
+  };
+}
+
 export function createApp(
   db: AppDatabase,
   config: Pick<Config, "corsOrigin" | "adminApiKey" | "syncAllowedHosts"> &
@@ -498,6 +560,69 @@ export function createApp(
     res.json({ data: serializeArticle(row) });
   });
 
+  authenticated.get("/articles/:id/answers", (req, res) => {
+    const user = currentUser(res);
+    if (!hasArticleAccess(db, user.id, req.params.id)) {
+      throw new ApiError(
+        403,
+        "ARTICLE_NOT_DELIVERED",
+        "该文章尚未推送给当前用户",
+      );
+    }
+    const row = articleFromId(db, req.params.id);
+    if (!row) throw new ApiError(404, "ARTICLE_NOT_FOUND", "文章不存在");
+    res.json({ data: articleAnswerState(db, user.id, row) });
+  });
+
+  authenticated.put("/articles/:id/answers", (req, res) => {
+    const body = parse(
+      z.object({
+        answers: z.array(z.number().int().min(0).max(10).nullable()).max(50),
+      }),
+      req.body,
+    );
+    const user = currentUser(res);
+    if (!hasArticleAccess(db, user.id, req.params.id)) {
+      throw new ApiError(
+        403,
+        "ARTICLE_NOT_DELIVERED",
+        "该文章尚未推送给当前用户",
+      );
+    }
+    const row = articleFromId(db, req.params.id);
+    if (!row) throw new ApiError(404, "ARTICLE_NOT_FOUND", "文章不存在");
+    const questions = JSON.parse(row.questionsJson) as Question[];
+    if (body.answers.length !== questions.length) {
+      throw new ApiError(
+        400,
+        "ANSWER_COUNT_MISMATCH",
+        `需要保存 ${questions.length} 道题的答题状态`,
+      );
+    }
+    const invalidAnswer = body.answers.some(
+      (answer, index) => answer !== null && answer >= questions[index].options.length,
+    );
+    if (invalidAnswer) {
+      throw new ApiError(400, "INVALID_ANSWER", "答案选项超出有效范围");
+    }
+
+    const completed = db
+      .prepare(
+        "SELECT 1 FROM article_progress WHERE user_id = ? AND article_id = ?",
+      )
+      .get(user.id, row.id);
+    if (!completed) {
+      db.prepare(
+        `INSERT INTO article_answer_states(user_id, article_id, answers_json)
+         VALUES (?, ?, ?)
+         ON CONFLICT(user_id, article_id) DO UPDATE SET
+           answers_json = excluded.answers_json,
+           updated_at = CURRENT_TIMESTAMP`,
+      ).run(user.id, row.id, JSON.stringify(body.answers));
+    }
+    res.json({ data: articleAnswerState(db, user.id, row) });
+  });
+
   authenticated.post("/articles/:id/complete", (req, res) => {
     const body = parse(
       z.object({ answers: z.array(z.number().int().min(0).max(10)).max(50) }),
@@ -555,6 +680,13 @@ export function createApp(
       score,
       questions.length,
     );
+    db.prepare(
+      `INSERT INTO article_answer_states(user_id, article_id, answers_json)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id, article_id) DO UPDATE SET
+         answers_json = excluded.answers_json,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).run(user.id, row.id, JSON.stringify(body.answers));
 
     res.json({
       data: { articleId: row.id, score, total: questions.length, results },

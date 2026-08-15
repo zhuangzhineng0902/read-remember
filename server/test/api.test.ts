@@ -240,12 +240,39 @@ test("article answers can be submitted and appear in history", async () => {
   assert.ok(article.questions[0].options.length > 0);
   assert.equal("answer" in article.questions[0], false);
 
+  const draftAnswers = article.questions.map(
+    (_: unknown, index: number) => (index === 0 ? 1 : null),
+  );
+  const savedDraft = await request(`/api/v1/articles/${articleId}/answers`, {
+    method: "PUT",
+    body: JSON.stringify({ answers: draftAnswers }),
+  });
+  assert.equal(savedDraft.status, 200);
+  assert.deepEqual((await savedDraft.json()).data.answers, draftAnswers);
+
+  const restoredDraft = await request(`/api/v1/articles/${articleId}/answers`);
+  assert.equal(restoredDraft.status, 200);
+  const restoredDraftData = (await restoredDraft.json()).data;
+  assert.equal(restoredDraftData.submitted, false);
+  assert.deepEqual(restoredDraftData.answers, draftAnswers);
+
   const completion = await request(`/api/v1/articles/${articleId}/complete`, {
     method: "POST",
     body: JSON.stringify({ answers: article.questions.map(() => 0) }),
   });
   assert.equal(completion.status, 200);
   assert.equal((await completion.json()).data.total, article.questions.length);
+
+  const restoredCompletion = await request(
+    `/api/v1/articles/${articleId}/answers`,
+  );
+  const restoredCompletionData = (await restoredCompletion.json()).data;
+  assert.equal(restoredCompletionData.submitted, true);
+  assert.equal(restoredCompletionData.results.length, article.questions.length);
+  assert.deepEqual(
+    restoredCompletionData.answers,
+    article.questions.map(() => 0),
+  );
 
   const history = await request("/api/v1/history");
   const historyData = (await history.json()).data;
