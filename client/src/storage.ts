@@ -1,5 +1,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { ExamId, HistoryRecord, SavedWord } from "./types";
+import {
+  ExamId,
+  HistoryRecord,
+  ReaderSettings,
+  ReadingProgress,
+  SavedWord,
+} from "./types";
 import { randomUUID } from "expo-crypto";
 
 const KEYS = {
@@ -9,6 +15,9 @@ const KEYS = {
   completed: "rr:completed",
   deviceId: "rr:device-id",
   authToken: "rr:auth-token",
+  readerSettings: "rr:reader-settings",
+  readingProgress: "rr:reading-progress",
+  readerHintSeen: "rr:reader-hint-seen",
 };
 
 async function readJson<T>(key: string, fallback: T): Promise<T> {
@@ -42,4 +51,27 @@ export const storage = {
   },
   getAuthToken: () => AsyncStorage.getItem(KEYS.authToken),
   setAuthToken: (token: string) => AsyncStorage.setItem(KEYS.authToken, token),
+  getReaderSettings: () =>
+    readJson<ReaderSettings | null>(KEYS.readerSettings, null),
+  setReaderSettings: (settings: ReaderSettings) =>
+    AsyncStorage.setItem(KEYS.readerSettings, JSON.stringify(settings)),
+  async getReadingProgress(articleId: string) {
+    const progress = await readJson<Record<string, ReadingProgress>>(
+      KEYS.readingProgress,
+      {},
+    );
+    return progress[articleId] ?? null;
+  },
+  async setReadingProgress(articleId: string, value: ReadingProgress) {
+    const progress = await readJson<Record<string, ReadingProgress>>(
+      KEYS.readingProgress,
+      {},
+    );
+    progress[articleId] = value;
+    await AsyncStorage.setItem(KEYS.readingProgress, JSON.stringify(progress));
+  },
+  async getReaderHintSeen() {
+    return (await AsyncStorage.getItem(KEYS.readerHintSeen)) === "true";
+  },
+  setReaderHintSeen: () => AsyncStorage.setItem(KEYS.readerHintSeen, "true"),
 };

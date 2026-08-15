@@ -1,7 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   FlatList,
   Modal,
   Platform,
@@ -61,6 +64,7 @@ import {
   ExamId,
   HistoryRecord,
   MemoryRating,
+  ReaderSettings,
   SavedWord,
   WordInfo,
 } from "./src/types";
@@ -83,6 +87,84 @@ const formatDateKey = (date = new Date()) => {
 
 const formatChineseDate = (date = new Date()) =>
   `${date.getMonth() + 1}月${date.getDate()}日 · ${["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()]}`;
+
+const DEFAULT_READER_SETTINGS: ReaderSettings = {
+  fontScale: 1,
+  lineSpacing: "standard",
+  fontFamily: "serif",
+  pageTone: "paper",
+  columnWidth: "standard",
+};
+
+const readerTone = {
+  paper: { background: "#F3F1EA", paper: "#FFFFFF" },
+  white: { background: "#F7F7F5", paper: "#FFFFFF" },
+  green: { background: "#EAF1E8", paper: "#F7FBF5" },
+} as const;
+
+const AnimatedSafeAreaView = Animated.createAnimatedComponent(SafeAreaView);
+
+function useReducedMotion() {
+  const [reducedMotion, setReducedMotion] = useState(false);
+
+  useEffect(() => {
+    AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion);
+    const subscription = AccessibilityInfo.addEventListener(
+      "reduceMotionChanged",
+      setReducedMotion,
+    );
+    return () => subscription.remove();
+  }, []);
+
+  return reducedMotion;
+}
+
+function PageTransition({
+  children,
+  transitionKey,
+}: {
+  children: React.ReactNode;
+  transitionKey: string;
+}) {
+  const reducedMotion = useReducedMotion();
+  const progress = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (reducedMotion) {
+      progress.setValue(1);
+      return;
+    }
+    progress.setValue(0);
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: 240,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [progress, reducedMotion, transitionKey]);
+
+  return (
+    <Animated.View
+      style={{
+        flex: 1,
+        opacity: progress.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.42, 1],
+        }),
+        transform: [
+          {
+            translateY: progress.interpolate({
+              inputRange: [0, 1],
+              outputRange: [10, 0],
+            }),
+          },
+        ],
+      }}
+    >
+      {children}
+    </Animated.View>
+  );
+}
 
 function sentenceContainingWord(paragraph: string, word: string) {
   const sentences = paragraph.match(/[^.!?]+[.!?]?/g) ?? [paragraph];
@@ -546,9 +628,26 @@ function ReaderScreen({
   onToggleWord: (word: WordInfo, article: Article) => void;
   onSubmit: (article: Article, answers: number[]) => Promise<AnswerResult[]>;
 }) {
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+  const reducedMotion = useReducedMotion();
+  const scrollRef = useRef<ScrollView>(null);
+  const scrollOffsetRef = useRef(0);
+  const scrollProgressRef = useRef(0);
+  const scrollSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restoredProgressRef = useRef(false);
+  const screenTransition = useRef(new Animated.Value(0)).current;
+  const tabIndicator = useRef(new Animated.Value(0)).current;
+  const tabContentTransition = useRef(new Animated.Value(1)).current;
+  const wordCardTransition = useRef(new Animated.Value(0)).current;
+  const closingWordRef = useRef(false);
   const [readerTab, setReaderTab] = useState<"article" | "answer">("article");
   const [selectedWord, setSelectedWord] = useState<WordInfo | null>(null);
+  const [wordAnchor, setWordAnchor] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
   const [pressedWord, setPressedWord] = useState<string | null>(null);
   const [wordLoading, setWordLoading] = useState(false);
   const [selectedAnswers, setSelectedAnswers] = useState<
@@ -557,18 +656,158 @@ function ReaderScreen({
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [answerResults, setAnswerResults] = useState<AnswerResult[]>([]);
-  const [fontScale, setFontScale] = useState(1);
+  const [readerSettings, setReaderSettings] = useState<ReaderSettings>(
+    DEFAULT_READER_SETTINGS,
+  );
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [showReaderHint, setShowReaderHint] = useState(false);
+  const [readingProgress, setReadingProgress] = useState(0);
+  const [restoredOffset, setRestoredOffset] = useState<number | null>(null);
   const isSaved = (word: string) =>
     savedWords.some(
       (item) =>
         item.examId === article.examId &&
         item.word === word.toLowerCase().replace(/[^a-z'-]/g, ""),
     );
-  const contentWidth = Math.min(760, width - (width >= 768 ? 160 : 32));
+  const maxColumnWidth =
+    readerSettings.columnWidth === "narrow"
+      ? 660
+      : readerSettings.columnWidth === "wide"
+        ? 880
+        : 760;
+  const contentWidth = Math.min(
+    maxColumnWidth,
+    width - (width < 480 ? 16 : width >= 768 ? 120 : 32),
+  );
+  const lineSpacingMultiplier =
+    readerSettings.lineSpacing === "compact"
+      ? 0.94
+      : readerSettings.lineSpacing === "relaxed"
+        ? 1.18
+        : 1.06;
+  const activeTone = readerTone[readerSettings.pageTone];
+  const showAnchoredWordCard = width >= 768;
+  const wordPopoverWidth = Math.min(380, width - 32);
+  const wordPopoverHeight = 440;
+  const wordPopoverLeft = Math.max(
+    16,
+    Math.min(
+      width - wordPopoverWidth - 16,
+      (wordAnchor?.x ?? width / 2) + (wordAnchor?.width ?? 0) / 2 -
+        wordPopoverWidth / 2,
+    ),
+  );
+  const wordPopoverTop = wordAnchor
+    ? wordAnchor.y > height * 0.56
+      ? Math.max(72, wordAnchor.y - wordPopoverHeight - 12)
+      : Math.min(
+          height - wordPopoverHeight - 16,
+          wordAnchor.y + wordAnchor.height + 12,
+        )
+    : Math.max(72, (height - wordPopoverHeight) / 2);
   const allAnswered = article.questions.every(
     (_, index) => selectedAnswers[index] !== undefined,
   );
   const correctCount = answerResults.filter((result) => result.correct).length;
+
+  useEffect(() => {
+    if (reducedMotion) {
+      screenTransition.setValue(1);
+      return;
+    }
+    Animated.spring(screenTransition, {
+      toValue: 1,
+      damping: 22,
+      stiffness: 240,
+      mass: 0.9,
+      useNativeDriver: true,
+    }).start();
+  }, [reducedMotion, screenTransition]);
+
+  useEffect(() => {
+    const target = readerTab === "article" ? 0 : 1;
+    if (reducedMotion) {
+      tabIndicator.setValue(target);
+      tabContentTransition.setValue(1);
+      return;
+    }
+    tabContentTransition.setValue(0);
+    Animated.parallel([
+      Animated.spring(tabIndicator, {
+        toValue: target,
+        damping: 24,
+        stiffness: 280,
+        mass: 0.8,
+        useNativeDriver: true,
+      }),
+      Animated.timing(tabContentTransition, {
+        toValue: 1,
+        duration: 210,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [readerTab, reducedMotion, tabContentTransition, tabIndicator]);
+
+  useEffect(() => {
+    if (!selectedWord) return;
+    closingWordRef.current = false;
+    if (reducedMotion) {
+      wordCardTransition.setValue(1);
+      return;
+    }
+    wordCardTransition.setValue(0);
+    Animated.spring(wordCardTransition, {
+      toValue: 1,
+      damping: 20,
+      stiffness: 260,
+      mass: 0.78,
+      useNativeDriver: true,
+    }).start();
+  }, [reducedMotion, selectedWord?.word, wordCardTransition]);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      storage.getReaderSettings(),
+      storage.getReadingProgress(article.id),
+      storage.getReaderHintSeen(),
+    ]).then(([settings, progress, hintSeen]) => {
+      if (!active) return;
+      if (settings) setReaderSettings({ ...DEFAULT_READER_SETTINGS, ...settings });
+      setRestoredOffset(progress?.offsetY ?? 0);
+      setReadingProgress(progress?.ratio ?? 0);
+      scrollProgressRef.current = progress?.ratio ?? 0;
+      setShowReaderHint(!hintSeen);
+    });
+    return () => {
+      active = false;
+    };
+  }, [article.id]);
+
+  useEffect(
+    () => () => {
+      if (scrollSaveTimerRef.current) clearTimeout(scrollSaveTimerRef.current);
+      if (scrollOffsetRef.current > 0) {
+        void storage.setReadingProgress(article.id, {
+          offsetY: scrollOffsetRef.current,
+          ratio: scrollProgressRef.current,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    },
+    [article.id],
+  );
+
+  const updateReaderSettings = (next: ReaderSettings) => {
+    setReaderSettings(next);
+    void storage.setReaderSettings(next);
+  };
+
+  const dismissReaderHint = () => {
+    setShowReaderHint(false);
+    void storage.setReaderHintSeen();
+  };
 
   useEffect(() => {
     const commonWords = new Set([
@@ -621,7 +860,11 @@ function ReaderScreen({
     return () => clearTimeout(timer);
   }, [article.id, article.paragraphs]);
 
-  const openWord = (token: string, paragraph: string) => {
+  const openWord = (
+    token: string,
+    paragraph: string,
+    anchor?: { x: number; y: number; width: number; height: number },
+  ) => {
     const normalized = token.toLowerCase().replace(/[^a-z'-]/g, "");
     const savedWord = savedWords.find(
       (item) => item.examId === article.examId && item.word === normalized,
@@ -629,6 +872,7 @@ function ReaderScreen({
     const localWord: WordInfo = savedWord ?? lookupWord(token);
     if (!localWord.word) return;
     setSelectedWord(localWord);
+    setWordAnchor(anchor ?? null);
     setPressedWord(localWord.word);
     setWordLoading(true);
     api
@@ -667,6 +911,26 @@ function ReaderScreen({
       .finally(() => setWordLoading(false));
   };
 
+  const closeWord = () => {
+    const finish = () => {
+      closingWordRef.current = false;
+      setSelectedWord(null);
+      setWordAnchor(null);
+    };
+    if (reducedMotion || !selectedWord) {
+      finish();
+      return;
+    }
+    if (closingWordRef.current) return;
+    closingWordRef.current = true;
+    Animated.timing(wordCardTransition, {
+      toValue: 0,
+      duration: 150,
+      easing: Easing.in(Easing.cubic),
+      useNativeDriver: true,
+    }).start(finish);
+  };
+
   const openAnswers = async () => {
     if (submitted) {
       setReaderTab("answer");
@@ -696,13 +960,46 @@ function ReaderScreen({
   };
 
   const closeReader = () => {
-    onBack();
+    if (reducedMotion) {
+      onBack();
+      return;
+    }
+    Animated.timing(screenTransition, {
+      toValue: 0,
+      duration: 180,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    }).start(onBack);
   };
 
   return (
-    <SafeAreaView style={styles.readerSafe}>
+    <AnimatedSafeAreaView
+      style={[
+        styles.readerSafe,
+        { backgroundColor: activeTone.background },
+        {
+          opacity: screenTransition.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0.72, 1],
+          }),
+          transform: [
+            {
+              translateY: screenTransition.interpolate({
+                inputRange: [0, 1],
+                outputRange: [14, 0],
+              }),
+            },
+          ],
+        },
+      ]}
+    >
       <ExpoStatusBar style="dark" />
-      <View style={styles.readerTopbar}>
+      <View
+        style={[
+          styles.readerTopbar,
+          { backgroundColor: activeTone.background },
+        ]}
+      >
         <Pressable
           accessibilityLabel="返回"
           onPress={closeReader}
@@ -711,12 +1008,25 @@ function ReaderScreen({
           <ArrowLeft size={22} color={colors.ink} />
         </Pressable>
         <View style={styles.readerTabs}>
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.readerTabIndicator,
+              {
+                transform: [
+                  {
+                    translateX: tabIndicator.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, 76],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
           <Pressable
             onPress={() => setReaderTab("article")}
-            style={[
-              styles.readerTab,
-              readerTab === "article" && styles.readerTabActive,
-            ]}
+            style={styles.readerTab}
           >
             <Text
               style={[
@@ -729,10 +1039,7 @@ function ReaderScreen({
           </Pressable>
           <Pressable
             onPress={openAnswers}
-            style={[
-              styles.readerTab,
-              readerTab === "answer" && styles.readerTabActive,
-            ]}
+            style={styles.readerTab}
           >
             <Text
               style={[
@@ -746,22 +1053,74 @@ function ReaderScreen({
         </View>
         <Pressable
           accessibilityLabel="阅读设置"
-          onPress={() => setFontScale(fontScale >= 1.2 ? 0.9 : fontScale + 0.1)}
-          style={styles.fontButton}
+          accessibilityState={{ expanded: settingsVisible }}
+          onPress={() => setSettingsVisible(true)}
+          style={[styles.fontButton, settingsVisible && styles.fontButtonActive]}
         >
           <Text style={styles.fontButtonText}>Aa</Text>
         </Pressable>
       </View>
+      <View style={styles.readingProgressTrack}>
+        <View
+          style={[
+            styles.readingProgressFill,
+            { width: `${Math.max(0, Math.min(100, readingProgress * 100))}%` },
+          ]}
+        />
+      </View>
       <ScrollView
+        ref={scrollRef}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.readerScroll}
+        scrollEventThrottle={100}
+        onContentSizeChange={() => {
+          if (restoredOffset === null || restoredProgressRef.current) return;
+          restoredProgressRef.current = true;
+          if (restoredOffset > 24) {
+            requestAnimationFrame(() =>
+              scrollRef.current?.scrollTo({ y: restoredOffset, animated: false }),
+            );
+          }
+        }}
+        onScroll={({ nativeEvent }) => {
+          const maxOffset = Math.max(
+            1,
+            nativeEvent.contentSize.height - nativeEvent.layoutMeasurement.height,
+          );
+          const offsetY = Math.max(0, nativeEvent.contentOffset.y);
+          const ratio = Math.max(0, Math.min(1, offsetY / maxOffset));
+          scrollOffsetRef.current = offsetY;
+          scrollProgressRef.current = ratio;
+          setReadingProgress(ratio);
+          if (scrollSaveTimerRef.current) clearTimeout(scrollSaveTimerRef.current);
+          scrollSaveTimerRef.current = setTimeout(() => {
+            void storage.setReadingProgress(article.id, {
+              offsetY,
+              ratio,
+              updatedAt: new Date().toISOString(),
+            });
+          }, 500);
+        }}
+        contentContainerStyle={[
+          styles.readerScroll,
+          width < 480 && styles.readerScrollMobile,
+        ]}
       >
-        <View style={[styles.readerPaper, { width: contentWidth }]}>
+        <View
+          style={[
+            styles.readerPaper,
+            width < 480 && styles.readerPaperMobile,
+            { width: contentWidth, backgroundColor: activeTone.paper },
+          ]}
+        >
           <View style={styles.readerHeading}>
             <Text style={styles.readerEyebrow}>
               {article.eyebrow} · {article.year}
             </Text>
-            <Text style={styles.readerTitle}>{article.title}</Text>
+            <Text
+              style={[styles.readerTitle, width < 480 && styles.readerTitleMobile]}
+            >
+              {article.title}
+            </Text>
             <View style={styles.readerMeta}>
               <Text style={styles.readerMetaText}>
                 {getExam(article.examId).name}
@@ -773,24 +1132,66 @@ function ReaderScreen({
             </View>
           </View>
 
-          {readerTab === "article" ? (
-            <View>
-              <View style={styles.longPressHint}>
-                <View style={styles.hintHand}>
-                  <Text>☝</Text>
+          <Animated.View
+            style={{
+              opacity: tabContentTransition.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0.42, 1],
+              }),
+              transform: [
+                {
+                  translateX: tabContentTransition.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [readerTab === "article" ? -10 : 10, 0],
+                  }),
+                },
+              ],
+            }}
+          >
+            {readerTab === "article" ? (
+              <View>
+              {showReaderHint && (
+                <View style={styles.longPressHint}>
+                  <View style={styles.hintHand}>
+                    <Text>☝</Text>
+                  </View>
+                  <Text style={styles.longPressHintText}>
+                    {Platform.OS === "web" && width >= 768
+                      ? "鼠标按住单词，查看翻译、音标和例句"
+                      : "长按单词，查看翻译、音标和例句"}
+                  </Text>
+                  <Pressable
+                    accessibilityLabel="关闭阅读提示"
+                    hitSlop={8}
+                    onPress={dismissReaderHint}
+                    style={styles.hintClose}
+                  >
+                    <X size={15} color={colors.inkMuted} />
+                  </Pressable>
                 </View>
-                <Text style={styles.longPressHintText}>
-                  {Platform.OS === "web"
-                    ? "鼠标按住任意单词，查看翻译并加入生词库"
-                    : "长按任意单词，查看翻译并加入生词库"}
-                </Text>
-              </View>
+              )}
               {article.paragraphs.map((paragraph, pIndex) => (
                 <Text
                   key={pIndex}
                   style={[
                     styles.paragraph,
-                    { fontSize: 18 * fontScale, lineHeight: 34 * fontScale },
+                    {
+                      fontSize: 18 * readerSettings.fontScale,
+                      lineHeight:
+                        32 * readerSettings.fontScale * lineSpacingMultiplier,
+                      fontFamily:
+                        readerSettings.fontFamily === "serif"
+                          ? Platform.select({
+                              ios: "Georgia",
+                              android: "serif",
+                              default: "Georgia",
+                            })
+                          : Platform.select({
+                              ios: "System",
+                              android: "sans-serif",
+                              default: "system-ui",
+                            }),
+                    },
                   ]}
                 >
                   {paragraph.split(/(\s+)/).map((token, index) => {
@@ -801,7 +1202,9 @@ function ReaderScreen({
                       <LongPressWord
                         key={`${pIndex}-${index}`}
                         accessibilityHint="长按查看中文释义和例句"
-                        onLongPress={() => clean && openWord(token, paragraph)}
+                        onLongPress={(anchor) =>
+                          clean && openWord(token, paragraph, anchor)
+                        }
                         onPressIn={() => clean && setPressedWord(clean)}
                         onPressOut={() =>
                           setPressedWord((current) =>
@@ -916,9 +1319,9 @@ function ReaderScreen({
                 </Text>
                 <ChevronRight color="#fff" size={19} />
               </Pressable>
-            </View>
-          ) : (
-            <View style={styles.questions}>
+              </View>
+            ) : (
+              <View style={styles.questions}>
               <View style={styles.answerIntro}>
                 <View style={styles.answerIntroIcon}>
                   <Check color={colors.primary} size={20} />
@@ -1003,24 +1406,59 @@ function ReaderScreen({
                   </View>
                 );
               })}
-            </View>
-          )}
+              </View>
+            )}
+          </Animated.View>
         </View>
       </ScrollView>
 
       <Modal
         visible={!!selectedWord}
         transparent
-        animationType="slide"
-        onRequestClose={() => setSelectedWord(null)}
+        animationType="fade"
+        onRequestClose={closeWord}
       >
         <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => setSelectedWord(null)}
+          style={[
+            styles.modalBackdrop,
+            showAnchoredWordCard && styles.popoverBackdrop,
+          ]}
+          onPress={closeWord}
         />
         {selectedWord && (
-          <View style={styles.wordSheet}>
-            <View style={styles.sheetHandle} />
+          <Animated.View
+            style={[
+              showAnchoredWordCard
+                ? [
+                    styles.wordPopover,
+                    {
+                      width: wordPopoverWidth,
+                      left: wordPopoverLeft,
+                      top: wordPopoverTop,
+                    },
+                  ]
+                : styles.wordSheet,
+              {
+                opacity: wordCardTransition,
+                transform: [
+                  showAnchoredWordCard
+                    ? {
+                        scale: wordCardTransition.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [0.96, 1],
+                        }),
+                      }
+                    : {
+                        translateY: wordCardTransition.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [32, 0],
+                        }),
+                      },
+                ],
+              },
+            ]}
+          >
+            {!showAnchoredWordCard && <View style={styles.sheetHandle} />}
             <View style={styles.wordTop}>
               <View>
                 <Text style={styles.wordTitle}>{selectedWord.word}</Text>
@@ -1036,7 +1474,7 @@ function ReaderScreen({
                 </Pressable>
                 <Pressable
                   accessibilityLabel="关闭"
-                  onPress={() => setSelectedWord(null)}
+                  onPress={closeWord}
                   style={styles.roundButton}
                 >
                   <X size={20} color={colors.inkMuted} />
@@ -1074,7 +1512,7 @@ function ReaderScreen({
             <Pressable
               onPress={() => {
                 onToggleWord(selectedWord, article);
-                setSelectedWord(null);
+                closeWord();
               }}
               style={[
                 styles.saveWordButton,
@@ -1095,10 +1533,229 @@ function ReaderScreen({
                 {isSaved(selectedWord.word) ? "移出生词库" : "标记为生词"}
               </Text>
             </Pressable>
-          </View>
+          </Animated.View>
         )}
       </Modal>
-    </SafeAreaView>
+
+      <Modal
+        visible={settingsVisible}
+        transparent
+        animationType={width >= 768 ? "fade" : "slide"}
+        onRequestClose={() => setSettingsVisible(false)}
+      >
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setSettingsVisible(false)}
+        />
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          style={[
+            styles.readerSettingsPanel,
+            width >= 768 && styles.readerSettingsPanelDesktop,
+          ]}
+          contentContainerStyle={styles.readerSettingsContent}
+        >
+          <View style={styles.readerSettingsHeader}>
+            <View>
+              <Text style={styles.readerSettingsTitle}>阅读设置</Text>
+              <Text style={styles.readerSettingsSubtitle}>
+                调整后会自动应用到所有文章
+              </Text>
+            </View>
+            <Pressable
+              accessibilityLabel="关闭阅读设置"
+              onPress={() => setSettingsVisible(false)}
+              style={styles.roundButton}
+            >
+              <X size={20} color={colors.inkMuted} />
+            </Pressable>
+          </View>
+
+          <View style={styles.readerSettingGroup}>
+            <View style={styles.readerSettingLabelRow}>
+              <Text style={styles.readerSettingLabel}>字号</Text>
+              <Text style={styles.readerSettingValue}>
+                {Math.round(readerSettings.fontScale * 100)}%
+              </Text>
+            </View>
+            <View style={styles.fontScaleControls}>
+              <Pressable
+                accessibilityLabel="减小字号"
+                disabled={readerSettings.fontScale <= 0.85}
+                onPress={() =>
+                  updateReaderSettings({
+                    ...readerSettings,
+                    fontScale: Math.max(0.85, readerSettings.fontScale - 0.1),
+                  })
+                }
+                style={styles.fontScaleButton}
+              >
+                <Text style={styles.fontScaleButtonText}>A−</Text>
+              </Pressable>
+              <View style={styles.fontScalePreview}>
+                <Text
+                  style={[
+                    styles.fontScalePreviewText,
+                    { fontSize: 18 * readerSettings.fontScale },
+                  ]}
+                >
+                  Reading makes words memorable.
+                </Text>
+              </View>
+              <Pressable
+                accessibilityLabel="增大字号"
+                disabled={readerSettings.fontScale >= 1.3}
+                onPress={() =>
+                  updateReaderSettings({
+                    ...readerSettings,
+                    fontScale: Math.min(1.3, readerSettings.fontScale + 0.1),
+                  })
+                }
+                style={styles.fontScaleButton}
+              >
+                <Text style={styles.fontScaleButtonText}>A＋</Text>
+              </Pressable>
+            </View>
+          </View>
+
+          <View style={styles.readerSettingGroup}>
+            <Text style={styles.readerSettingLabel}>行距</Text>
+            <View style={styles.readerChoiceRow}>
+              {([
+                ["compact", "紧凑"],
+                ["standard", "标准"],
+                ["relaxed", "宽松"],
+              ] as const).map(([value, label]) => (
+                <Pressable
+                  key={value}
+                  onPress={() =>
+                    updateReaderSettings({ ...readerSettings, lineSpacing: value })
+                  }
+                  style={[
+                    styles.readerChoice,
+                    readerSettings.lineSpacing === value &&
+                      styles.readerChoiceActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.readerChoiceText,
+                      readerSettings.lineSpacing === value &&
+                        styles.readerChoiceTextActive,
+                    ]}
+                  >
+                    {label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+
+          <View style={styles.readerSettingsGrid}>
+            <View style={styles.readerSettingGroupCompact}>
+              <Text style={styles.readerSettingLabel}>字体</Text>
+              <View style={styles.readerChoiceRow}>
+                {([
+                  ["serif", "衬线"],
+                  ["sans", "无衬线"],
+                ] as const).map(([value, label]) => (
+                  <Pressable
+                    key={value}
+                    onPress={() =>
+                      updateReaderSettings({ ...readerSettings, fontFamily: value })
+                    }
+                    style={[
+                      styles.readerChoice,
+                      readerSettings.fontFamily === value &&
+                        styles.readerChoiceActive,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.readerChoiceText,
+                        readerSettings.fontFamily === value &&
+                          styles.readerChoiceTextActive,
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+            <View style={styles.readerSettingGroupCompact}>
+              <Text style={styles.readerSettingLabel}>页面宽度</Text>
+              <View style={styles.readerChoiceRow}>
+                {([
+                  ["narrow", "窄"],
+                  ["standard", "标准"],
+                  ["wide", "宽"],
+                ] as const).map(([value, label]) => (
+                  <Pressable
+                    key={value}
+                    onPress={() =>
+                      updateReaderSettings({ ...readerSettings, columnWidth: value })
+                    }
+                    style={[
+                      styles.readerChoice,
+                      readerSettings.columnWidth === value &&
+                        styles.readerChoiceActive,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.readerChoiceText,
+                        readerSettings.columnWidth === value &&
+                          styles.readerChoiceTextActive,
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.readerSettingGroup}>
+            <Text style={styles.readerSettingLabel}>页面色调</Text>
+            <View style={styles.readerToneRow}>
+              {([
+                ["paper", "纸张", "#F3F1EA"],
+                ["white", "柔白", "#FFFFFF"],
+                ["green", "护眼", "#EAF1E8"],
+              ] as const).map(([value, label, color]) => (
+                <Pressable
+                  key={value}
+                  onPress={() =>
+                    updateReaderSettings({ ...readerSettings, pageTone: value })
+                  }
+                  style={[
+                    styles.readerToneChoice,
+                    readerSettings.pageTone === value &&
+                      styles.readerToneChoiceActive,
+                  ]}
+                >
+                  <View style={[styles.readerToneSwatch, { backgroundColor: color }]} />
+                  <Text style={styles.readerToneText}>{label}</Text>
+                  {readerSettings.pageTone === value && (
+                    <Check size={16} color={colors.primary} />
+                  )}
+                </Pressable>
+              ))}
+            </View>
+          </View>
+
+          <View style={styles.readerSettingTip}>
+            <Text style={styles.readerSettingTipText}>
+              {Platform.OS === "web" && width >= 768
+                ? "提示：鼠标按住正文中的单词即可查看释义和例句。"
+                : "提示：长按正文中的单词即可查看释义和例句。"}
+            </Text>
+          </View>
+        </ScrollView>
+      </Modal>
+    </AnimatedSafeAreaView>
   );
 }
 
@@ -2243,7 +2900,7 @@ export default function App() {
       <View style={styles.appShell}>
         {tablet && <Navigation active={tab} tablet onChange={setTab} />}
         <View style={[styles.mainContent, tablet && styles.mainContentTablet]}>
-          {content}
+          <PageTransition transitionKey={tab}>{content}</PageTransition>
         </View>
         {!tablet && (
           <Navigation active={tab} tablet={false} onChange={setTab} />
@@ -2682,8 +3339,26 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceMuted,
     padding: 3,
     borderRadius: 12,
+    position: "relative",
+    overflow: "hidden",
   },
-  readerTab: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 9 },
+  readerTabIndicator: {
+    position: "absolute",
+    left: 3,
+    top: 3,
+    bottom: 3,
+    width: 76,
+    borderRadius: 9,
+    backgroundColor: colors.surface,
+    ...shadows.card,
+  },
+  readerTab: {
+    width: 76,
+    paddingVertical: 8,
+    alignItems: "center",
+    borderRadius: 9,
+    zIndex: 1,
+  },
   readerTabActive: { backgroundColor: colors.surface },
   readerTabText: { color: colors.inkMuted, fontSize: 12, fontWeight: "600" },
   readerTabTextActive: { color: colors.ink, fontWeight: "800" },
@@ -2694,18 +3369,35 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  fontButtonActive: { backgroundColor: colors.primarySoft },
   fontButtonText: { color: colors.ink, fontWeight: "800", fontSize: 16 },
+  readingProgressTrack: {
+    height: 3,
+    backgroundColor: "rgba(30,98,88,0.08)",
+    overflow: "hidden",
+  },
+  readingProgressFill: {
+    height: "100%",
+    backgroundColor: colors.primary,
+  },
   readerScroll: {
     alignItems: "center",
     paddingVertical: 30,
     paddingBottom: 80,
   },
+  readerScrollMobile: { paddingVertical: 14, paddingBottom: 64 },
   readerPaper: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     paddingHorizontal: 24,
     paddingVertical: 30,
     ...shadows.card,
+  },
+  readerPaperMobile: {
+    borderRadius: 18,
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 30,
   },
   readerHeading: {
     paddingBottom: 24,
@@ -2726,6 +3418,7 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
     marginTop: 10,
   },
+  readerTitleMobile: { fontSize: 27, lineHeight: 35 },
   readerMeta: { flexDirection: "row", alignItems: "center", marginTop: 12 },
   readerMetaText: { fontSize: 11, color: colors.inkMuted },
   metaDivider: {
@@ -2753,6 +3446,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   longPressHintText: { fontSize: 11, color: colors.inkMuted, flex: 1 },
+  hintClose: {
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 8,
+  },
   paragraph: {
     color: "#26332F",
     marginTop: 24,
@@ -2762,11 +3462,7 @@ const styles = StyleSheet.create({
       default: "Georgia",
     }),
   },
-  interactiveWord: {
-    textDecorationLine: "underline",
-    textDecorationStyle: "dotted",
-    textDecorationColor: "#A9B8B3",
-  },
+  interactiveWord: {},
   webInteractiveWord: {
     cursor: "pointer",
     userSelect: "none",
@@ -2916,6 +3612,7 @@ const styles = StyleSheet.create({
     marginTop: 5,
   },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(20,30,27,0.38)" },
+  popoverBackdrop: { backgroundColor: "rgba(20,30,27,0.16)" },
   wordSheet: {
     position: "absolute",
     bottom: 0,
@@ -2927,6 +3624,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 22,
     paddingTop: 10,
     paddingBottom: Platform.OS === "ios" ? 36 : 22,
+  },
+  wordPopover: {
+    position: "absolute",
+    maxHeight: 520,
+    overflow: "hidden",
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    paddingHorizontal: 22,
+    paddingVertical: 22,
+    borderWidth: 1,
+    borderColor: colors.line,
+    ...shadows.card,
   },
   sheetHandle: {
     width: 36,
@@ -3026,6 +3735,140 @@ const styles = StyleSheet.create({
   },
   saveWordText: { color: "#fff", fontSize: 15, fontWeight: "700" },
   removeWordText: { color: colors.danger },
+  readerSettingsPanel: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    maxHeight: "92%",
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+  },
+  readerSettingsPanelDesktop: {
+    left: "50%",
+    right: undefined,
+    width: 600,
+    marginLeft: -300,
+    bottom: 28,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.line,
+    ...shadows.card,
+  },
+  readerSettingsContent: { padding: 22, paddingBottom: 28 },
+  readerSettingsHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 16,
+    marginBottom: 20,
+  },
+  readerSettingsTitle: { color: colors.ink, fontSize: 22, fontWeight: "800" },
+  readerSettingsSubtitle: { color: colors.inkMuted, fontSize: 12, marginTop: 5 },
+  readerSettingGroup: { marginTop: 18 },
+  readerSettingGroupCompact: { flex: 1, minWidth: 220 },
+  readerSettingsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 18,
+    marginTop: 20,
+  },
+  readerSettingLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  readerSettingLabel: { color: colors.ink, fontSize: 13, fontWeight: "800" },
+  readerSettingValue: { color: colors.primary, fontSize: 12, fontWeight: "800" },
+  fontScaleControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 10,
+  },
+  fontScaleButton: {
+    width: 48,
+    height: 46,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  fontScaleButtonText: { color: colors.ink, fontSize: 14, fontWeight: "800" },
+  fontScalePreview: {
+    flex: 1,
+    minHeight: 46,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.sm,
+    backgroundColor: "#F5F7F5",
+  },
+  fontScalePreviewText: {
+    color: colors.ink,
+    textAlign: "center",
+    fontFamily: Platform.select({
+      ios: "Georgia",
+      android: "serif",
+      default: "Georgia",
+    }),
+  },
+  readerChoiceRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 10,
+  },
+  readerChoice: {
+    flex: 1,
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  readerChoiceActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+  },
+  readerChoiceText: { color: colors.inkMuted, fontSize: 12, fontWeight: "700" },
+  readerChoiceTextActive: { color: colors.primaryDark },
+  readerToneRow: { flexDirection: "row", gap: 8, marginTop: 10 },
+  readerToneChoice: {
+    flex: 1,
+    minHeight: 48,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  readerToneChoiceActive: {
+    borderColor: colors.primary,
+    backgroundColor: "#F4F9F7",
+  },
+  readerToneSwatch: {
+    width: 18,
+    height: 18,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#D8DDD9",
+  },
+  readerToneText: { color: colors.ink, fontSize: 12, fontWeight: "700" },
+  readerSettingTip: {
+    marginTop: 20,
+    padding: 12,
+    borderRadius: radius.sm,
+    backgroundColor: "#F4F7F5",
+  },
+  readerSettingTipText: { color: colors.inkMuted, fontSize: 11, lineHeight: 18 },
   confirmModalRoot: {
     flex: 1,
     alignItems: "center",

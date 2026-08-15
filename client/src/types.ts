@@ -55,3 +55,17 @@ export type HistoryRecord = {
   examId: ExamId;
   articleIds: string[];
 };
+
+export type ReaderSettings = {
+  fontScale: number;
+  lineSpacing: "compact" | "standard" | "relaxed";
+  fontFamily: "serif" | "sans";
+  pageTone: "paper" | "white" | "green";
+  columnWidth: "narrow" | "standard" | "wide";
+};
+
+export type ReadingProgress = {
+  offsetY: number;
+  ratio: number;
+  updatedAt: string;
+};
