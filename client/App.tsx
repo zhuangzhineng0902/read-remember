@@ -36,6 +36,7 @@ import {
   Search,
   Settings,
   Sparkles,
+  Square,
   Target,
   Volume2,
   X,
@@ -179,8 +180,69 @@ function sentenceContainingWord(paragraph: string, word: string) {
 
 let pronunciationPlayer: AudioPlayer | null = null;
 let pronunciationReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+let pronunciationStartTimer: ReturnType<typeof setTimeout> | null = null;
+let pronunciationStatusSubscription: { remove: () => void } | null = null;
+let pronunciationPlaybackGeneration = 0;
 
-async function playWord(word: string, accent: "us" | "uk" = "us") {
+type AudioPlaybackState = "idle" | "loading" | "playing" | "error";
+
+type AudioPlaybackCallbacks = {
+  onLoading: () => void;
+  onPlaying: () => void;
+  onFinished: () => void;
+  onError: () => void;
+};
+
+function stopWordAudio() {
+  pronunciationPlaybackGeneration += 1;
+  if (pronunciationReleaseTimer) {
+    clearTimeout(pronunciationReleaseTimer);
+    pronunciationReleaseTimer = null;
+  }
+  if (pronunciationStartTimer) {
+    clearTimeout(pronunciationStartTimer);
+    pronunciationStartTimer = null;
+  }
+  pronunciationStatusSubscription?.remove();
+  pronunciationStatusSubscription = null;
+  pronunciationPlayer?.release();
+  pronunciationPlayer = null;
+  Speech.stop();
+}
+
+async function playWord(
+  word: string,
+  callbacks: AudioPlaybackCallbacks = {
+    onLoading: () => {},
+    onPlaying: () => {},
+    onFinished: () => {},
+    onError: () => {},
+  },
+  accent: "us" | "uk" = "us",
+) {
+  stopWordAudio();
+  const playbackGeneration = pronunciationPlaybackGeneration;
+  const isCurrent = () =>
+    playbackGeneration === pronunciationPlaybackGeneration;
+  const markPlaying = () => {
+    if (!isCurrent()) return;
+    if (pronunciationStartTimer) {
+      clearTimeout(pronunciationStartTimer);
+      pronunciationStartTimer = null;
+    }
+    callbacks.onPlaying();
+  };
+  const finish = () => {
+    if (!isCurrent()) return;
+    callbacks.onFinished();
+    stopWordAudio();
+  };
+  const fail = () => {
+    if (!isCurrent()) return;
+    callbacks.onError();
+    stopWordAudio();
+  };
+  callbacks.onLoading();
   try {
     const pronunciation = await api.getPronunciation(word, accent, "", true);
     const matchesRequestedAccent =
@@ -188,25 +250,38 @@ async function playWord(word: string, accent: "us" | "uk" = "us") {
       pronunciation.actualAccent === "unknown" ||
       pronunciation.actualAccent === accent;
     if (pronunciation.audioUrl && matchesRequestedAccent) {
-      if (pronunciationReleaseTimer) clearTimeout(pronunciationReleaseTimer);
-      pronunciationPlayer?.release();
       pronunciationPlayer = createAudioPlayer(pronunciation.audioUrl);
+      pronunciationStatusSubscription = pronunciationPlayer.addListener(
+        "playbackStatusUpdate",
+        (status) => {
+          if (status.playing) markPlaying();
+          if (status.didJustFinish) finish();
+        },
+      );
       pronunciationPlayer.play();
+      pronunciationStartTimer = setTimeout(fail, 5_000);
       pronunciationReleaseTimer = setTimeout(() => {
-        pronunciationPlayer?.release();
-        pronunciationPlayer = null;
+        finish();
       }, 15_000);
       return;
     }
   } catch {
     // Device speech remains available when the dictionary service is offline.
   }
-  Speech.stop();
-  Speech.speak(word, {
-    language: accent === "uk" ? "en-GB" : "en-US",
-    rate: 0.82,
-    pitch: 1,
-  });
+  try {
+    pronunciationStartTimer = setTimeout(fail, 5_000);
+    Speech.speak(word, {
+      language: accent === "uk" ? "en-GB" : "en-US",
+      rate: 0.82,
+      pitch: 1,
+      onStart: markPlaying,
+      onDone: finish,
+      onStopped: finish,
+      onError: fail,
+    });
+  } catch {
+    fail();
+  }
 }
 
 function AppLogo({ compact = false }: { compact?: boolean }) {
@@ -639,6 +714,7 @@ function ReaderScreen({
   const tabIndicator = useRef(new Animated.Value(0)).current;
   const tabContentTransition = useRef(new Animated.Value(1)).current;
   const wordCardTransition = useRef(new Animated.Value(0)).current;
+  const audioPulse = useRef(new Animated.Value(0)).current;
   const closingWordRef = useRef(false);
   const [readerTab, setReaderTab] = useState<"article" | "answer">("article");
   const [selectedWord, setSelectedWord] = useState<WordInfo | null>(null);
@@ -650,6 +726,7 @@ function ReaderScreen({
   } | null>(null);
   const [pressedWord, setPressedWord] = useState<string | null>(null);
   const [wordLoading, setWordLoading] = useState(false);
+  const [audioState, setAudioState] = useState<AudioPlaybackState>("idle");
   const [selectedAnswers, setSelectedAnswers] = useState<
     Record<number, number>
   >({});
@@ -765,6 +842,38 @@ function ReaderScreen({
       useNativeDriver: true,
     }).start();
   }, [reducedMotion, selectedWord?.word, wordCardTransition]);
+
+  useEffect(() => {
+    setAudioState("idle");
+    stopWordAudio();
+    return stopWordAudio;
+  }, [selectedWord?.word]);
+
+  useEffect(() => {
+    audioPulse.stopAnimation();
+    if (audioState !== "playing" || reducedMotion) {
+      audioPulse.setValue(0);
+      return;
+    }
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(audioPulse, {
+          toValue: 1,
+          duration: 760,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(audioPulse, {
+          toValue: 0,
+          duration: 760,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [audioPulse, audioState, reducedMotion]);
 
   useEffect(() => {
     let active = true;
@@ -912,6 +1021,8 @@ function ReaderScreen({
   };
 
   const closeWord = () => {
+    stopWordAudio();
+    setAudioState("idle");
     const finish = () => {
       closingWordRef.current = false;
       setSelectedWord(null);
@@ -929,6 +1040,21 @@ function ReaderScreen({
       easing: Easing.in(Easing.cubic),
       useNativeDriver: true,
     }).start(finish);
+  };
+
+  const toggleWordPronunciation = () => {
+    if (!selectedWord || audioState === "loading") return;
+    if (audioState === "playing") {
+      stopWordAudio();
+      setAudioState("idle");
+      return;
+    }
+    void playWord(selectedWord.word, {
+      onLoading: () => setAudioState("loading"),
+      onPlaying: () => setAudioState("playing"),
+      onFinished: () => setAudioState("idle"),
+      onError: () => setAudioState("error"),
+    });
   };
 
   const openAnswers = async () => {
@@ -1466,11 +1592,80 @@ function ReaderScreen({
               </View>
               <View style={styles.wordActions}>
                 <Pressable
-                  accessibilityLabel="播放发音"
-                  onPress={() => playWord(selectedWord.word)}
-                  style={styles.roundButton}
+                  accessibilityLabel={
+                    audioState === "playing"
+                      ? "停止播放发音"
+                      : audioState === "loading"
+                        ? "正在加载发音"
+                        : audioState === "error"
+                          ? "重新播放发音"
+                          : "播放发音"
+                  }
+                  accessibilityState={{
+                    busy: audioState === "loading",
+                    selected: audioState === "playing",
+                    disabled: audioState === "loading",
+                  }}
+                  disabled={audioState === "loading"}
+                  onPress={toggleWordPronunciation}
+                  style={[
+                    styles.wordAudioButton,
+                    audioState === "playing" && styles.wordAudioButtonPlaying,
+                    audioState === "error" && styles.wordAudioButtonError,
+                  ]}
                 >
-                  <Volume2 size={20} color={colors.primary} />
+                  <View style={styles.wordAudioIcon}>
+                    {audioState === "playing" && !reducedMotion && (
+                      <Animated.View
+                        pointerEvents="none"
+                        style={[
+                          styles.wordAudioPulse,
+                          {
+                            opacity: audioPulse.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: [0.45, 0],
+                            }),
+                            transform: [
+                              {
+                                scale: audioPulse.interpolate({
+                                  inputRange: [0, 1],
+                                  outputRange: [0.8, 1.45],
+                                }),
+                              },
+                            ],
+                          },
+                        ]}
+                      />
+                    )}
+                    {audioState === "loading" ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : audioState === "playing" ? (
+                      <Square size={13} color="#fff" fill="#fff" />
+                    ) : (
+                      <Volume2
+                        size={18}
+                        color={
+                          audioState === "error" ? colors.danger : colors.primary
+                        }
+                      />
+                    )}
+                  </View>
+                  <Text
+                    accessibilityLiveRegion="polite"
+                    style={[
+                      styles.wordAudioText,
+                      audioState === "playing" && styles.wordAudioTextPlaying,
+                      audioState === "error" && styles.wordAudioTextError,
+                    ]}
+                  >
+                    {audioState === "loading"
+                      ? "加载中"
+                      : audioState === "playing"
+                        ? "播放中"
+                        : audioState === "error"
+                          ? "重试"
+                          : "播放"}
+                  </Text>
                 </Pressable>
                 <Pressable
                   accessibilityLabel="关闭"
@@ -3653,6 +3848,44 @@ const styles = StyleSheet.create({
   wordTitle: { color: colors.ink, fontSize: 30, fontWeight: "800" },
   phonetic: { color: colors.primary, fontSize: 14, marginTop: 4 },
   wordActions: { flexDirection: "row", gap: 8 },
+  wordAudioButton: {
+    minWidth: 86,
+    height: 42,
+    paddingHorizontal: 11,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    backgroundColor: colors.primarySoft,
+    borderWidth: 1,
+    borderColor: "#CFE3DD",
+  },
+  wordAudioButtonPlaying: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  wordAudioButtonError: {
+    backgroundColor: "#FFF3F0",
+    borderColor: "#F0C6BD",
+  },
+  wordAudioIcon: {
+    width: 20,
+    height: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  wordAudioPulse: {
+    position: "absolute",
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: "rgba(255,255,255,0.65)",
+  },
+  wordAudioText: { color: colors.primary, fontSize: 12, fontWeight: "800" },
+  wordAudioTextPlaying: { color: "#fff" },
+  wordAudioTextError: { color: colors.danger },
   roundButton: {
     width: 42,
     height: 42,
