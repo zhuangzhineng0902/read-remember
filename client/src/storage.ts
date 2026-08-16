@@ -37,6 +37,7 @@ async function readJson<T>(key: string, fallback: T): Promise<T> {
 export const storage = {
   getExam: () => AsyncStorage.getItem(KEYS.exam) as Promise<ExamId | null>,
   setExam: (examId: ExamId) => AsyncStorage.setItem(KEYS.exam, examId),
+  clearExam: () => AsyncStorage.removeItem(KEYS.exam),
   getWords: () => readJson<SavedWord[]>(KEYS.words, []),
   setWords: (words: SavedWord[]) =>
     AsyncStorage.setItem(KEYS.words, JSON.stringify(words)),

@@ -14,6 +14,7 @@ import {
   Switch,
   Text,
   TextInput,
+  type TextStyle,
   useWindowDimensions,
   View,
 } from "react-native";
@@ -144,7 +145,7 @@ type AppNotice = {
 };
 
 const readerTone = {
-  paper: { background: "#F3F1EA", paper: "#FFFFFF" },
+  paper: { background: "#E9E5DB", paper: "#F3F1EA" },
   white: { background: "#F7F7F5", paper: "#FFFFFF" },
   green: { background: "#EAF1E8", paper: "#F7FBF5" },
 } as const;
@@ -374,7 +375,8 @@ function DailyGoalSheet({
       statusBarTranslucent
     >
       <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={Platform.OS === "android" ? 12 : 0}
         style={[
           styles.nativeModalRoot,
           tablet && styles.nativeModalRootDesktop,
@@ -426,10 +428,16 @@ function DailyGoalSheet({
                 maxLength={2}
                 onChangeText={(text) => setDraft(text.replace(/\D/g, ""))}
                 selectTextOnFocus
-                style={styles.goalInput}
+                style={[
+                  styles.goalInput,
+                  Platform.OS === "web" &&
+                    ({ outlineStyle: "none" } as unknown as TextStyle),
+                ]}
                 value={draft}
               />
-              <Text style={styles.goalInputUnit}>篇 / 天</Text>
+              <Text pointerEvents="none" style={styles.goalInputUnit}>
+                篇 / 天
+              </Text>
             </View>
             <Pressable
               accessibilityLabel="增加一篇"
@@ -581,7 +589,10 @@ function AccountSheet({
   initialMode: AccountMode;
   dismissible?: boolean;
   onClose: () => void;
-  onAuthenticated: (session: UserProfile & { token: string }) => Promise<void>;
+  onAuthenticated: (
+    session: UserProfile & { token: string },
+    isNewAccount?: boolean,
+  ) => Promise<void>;
   onProfileUpdated: (profile: UserProfile) => void;
   onLogout: () => void;
 }) {
@@ -630,7 +641,7 @@ function AccountSheet({
     try {
       if (mode === "login") {
         const session = await api.login(username.trim(), password);
-        await onAuthenticated(session);
+        await onAuthenticated(session, false);
         onClose();
       } else if (mode === "register") {
         const session = await api.register({
@@ -640,7 +651,7 @@ function AccountSheet({
           displayName: displayName.trim(),
           email: email.trim(),
         });
-        await onAuthenticated(session);
+        await onAuthenticated(session, true);
         onClose();
       } else {
         const updated = await api.updateProfile({
@@ -1060,10 +1071,34 @@ function AppLogo({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function Onboarding({ onSelect }: { onSelect: (examId: ExamId) => void }) {
+function Onboarding({
+  onComplete,
+}: {
+  onComplete: (examId: ExamId, dailyGoal: number) => Promise<void>;
+}) {
   const { width } = useWindowDimensions();
   const tablet = width >= 768;
   const [selected, setSelected] = useState<ExamId>("toefl");
+  const [dailyGoal, setDailyGoal] = useState(3);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const finish = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      await onComplete(selected, dailyGoal);
+    } catch (finishError) {
+      setError(
+        finishError instanceof Error
+          ? finishError.message
+          : "初始化学习计划失败，请稍后重试",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -1084,7 +1119,9 @@ function Onboarding({ onSelect }: { onSelect: (examId: ExamId) => void }) {
           <View style={styles.onboardingCopy}>
             <View style={styles.pillSoft}>
               <Sparkles size={14} color={colors.primary} />
-              <Text style={styles.pillSoftText}>每天 3 篇，读有所获</Text>
+              <Text style={styles.pillSoftText}>
+                每天 {dailyGoal} 篇，读有所获
+              </Text>
             </View>
             <Text style={[styles.heroTitle, tablet && styles.heroTitleTablet]}>
               从阅读里，{`\n`}把单词真正记下来。
@@ -1138,17 +1175,65 @@ function Onboarding({ onSelect }: { onSelect: (examId: ExamId) => void }) {
               );
             })}
           </View>
+          <View style={styles.onboardingGoalSection}>
+            <View style={styles.onboardingGoalCopy}>
+              <Text style={styles.stepLabel}>02 / 设置篇数</Text>
+              <Text style={styles.onboardingGoalTitle}>每天想读几篇？</Text>
+              <Text style={styles.panelHint}>保存后会立即生成今天的推荐</Text>
+            </View>
+            <View style={styles.onboardingGoalStepper}>
+              <Pressable
+                accessibilityLabel="减少每日阅读篇数"
+                accessibilityState={{ disabled: dailyGoal <= 1 }}
+                disabled={dailyGoal <= 1}
+                onPress={() => setDailyGoal((value) => Math.max(1, value - 1))}
+                style={({ pressed }) => [
+                  styles.onboardingGoalButton,
+                  pressed && styles.pressed,
+                  dailyGoal <= 1 && styles.disabledButton,
+                ]}
+              >
+                <Minus size={20} color={colors.primary} />
+              </Pressable>
+              <View style={styles.onboardingGoalValue}>
+                <Text style={styles.onboardingGoalNumber}>{dailyGoal}</Text>
+                <Text style={styles.onboardingGoalUnit}>篇 / 天</Text>
+              </View>
+              <Pressable
+                accessibilityLabel="增加每日阅读篇数"
+                accessibilityState={{ disabled: dailyGoal >= 10 }}
+                disabled={dailyGoal >= 10}
+                onPress={() => setDailyGoal((value) => Math.min(10, value + 1))}
+                style={({ pressed }) => [
+                  styles.onboardingGoalButton,
+                  pressed && styles.pressed,
+                  dailyGoal >= 10 && styles.disabledButton,
+                ]}
+              >
+                <Plus size={20} color={colors.primary} />
+              </Pressable>
+            </View>
+          </View>
+          {!!error && <Text style={styles.onboardingError}>{error}</Text>}
           <Pressable
-            onPress={() => onSelect(selected)}
+            disabled={submitting}
+            onPress={() => void finish()}
             style={({ pressed }) => [
               styles.primaryButton,
               pressed && styles.primaryButtonPressed,
+              submitting && styles.disabledButton,
             ]}
           >
-            <Text style={styles.primaryButtonText}>开启今日阅读</Text>
-            <ChevronRight color="#fff" size={20} />
+            {submitting ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <>
+                <Text style={styles.primaryButtonText}>开启今日阅读</Text>
+                <ChevronRight color="#fff" size={20} />
+              </>
+            )}
           </Pressable>
-          <Text style={styles.privacyNote}>你的学习记录仅保存在本机</Text>
+          <Text style={styles.privacyNote}>学习记录会安全同步到你的账号</Text>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -4302,6 +4387,12 @@ function AppContent() {
             message: "Web 端不支持系统定时提醒，请在 iOS 或 Android 设备上开启。",
           });
         }
+        if (status === "preview-unsupported" && permissionRequested) {
+          setAppNotice({
+            title: "Expo Go 暂不支持提醒",
+            message: "正式安装版与开发构建中会正常启用 Android 每日提醒。",
+          });
+        }
         if (status === "denied" && permissionRequested) {
           const disabled = { ...next, dailyReminderEnabled: false };
           setLearningSettings(disabled);
@@ -4391,14 +4482,45 @@ function AppContent() {
 
   const handleAuthenticated = async (
     session: UserProfile & { token: string },
+    isNewAccount = false,
   ) => {
     await storage.setAuthToken(session.token);
     setCurrentUser(session);
+    if (isNewAccount) {
+      await Promise.all([
+        storage.clearExam(),
+        storage.setLearningSettings(DEFAULT_LEARNING_SETTINGS),
+      ]);
+      setExamId(null);
+      setLearningSettings(DEFAULT_LEARNING_SETTINGS);
+      setApiOnline(true);
+      setAuthRequired(false);
+      return;
+    }
     setExamId(session.examId);
     await storage.setExam(session.examId);
     await applyRemoteSnapshot();
     setApiOnline(true);
     setAuthRequired(false);
+  };
+
+  const completeOnboarding = async (
+    nextExam: ExamId,
+    dailyGoal: number,
+  ) => {
+    const nextLearning = { ...learningSettings, dailyGoal };
+    const updatedUser = await api.setExam(nextExam);
+    await api.updatePreferences({ learning: nextLearning });
+    setCurrentUser(updatedUser);
+    setExamId(nextExam);
+    setLearningSettings(nextLearning);
+    await Promise.all([
+      storage.setExam(nextExam),
+      storage.setLearningSettings(nextLearning),
+    ]);
+    await applyRemoteSnapshot();
+    setApiOnline(true);
+    setTab("today");
   };
 
   const logout = async () => {
@@ -4758,7 +4880,7 @@ function AppContent() {
         />
       </SafeAreaView>
     );
-  if (!examId) return <Onboarding onSelect={(id) => void selectExam(id)} />;
+  if (!examId) return <Onboarding onComplete={completeOnboarding} />;
   if (reader)
     return (
       <>
@@ -5065,22 +5187,28 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 78,
     borderRadius: 18,
-    borderWidth: 1.5,
-    borderColor: colors.primary,
     backgroundColor: "#F2F8F6",
     alignItems: "center",
     justifyContent: "center",
   },
   goalInput: {
-    minWidth: 72,
+    ...StyleSheet.absoluteFillObject,
+    width: "100%",
+    height: "100%",
     paddingHorizontal: 12,
-    paddingVertical: 0,
+    paddingTop: 4,
+    paddingBottom: 20,
+    borderWidth: 0,
+    outlineWidth: 0,
+    backgroundColor: "transparent",
     color: colors.primaryDark,
     fontSize: 32,
     fontWeight: "800",
     textAlign: "center",
   },
   goalInputUnit: {
+    position: "absolute",
+    bottom: 10,
     color: colors.inkMuted,
     fontSize: 11,
     fontWeight: "700",
@@ -5418,6 +5546,59 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   radioActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  onboardingGoalSection: {
+    marginTop: 22,
+    paddingTop: 20,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 16,
+  },
+  onboardingGoalCopy: { flex: 1 },
+  onboardingGoalTitle: {
+    color: colors.ink,
+    fontSize: 17,
+    fontWeight: "800",
+    marginTop: 7,
+  },
+  onboardingGoalStepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  onboardingGoalButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 13,
+    backgroundColor: colors.primarySoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  onboardingGoalValue: {
+    minWidth: 58,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  onboardingGoalNumber: {
+    color: colors.primaryDark,
+    fontSize: 24,
+    lineHeight: 28,
+    fontWeight: "800",
+  },
+  onboardingGoalUnit: {
+    color: colors.inkMuted,
+    fontSize: 9,
+    fontWeight: "700",
+  },
+  onboardingError: {
+    color: colors.danger,
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: "center",
+    marginTop: 14,
+  },
   primaryButton: {
     height: 54,
     marginTop: 22,

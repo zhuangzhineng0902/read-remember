@@ -1107,7 +1107,7 @@ export function createApp(
       z.object({
         examId: z.enum(examIds),
         articleId: z.string().min(1).max(80),
-        phonetic: z.string().trim().min(1).max(120),
+        phonetic: z.string().trim().max(120).default(""),
         translation: z.string().trim().min(1).max(500),
         definition: z.string().trim().max(1000).default(""),
         partOfSpeech: z.string().trim().max(80).default(""),
@@ -1125,10 +1125,7 @@ export function createApp(
     if (!article || article.examId !== body.examId) {
       throw new ApiError(400, "INVALID_ARTICLE", "文章与考试类型不匹配");
     }
-    const delivered = db
-      .prepare("SELECT 1 FROM deliveries WHERE user_id = ? AND article_id = ?")
-      .get(user.id, body.articleId);
-    if (!delivered)
+    if (!hasArticleAccess(db, user.id, body.articleId))
       throw new ApiError(
         403,
         "ARTICLE_NOT_DELIVERED",

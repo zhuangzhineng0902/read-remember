@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import Constants, { ExecutionEnvironment } from "expo-constants";
 import { Platform } from "react-native";
 import type { LearningSettings } from "./types";
 
@@ -10,8 +11,16 @@ let handlerConfigured = false;
 export async function syncDailyReminder(
   settings: LearningSettings,
   requestPermission = false,
-): Promise<"scheduled" | "disabled" | "denied" | "unsupported"> {
+): Promise<
+  "scheduled" | "disabled" | "denied" | "unsupported" | "preview-unsupported"
+> {
   if (Platform.OS === "web") return "unsupported";
+  if (
+    Platform.OS === "android" &&
+    Constants.executionEnvironment === ExecutionEnvironment.StoreClient
+  ) {
+    return "preview-unsupported";
+  }
   const Notifications = await import("expo-notifications");
   if (!handlerConfigured) {
     Notifications.setNotificationHandler({

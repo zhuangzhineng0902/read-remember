@@ -548,6 +548,9 @@ test("admin can inspect the bank, import authorized content, and view metrics", 
 });
 
 test("admin manual push reaches the selected mobile user", async () => {
+  const importedArticle = db
+    .prepare("SELECT id FROM articles WHERE title = ?")
+    .get("An Imported Authorized Passage") as { id: string };
   const response = await fetch(`${baseUrl}/api/v1/admin/pushes`, {
     method: "POST",
     headers: {
@@ -557,7 +560,7 @@ test("admin manual push reaches the selected mobile user", async () => {
     body: JSON.stringify({
       name: "Integration push",
       message: "A manually selected practice article",
-      articleIds: [firstArticleId],
+      articleIds: [importedArticle.id],
       userIds: [userId],
       allUsers: false,
     }),
@@ -570,5 +573,23 @@ test("admin manual push reaches the selected mobile user", async () => {
   const manualPush = pushData.find(
     (item: { pushName: string }) => item.pushName === "Integration push",
   );
-  assert.equal(manualPush.article.id, firstArticleId);
+  assert.equal(manualPush.article.id, importedArticle.id);
+
+  const savedFromPush = await request("/api/v1/vocabulary/synchronized", {
+    method: "PUT",
+    body: JSON.stringify({
+      examId: "toeic",
+      articleId: importedArticle.id,
+      phonetic: "",
+      translation: "同步的",
+    }),
+  });
+  assert.equal(savedFromPush.status, 201);
+  assert.equal((await savedFromPush.json()).data.phonetic, "");
+
+  const removed = await request(
+    "/api/v1/vocabulary/synchronized?examId=toeic",
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 204);
 });
