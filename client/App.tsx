@@ -1782,10 +1782,19 @@ function ReaderScreen({
       : readerSettings.columnWidth === "wide"
         ? 880
         : 760;
-  const contentWidth = Math.min(
-    maxColumnWidth,
-    width - (width < 480 ? 16 : width >= 768 ? 120 : 32),
-  );
+  const isIPadLayout = Platform.OS === "ios" && width >= 768;
+  const iPadHorizontalInset =
+    readerSettings.columnWidth === "narrow"
+      ? 48
+      : readerSettings.columnWidth === "wide"
+        ? 12
+        : 24;
+  const contentWidth = isIPadLayout
+    ? width - iPadHorizontalInset * 2
+    : Math.min(
+        maxColumnWidth,
+        width - (width < 480 ? 16 : width >= 768 ? 120 : 32),
+      );
   const lineSpacingMultiplier =
     readerSettings.lineSpacing === "compact"
       ? 0.94
