@@ -36,6 +36,7 @@ import {
   pronunciationAudio,
 } from "./pronunciation";
 import { ensureDailyPushForUser, localDateParts } from "./daily-push";
+import type { EcdictDictionary } from "./ecdict";
 import { scheduleMemoryReview } from "../../client/src/memory";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
@@ -328,6 +329,7 @@ export function createApp(
         | "webRoot"
       >
     >,
+  dictionary: EcdictDictionary | null = null,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -348,6 +350,7 @@ export function createApp(
       status: "ok",
       service: "read-remember-api",
       timestamp: new Date().toISOString(),
+      dictionary: dictionary ? "ecdict-ready" : "ecdict-unavailable",
     });
   });
 
@@ -389,6 +392,7 @@ export function createApp(
         accent,
         context,
         includeAudio,
+        dictionary,
       );
       res.json({
         data: {

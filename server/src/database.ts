@@ -156,6 +156,7 @@ export function createDatabase(filename: string): AppDatabase {
       part_of_speech TEXT NOT NULL DEFAULT '',
       example_en TEXT NOT NULL DEFAULT '',
       example_zh TEXT NOT NULL DEFAULT '',
+      lexical_source TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY(word, accent)
     );
@@ -250,6 +251,7 @@ export function createDatabase(filename: string): AppDatabase {
   ensureColumn("pronunciation_cache", "part_of_speech", "part_of_speech TEXT NOT NULL DEFAULT ''");
   ensureColumn("pronunciation_cache", "example_en", "example_en TEXT NOT NULL DEFAULT ''");
   ensureColumn("pronunciation_cache", "example_zh", "example_zh TEXT NOT NULL DEFAULT ''");
+  ensureColumn("pronunciation_cache", "lexical_source", "lexical_source TEXT NOT NULL DEFAULT ''");
   ensureColumn("vocabulary", "definition_en", "definition_en TEXT NOT NULL DEFAULT ''");
   ensureColumn("vocabulary", "part_of_speech", "part_of_speech TEXT NOT NULL DEFAULT ''");
   ensureColumn("vocabulary", "example_en", "example_en TEXT NOT NULL DEFAULT ''");

@@ -4,6 +4,7 @@ export type Config = {
   port: number;
   host: string;
   databasePath: string;
+  ecdictPath: string;
   corsOrigin: string;
   adminApiKey: string;
   syncAllowedHosts: string[];
@@ -21,6 +22,8 @@ export function getConfig(overrides: Partial<Config> = {}): Config {
     databasePath:
       process.env.DATABASE_PATH ??
       path.resolve(process.cwd(), "data/read-remember.sqlite"),
+    ecdictPath:
+      process.env.ECDICT_PATH ?? path.resolve(process.cwd(), "data/ecdict.sqlite"),
     corsOrigin: process.env.CORS_ORIGIN ?? "*",
     adminApiKey: process.env.ADMIN_API_KEY ?? "dev-admin-change-me",
     syncAllowedHosts: (process.env.SYNC_ALLOWED_HOSTS ?? "")

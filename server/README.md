@@ -9,6 +9,7 @@
 ```bash
 cd server
 npm install
+npm run setup:ecdict
 npm run dev
 ```
 
@@ -31,7 +32,15 @@ npm start
 
 健康检查：`GET http://localhost:4000/health`
 
-单词注释与发音：`GET http://localhost:4000/api/v1/pronunciations/hello?accent=us`。服务会依次尝试 Free Dictionary 与备用真人发音源，并缓存 IPA、录音、中文释义、词性和中英例句；全部来源均无录音时返回 `fallback: "device-tts"`。
+单词注释与发音：`GET http://localhost:4000/api/v1/pronunciations/hello?accent=us`。中文释义、英文释义、音标和词性统一从服务端只读的 ECDICT SQLite 查询，并写入应用缓存；查词过程不再访问第三方翻译接口。ECDICT 没有真人录音时返回 `fallback: "device-tts"`，由客户端使用设备英文语音朗读。
+
+首次启动需要初始化约 217 MB 的 ECDICT 1.0.28 压缩包：
+
+```bash
+npm run setup:ecdict
+```
+
+解压后的词库默认保存为 `data/ecdict.sqlite`，不提交到 Git。可以通过 `ECDICT_PATH` 指向其他只读 SQLite 文件；`GET /health` 的 `dictionary` 字段为 `ecdict-ready` 时表示加载成功。
 
 运营后台的手动推送支持按考试分类、文章主题类型及关键词筛选题库；切换筛选会清除不再可见的文章选择，避免误推。
 
@@ -166,4 +175,4 @@ npm run build
 npm start
 ```
 
-数据库默认写入 `server/data/read-remember.sqlite`，可以通过 `DATABASE_PATH` 修改。测试使用内存数据库，不会污染本地数据。
+业务数据库默认写入 `server/data/read-remember.sqlite`，可以通过 `DATABASE_PATH` 修改；词典路径通过 `ECDICT_PATH` 修改。测试使用内存数据库，不会污染本地数据。

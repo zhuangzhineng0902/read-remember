@@ -123,7 +123,8 @@ export const API_BASE_URL =
     : `http://${developmentHost()}:4000/api/v1`);
 
 let authToken: string | null = null;
-const PRONUNCIATION_CACHE_PREFIX = "rr:pronunciation:";
+// v2 invalidates metadata cached before the server switched to ECDICT SQLite.
+const PRONUNCIATION_CACHE_PREFIX = "rr:pronunciation:v2:";
 const PRONUNCIATION_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const PRONUNCIATION_REVALIDATE_MS = 24 * 60 * 60 * 1000;
 const pronunciationMemoryCache = new Map<string, PronunciationCacheEntry>();

@@ -13,10 +13,13 @@ read-remember/
 ```bash
 cd server
 npm install
+npm run setup:ecdict
 npm run dev
 ```
 
 默认监听 `http://0.0.0.0:4000`，详细接口见 [server/README.md](./server/README.md)。
+
+单词释义、音标和词性由服务端 ECDICT SQLite 本地查询，不依赖在线翻译服务。词库体积较大，不提交到 Git；首次运行 `npm run setup:ecdict` 即可初始化。
 
 运营后台启动后访问 `http://localhost:4000/admin/`，本地默认密钥为 `dev-admin-change-me`。后台包含运营总览、题库管理、授权内容同步、手动推送和用户运营数据。
 

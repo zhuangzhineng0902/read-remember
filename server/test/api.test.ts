@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { createApp } from "../src/app";
 import { createDatabase } from "../src/database";
 import { dispatchDailyPushes } from "../src/daily-push";
 import { lookupPronunciation } from "../src/pronunciation";
+import { EcdictDictionary } from "../src/ecdict";
+
+const { DatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as typeof import("node:sqlite");
 
 const db = createDatabase(":memory:");
 const server = createServer(
@@ -132,7 +138,7 @@ test("partial pronunciation cache returns immediately without requiring examples
   assert.equal(value.example, "");
 });
 
-test("empty cached translations are refreshed from the bilingual dictionary", async () => {
+test("empty cached translations are refreshed from the local ECDICT database", async () => {
   for (const word of ["delivering", "cargo", "medical"]) {
     db.prepare(
       `INSERT INTO pronunciation_cache(
@@ -145,51 +151,39 @@ test("empty cached translations are refreshed from the bilingual dictionary", as
     cargo: "n. 货物；货运",
     medical: "adj. 医学的，医疗的",
   };
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
-    const url = new URL(String(input));
-    if (url.hostname === "dict.youdao.com") {
-      const word = url.searchParams.get("q") ?? "";
-      return new Response(
-        JSON.stringify({
-          ec: {
-            word: [
-              {
-                usphone: "test-phone",
-                trs: [{ tr: [{ l: { i: [translations[word]] } }] }],
-              },
-            ],
-          },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-    if (url.hostname === "api.dictionaryapi.dev") {
-      return new Response(
-        JSON.stringify([
-          {
-            meanings: [
-              {
-                partOfSpeech: "noun",
-                definitions: [{ definition: "A deterministic test entry." }],
-              },
-            ],
-          },
-        ]),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-    throw new Error(`Unexpected fetch in pronunciation test: ${url}`);
-  };
+  const dictionaryDb = new DatabaseSync(":memory:");
+  dictionaryDb.exec(`CREATE TABLE stardict(
+    word TEXT COLLATE NOCASE PRIMARY KEY,
+    phonetic TEXT,
+    definition TEXT,
+    translation TEXT,
+    pos TEXT,
+    exchange TEXT
+  )`);
+  const insert = dictionaryDb.prepare(
+    `INSERT INTO stardict(word, phonetic, definition, translation, pos, exchange)
+     VALUES (?, 'test-phone', 'A deterministic test entry.', ?, ?, NULL)`,
+  );
+  insert.run("deliver", translations.delivering, "v:100");
+  insert.run("cargo", translations.cargo, "n:100");
+  insert.run("medical", translations.medical, "j:100");
+  const dictionary = new EcdictDictionary(dictionaryDb, ":memory:");
   try {
     for (const [word, translation] of Object.entries(translations)) {
-      const result = await lookupPronunciation(db, word, "us");
+      const result = await lookupPronunciation(
+        db,
+        word,
+        "us",
+        "",
+        false,
+        dictionary,
+      );
       assert.equal(result.translation, translation);
       assert.equal(result.phonetic, "/test-phone/");
       assert.equal(result.cached, false);
     }
   } finally {
-    globalThis.fetch = originalFetch;
+    dictionary.close();
   }
 });
 

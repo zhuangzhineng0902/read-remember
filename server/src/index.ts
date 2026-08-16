@@ -3,10 +3,12 @@ import { createApp } from "./app";
 import { getConfig } from "./config";
 import { createDatabase } from "./database";
 import { startDailyPushScheduler } from "./daily-push";
+import { openEcdict } from "./ecdict";
 
 const config = getConfig();
 const db = createDatabase(config.databasePath);
-const app = createApp(db, config);
+const dictionary = openEcdict(config.ecdictPath);
+const app = createApp(db, config, dictionary);
 const server = createServer(app);
 const dailyPushScheduler = startDailyPushScheduler(db, {
   enabled: config.dailyPushEnabled,
@@ -19,6 +21,11 @@ server.listen(config.port, config.host, () => {
     `Read & Remember API listening on http://${config.host}:${config.port}`,
   );
   console.log(`Database: ${config.databasePath}`);
+  console.log(
+    dictionary
+      ? `ECDICT: ${config.ecdictPath}`
+      : `ECDICT unavailable: ${config.ecdictPath} (run npm run setup:ecdict)`,
+  );
 });
 
 function shutdown(signal: string) {
@@ -26,6 +33,7 @@ function shutdown(signal: string) {
   dailyPushScheduler.stop();
   server.close(() => {
     db.close();
+    dictionary?.close();
     process.exit(0);
   });
 }
