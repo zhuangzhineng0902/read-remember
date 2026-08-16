@@ -62,6 +62,7 @@ export function dispatchDailyPushes(
     SELECT a.id
     FROM articles a
     WHERE a.exam_id = ?
+      AND a.content_kind = 'exam'
       AND NOT EXISTS (
         SELECT 1 FROM deliveries d
         WHERE d.user_id = ? AND d.article_id = a.id
@@ -178,6 +179,7 @@ export function ensureDailyPushForUser(
       .prepare(
         `SELECT a.id FROM articles a
          WHERE a.exam_id = ?
+           AND a.content_kind = 'exam'
            AND NOT EXISTS (
              SELECT 1 FROM deliveries d
              WHERE d.user_id = ? AND d.article_id = a.id

@@ -22,10 +22,15 @@ import {
   type ArticleRow,
 } from "./serializers";
 import type {
+  InterestId,
   LearningSettings,
   Question,
   ReaderSettings,
 } from "../../client/src/types";
+import {
+  defaultInterestIds,
+  interestCategories,
+} from "../../client/src/interest-data";
 import {
   lookupPronunciation,
   pronunciationAudio,
@@ -36,6 +41,7 @@ import { scheduleMemoryReview } from "../../client/src/memory";
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const usernamePattern = /^[a-zA-Z0-9_]{3,24}$/;
+const interestIds = ["military", "art", "science", "why", "fantasy"] as const;
 
 const defaultLearningSettings: LearningSettings = {
   dailyReminderEnabled: true,
@@ -93,9 +99,11 @@ const hasArticleAccess = (db: AppDatabase, userId: string, articleId: string) =>
         `SELECT 1 FROM deliveries WHERE user_id = ? AND article_id = ?
          UNION ALL
          SELECT 1 FROM user_push_items WHERE user_id = ? AND article_id = ?
+         UNION ALL
+         SELECT 1 FROM interest_deliveries WHERE user_id = ? AND article_id = ?
          LIMIT 1`,
       )
-      .get(userId, articleId, userId, articleId),
+      .get(userId, articleId, userId, articleId, userId, articleId),
   );
 
 const sqliteTimestampToIso = (value: string) =>
@@ -152,11 +160,20 @@ function userPreferences(db: AppDatabase, userId: string) {
   const row = db
     .prepare(
       `SELECT learning_json AS learningJson, reader_json AS readerJson,
-        updated_at AS updatedAt FROM user_preferences WHERE user_id = ?`,
+        interests_json AS interestsJson, updated_at AS updatedAt
+       FROM user_preferences WHERE user_id = ?`,
     )
     .get(userId) as
-    | { learningJson: string; readerJson: string; updatedAt: string }
+    | {
+        learningJson: string;
+        readerJson: string;
+        interestsJson: string;
+        updatedAt: string;
+      }
     | undefined;
+  const storedInterests = row
+    ? (JSON.parse(row.interestsJson) as InterestId[])
+    : [];
   return {
     learning: row
       ? { ...defaultLearningSettings, ...JSON.parse(row.learningJson) }
@@ -164,6 +181,7 @@ function userPreferences(db: AppDatabase, userId: string) {
     reader: row
       ? { ...defaultReaderSettings, ...JSON.parse(row.readerJson) }
       : defaultReaderSettings,
+    interests: storedInterests.length ? storedInterests : defaultInterestIds,
     updatedAt: row
       ? sqliteTimestampToIso(row.updatedAt)
       : new Date(0).toISOString(),
@@ -176,8 +194,10 @@ function ensureDailyDeliveries(
   examId: string,
   date: string,
   requestedGoal: number,
+  selectedInterests: InterestId[] = defaultInterestIds,
 ) {
   const goal = Math.min(10, Math.max(1, Math.trunc(requestedGoal)));
+  const interestGoal = goal >= 3 && selectedInterests.length > 0 ? 1 : 0;
   const delivered = db.prepare(`
     SELECT ${articleSelect}
     FROM deliveries d
@@ -189,8 +209,40 @@ function ensureDailyDeliveries(
   db.exec("BEGIN IMMEDIATE");
   try {
     let rows = delivered.all(userId, date, examId) as unknown as ArticleRow[];
-    if (rows.length < goal) {
-      const missingCount = goal - rows.length;
+    const hasInterestArticle = rows.some(
+      (row) => row.contentKind === "interest",
+    );
+    if (interestGoal > 0 && !hasInterestArticle && rows.length >= goal) {
+      const replaceable = db
+        .prepare(
+          `SELECT d.article_id AS articleId
+           FROM deliveries d
+           JOIN articles a ON a.id = d.article_id
+           LEFT JOIN article_progress p
+             ON p.user_id = d.user_id AND p.article_id = d.article_id
+           LEFT JOIN article_reading_states r
+             ON r.user_id = d.user_id AND r.article_id = d.article_id
+           WHERE d.user_id = ? AND d.delivery_date = ? AND d.exam_id = ?
+             AND a.content_kind = 'exam'
+             AND p.article_id IS NULL
+             AND COALESCE(r.ratio, 0) = 0
+           ORDER BY d.slot DESC LIMIT 1`,
+        )
+        .get(userId, date, examId) as { articleId: string } | undefined;
+      if (replaceable) {
+        db.prepare(
+          `DELETE FROM deliveries
+           WHERE user_id = ? AND delivery_date = ? AND exam_id = ? AND article_id = ?`,
+        ).run(userId, date, examId, replaceable.articleId);
+        rows = delivered.all(userId, date, examId) as unknown as ArticleRow[];
+      }
+    }
+
+    const insert = db.prepare(`
+      INSERT INTO deliveries(user_id, article_id, exam_id, delivery_date, slot)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    while (rows.length < goal) {
       const nextSlot =
         (db
           .prepare(
@@ -198,26 +250,62 @@ function ensureDailyDeliveries(
              WHERE user_id = ? AND delivery_date = ? AND exam_id = ?`,
           )
           .get(userId, date, examId) as { maxSlot: number }).maxSlot + 1;
-      const additions = db
+      const currentInterestCount = rows.filter(
+        (row) => row.contentKind === "interest",
+      ).length;
+      const needsInterest = currentInterestCount < interestGoal;
+      const interestPlaceholders = selectedInterests.map(() => "?").join(",");
+      const contentConditions = needsInterest
+        ? `a.content_kind = 'interest' AND a.interest_id IN (${interestPlaceholders})`
+        : "a.content_kind = 'exam'";
+      const params: Array<string | number> = [examId];
+      if (needsInterest) params.push(...selectedInterests);
+      params.push(userId, userId, userId);
+      let addition = db
         .prepare(
           `SELECT ${articleSelect}
            FROM articles a
-           WHERE a.exam_id = ?
+           WHERE a.exam_id = ? AND ${contentConditions}
              AND NOT EXISTS (
                SELECT 1 FROM deliveries d
                WHERE d.user_id = ? AND d.article_id = a.id
              )
-           ORDER BY a.year DESC, a.id ASC
-           LIMIT ?`,
+             AND NOT EXISTS (
+               SELECT 1 FROM interest_deliveries i
+               WHERE i.user_id = ? AND i.article_id = a.id
+             )
+           ORDER BY
+             CASE WHEN a.content_kind = 'interest' THEN (
+               SELECT COUNT(*) FROM vocabulary v
+               WHERE v.user_id = ?
+                 AND datetime(v.next_review_at) <= CURRENT_TIMESTAMP
+                 AND instr(lower(a.paragraphs_json), lower(v.word)) > 0
+             ) ELSE 0 END DESC,
+             CASE WHEN a.series_title IS NULL THEN 1 ELSE 0 END,
+             COALESCE(a.episode_number, 999), a.year DESC, a.id ASC
+           LIMIT 1`,
         )
-        .all(examId, userId, missingCount) as unknown as ArticleRow[];
-      const insert = db.prepare(`
-        INSERT INTO deliveries(user_id, article_id, exam_id, delivery_date, slot)
-        VALUES (?, ?, ?, ?, ?)
-      `);
-      additions.forEach((row, index) =>
-        insert.run(userId, row.id, examId, date, nextSlot + index),
-      );
+        .get(...params) as unknown as ArticleRow | undefined;
+      if (!addition) {
+        addition = db
+          .prepare(
+            `SELECT ${articleSelect}
+             FROM articles a
+             WHERE a.exam_id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM deliveries d
+                 WHERE d.user_id = ? AND d.article_id = a.id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM interest_deliveries i
+                 WHERE i.user_id = ? AND i.article_id = a.id
+               )
+             ORDER BY a.content_kind ASC, a.year DESC, a.id ASC LIMIT 1`,
+          )
+          .get(examId, userId, userId) as unknown as ArticleRow | undefined;
+      }
+      if (!addition) break;
+      insert.run(userId, addition.id, examId, date, nextSlot);
       rows = delivered.all(userId, date, examId) as unknown as ArticleRow[];
     }
     db.exec("COMMIT");
@@ -270,6 +358,10 @@ export function createApp(
       )
       .all();
     res.json({ data: rows });
+  });
+
+  app.get("/api/v1/interests", (_req, res) => {
+    res.json({ data: interestCategories });
   });
 
   const pronunciationParams = z.object({
@@ -467,6 +559,7 @@ export function createApp(
       z.object({
         learning: learningSettingsSchema.optional(),
         reader: readerSettingsSchema.optional(),
+        interests: z.array(z.enum(interestIds)).min(1).max(5).optional(),
       }),
       req.body,
     );
@@ -474,17 +567,25 @@ export function createApp(
     const current = userPreferences(db, user.id);
     const learning = body.learning ?? current.learning;
     const reader = body.reader ?? current.reader;
+    const interests = body.interests ?? current.interests;
     db.prepare(
-      `INSERT INTO user_preferences(user_id, learning_json, reader_json)
-       VALUES (?, ?, ?)
+      `INSERT INTO user_preferences(
+         user_id, learning_json, reader_json, interests_json
+       ) VALUES (?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          learning_json = excluded.learning_json,
          reader_json = excluded.reader_json,
+         interests_json = excluded.interests_json,
          updated_at = CURRENT_TIMESTAMP`,
-    ).run(user.id, JSON.stringify(learning), JSON.stringify(reader));
+    ).run(
+      user.id,
+      JSON.stringify(learning),
+      JSON.stringify(reader),
+      JSON.stringify(interests),
+    );
     if (
-      body.learning &&
-      learning.dailyGoal !== current.learning.dailyGoal
+      (body.learning && learning.dailyGoal !== current.learning.dailyGoal) ||
+      body.interests
     ) {
       const today = localDateParts(
         new Date(),
@@ -496,6 +597,7 @@ export function createApp(
         user.examId,
         today,
         learning.dailyGoal,
+        interests,
       );
     }
     res.json({ data: userPreferences(db, user.id) });
@@ -628,6 +730,81 @@ export function createApp(
     res.status(204).send();
   });
 
+  authenticated.get("/interest-feed", (req, res) => {
+    const query = parse(
+      z.object({
+        interestId: z.enum(interestIds).optional(),
+        limit: z.coerce.number().int().min(1).max(50).default(20),
+      }),
+      req.query,
+    );
+    const user = currentUser(res);
+    const selected = userPreferences(db, user.id).interests.filter(
+      (id) => !query.interestId || id === query.interestId,
+    );
+    if (selected.length === 0) {
+      res.json({ data: [] });
+      return;
+    }
+    const rows = db
+      .prepare(
+        `WITH ranked_articles AS (
+           SELECT ${articleSelect},
+             ROW_NUMBER() OVER (
+               PARTITION BY a.interest_id
+               ORDER BY
+                 CASE WHEN a.series_title IS NULL THEN 1 ELSE 0 END,
+                 COALESCE(a.episode_number, 999), a.series_title, a.title
+             ) AS categoryRank
+           FROM articles a
+           WHERE a.exam_id = ? AND a.content_kind = 'interest'
+             AND a.interest_id IN (${selected.map(() => "?").join(",")})
+             AND NOT EXISTS (
+               SELECT 1 FROM interest_deliveries i
+               WHERE i.user_id = ? AND i.article_id = a.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM deliveries d
+               WHERE d.user_id = ? AND d.article_id = a.id
+             )
+         )
+         SELECT * FROM ranked_articles
+         ORDER BY categoryRank, interestId, title
+         LIMIT ?`,
+      )
+      .all(
+        user.examId,
+        ...selected,
+        user.id,
+        user.id,
+        query.limit,
+      ) as unknown as ArticleRow[];
+    const today = localDateParts(
+      new Date(),
+      config.dailyPushTimeZone ?? "Asia/Shanghai",
+    ).date;
+    const deliver = db.prepare(
+      `INSERT OR IGNORE INTO interest_deliveries(
+        user_id, article_id, delivery_date
+      )
+      SELECT ?, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM deliveries WHERE user_id = ? AND article_id = ?
+      )`,
+    );
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) {
+        deliver.run(user.id, row.id, today, user.id, row.id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    res.json({ data: rows.map(serializeArticleSummary) });
+  });
+
   authenticated.get("/daily", (req, res) => {
     const query = parse(
       z.object({ date: z.string().regex(datePattern).optional() }),
@@ -641,7 +818,15 @@ export function createApp(
         config.dailyPushTimeZone ?? "Asia/Shanghai",
       ).date;
     const goal = userPreferences(db, user.id).learning.dailyGoal;
-    const rows = ensureDailyDeliveries(db, user.id, user.examId, date, goal);
+    const interests = userPreferences(db, user.id).interests;
+    const rows = ensureDailyDeliveries(
+      db,
+      user.id,
+      user.examId,
+      date,
+      goal,
+      interests,
+    );
 
     res.json({
       data: {
@@ -711,15 +896,12 @@ export function createApp(
 
   authenticated.get("/articles/:id", (req, res) => {
     const user = currentUser(res);
-    const delivered = db
-      .prepare("SELECT 1 FROM deliveries WHERE user_id = ? AND article_id = ?")
-      .get(user.id, req.params.id);
     const manualPush = db
       .prepare(
         "SELECT 1 FROM user_push_items WHERE user_id = ? AND article_id = ?",
       )
       .get(user.id, req.params.id);
-    if (!delivered && !manualPush)
+    if (!hasArticleAccess(db, user.id, req.params.id))
       throw new ApiError(
         403,
         "ARTICLE_NOT_DELIVERED",
@@ -732,6 +914,11 @@ export function createApp(
          WHERE user_id = ? AND article_id = ?`,
       ).run(user.id, req.params.id);
     }
+    db.prepare(
+      `UPDATE interest_deliveries
+       SET opened_at = COALESCE(opened_at, CURRENT_TIMESTAMP)
+       WHERE user_id = ? AND article_id = ?`,
+    ).run(user.id, req.params.id);
 
     const row = articleFromId(db, req.params.id);
     if (!row) throw new ApiError(404, "ARTICLE_NOT_FOUND", "文章不存在");
@@ -871,15 +1058,7 @@ export function createApp(
       req.body,
     );
     const user = currentUser(res);
-    const delivered = db
-      .prepare("SELECT 1 FROM deliveries WHERE user_id = ? AND article_id = ?")
-      .get(user.id, req.params.id);
-    const manualPush = db
-      .prepare(
-        "SELECT 1 FROM user_push_items WHERE user_id = ? AND article_id = ?",
-      )
-      .get(user.id, req.params.id);
-    if (!delivered && !manualPush)
+    if (!hasArticleAccess(db, user.id, req.params.id))
       throw new ApiError(
         403,
         "ARTICLE_NOT_DELIVERED",
@@ -966,6 +1145,17 @@ export function createApp(
     const rows = db
       .prepare(
         `
+      WITH delivered_items AS (
+        SELECT user_id, article_id, delivery_date, slot
+        FROM deliveries
+        UNION ALL
+        SELECT i.user_id, i.article_id, i.delivery_date, 50 AS slot
+        FROM interest_deliveries i
+        WHERE NOT EXISTS (
+          SELECT 1 FROM deliveries d
+          WHERE d.user_id = i.user_id AND d.article_id = i.article_id
+        )
+      )
       SELECT
         d.delivery_date AS date,
         d.slot,
@@ -975,7 +1165,7 @@ export function createApp(
         p.completed_at AS completedAt,
         r.ratio AS readingRatio,
         r.reading_seconds AS readingSeconds
-      FROM deliveries d
+      FROM delivered_items d
       JOIN articles a ON a.id = d.article_id
       LEFT JOIN article_progress p ON p.user_id = d.user_id AND p.article_id = d.article_id
       LEFT JOIN article_reading_states r ON r.user_id = d.user_id AND r.article_id = d.article_id

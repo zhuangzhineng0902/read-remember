@@ -2,6 +2,7 @@ import type { AppDatabase } from "./database";
 import { ApiError } from "./http";
 
 const DICTIONARY_API = "https://api.dictionaryapi.dev/api/v2/entries/en";
+const BILINGUAL_DICTIONARY_API = "https://dict.youdao.com/jsonapi";
 const GOOGLE_DICTIONARY_AUDIO =
   "https://ssl.gstatic.com/dictionary/static/sounds/20200429";
 const READY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -13,15 +14,56 @@ const DICTIONARY_TIMEOUT_MS = 4_000;
 const TRANSLATION_TIMEOUT_MS = 3_500;
 const AUDIO_TIMEOUT_MS = 4_000;
 
+const LOCAL_TRANSLATIONS: Record<string, string> = {
+  deliver: "递送；运送；交付",
+  cargo: "货物；货运",
+  medical: "医学的；医疗的",
+  supplies: "物资；补给品",
+  portable: "便携的；可移动的",
+  rescue: "营救；救援",
+  parachute: "降落伞",
+  logistics: "物流；后勤",
+  navigation: "导航；航行",
+  satellite: "卫星",
+  sonar: "声呐",
+  camouflage: "伪装；迷彩",
+  charcoal: "木炭；炭笔",
+  perspective: "透视法；观点",
+  texture: "质感；纹理",
+  mechanism: "机制；工作原理",
+  evidence: "证据；依据",
+  observable: "可观察的",
+  reliable: "可靠的",
+  hypothesis: "假设；假说",
+  constraint: "限制；约束",
+  consequence: "结果；后果",
+  artifact: "人工制品；故事中的魔法物件",
+};
+
 function lexicalCandidates(word: string) {
-  return [
-    word,
-    word.endsWith("ies") ? `${word.slice(0, -3)}y` : "",
-    word.endsWith("es") ? word.slice(0, -2) : "",
-    word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : "",
-    word.endsWith("ed") ? word.slice(0, -2) : "",
-    word.endsWith("ing") ? word.slice(0, -3) : "",
-  ].filter((candidate, index, items) => candidate && items.indexOf(candidate) === index);
+  const candidates = [word];
+  if (word.endsWith("ies")) candidates.push(`${word.slice(0, -3)}y`);
+  if (word.endsWith("ied")) candidates.push(`${word.slice(0, -3)}y`);
+  if (word.endsWith("ing")) {
+    const stem = word.slice(0, -3);
+    candidates.push(stem);
+    if (/([b-df-hj-np-tv-z])\1$/.test(stem)) candidates.push(stem.slice(0, -1));
+    candidates.push(`${stem}e`);
+  }
+  if (word.endsWith("ed")) {
+    const stem = word.slice(0, -2);
+    candidates.push(stem);
+    if (/([b-df-hj-np-tv-z])\1$/.test(stem)) candidates.push(stem.slice(0, -1));
+    candidates.push(`${stem}e`);
+  }
+  if (word.endsWith("es")) candidates.push(word.slice(0, -2));
+  if (word.endsWith("s") && !word.endsWith("ss")) {
+    candidates.push(word.slice(0, -1));
+  }
+  return candidates.filter(
+    (candidate, index, items) =>
+      candidate.length > 1 && items.indexOf(candidate) === index,
+  );
 }
 
 export type PronunciationAccent = "us" | "uk";
@@ -62,6 +104,87 @@ type DictionaryEntry = {
     definitions?: Array<{ definition?: string; example?: string }>;
   }>;
 };
+
+type BilingualDictionaryPayload = {
+  ec?: {
+    word?: Array<{
+      usphone?: string;
+      ukphone?: string;
+      trs?: Array<{
+        tr?: Array<{ l?: { i?: string[] } }>;
+      }>;
+    }>;
+  };
+};
+
+type BilingualEntry = {
+  translation: string;
+  phonetic: string;
+  partOfSpeech: string;
+};
+
+function hasChinese(value: string) {
+  return /[\u3400-\u9fff]/.test(value);
+}
+
+function parseBilingualEntry(
+  payload: BilingualDictionaryPayload,
+  accent: PronunciationAccent,
+): BilingualEntry | null {
+  const entry = payload.ec?.word?.[0];
+  const translation = entry?.trs
+    ?.flatMap((item) => item.tr ?? [])
+    .flatMap((item) => item.l?.i ?? [])
+    .map((item) => item.trim())
+    .find(hasChinese);
+  if (!translation) return null;
+  const phonetic = accent === "uk" ? entry?.ukphone : entry?.usphone;
+  const partOfSpeech =
+    {
+      n: "noun",
+      v: "verb",
+      adj: "adjective",
+      adv: "adverb",
+      prep: "preposition",
+      pron: "pronoun",
+      conj: "conjunction",
+    }[translation.match(/^([a-z]+)\./i)?.[1]?.toLowerCase() ?? ""] ?? "";
+  return {
+    translation,
+    phonetic: phonetic ? `/${phonetic.replace(/^\/+|\/+$/g, "")}/` : "",
+    partOfSpeech,
+  };
+}
+
+async function lookupBilingualEntry(
+  word: string,
+  accent: PronunciationAccent,
+) {
+  try {
+    const url = new URL(BILINGUAL_DICTIONARY_API);
+    url.searchParams.set("q", word);
+    const response = await fetch(url, {
+      headers: {
+        accept: "application/json",
+        "user-agent": "ReadRemember/1.0 dictionary lookup",
+      },
+      signal: AbortSignal.timeout(TRANSLATION_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    return parseBilingualEntry(
+      (await response.json()) as BilingualDictionaryPayload,
+      accent,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function localTranslation(word: string) {
+  return lexicalCandidates(word)
+    .map((candidate) => LOCAL_TRANSLATIONS[candidate])
+    .find(Boolean) ?? "";
+}
 
 export type PronunciationResult = Omit<
   CachedPronunciation,
@@ -267,8 +390,9 @@ async function translateToChinese(text: string) {
       responseStatus?: number;
       responseData?: { translatedText?: string };
     };
-    return payload.responseStatus === 200
-      ? (payload.responseData?.translatedText?.trim() ?? "")
+    const translated = payload.responseData?.translatedText?.trim() ?? "";
+    return payload.responseStatus === 200 && hasChinese(translated)
+      ? translated
       : "";
   } catch {
     return "";
@@ -286,9 +410,8 @@ async function lookupPronunciationUncached(
 ): Promise<PronunciationResult> {
   const prior = cachedRow(db, word, accent);
   const hasLexicalCache = !!(
-    prior?.phonetic ||
-    prior?.translation ||
-    prior?.definition
+    prior?.translation &&
+    (prior.phonetic || prior.definition)
   );
   if (
     prior &&
@@ -300,9 +423,9 @@ async function lookupPronunciationUncached(
   }
 
   const contextualExample = context.trim();
-  const wordTranslation = prior?.translation
-    ? Promise.resolve(prior.translation)
-    : translateToChinese(word);
+  let bilingual = prior?.translation
+    ? null
+    : await lookupBilingualEntry(word, accent);
   const contextualTranslation = prior?.exampleTranslation
     ? Promise.resolve(prior.exampleTranslation)
     : contextualExample
@@ -329,8 +452,12 @@ async function lookupPronunciationUncached(
         }
       }
     } catch {
-      if (prior) return publicResult(prior, true);
+      if (prior?.translation) return publicResult(prior, true);
     }
+  }
+
+  if (!bilingual && resolvedWord !== word) {
+    bilingual = await lookupBilingualEntry(resolvedWord, accent);
   }
 
   const { candidates: dictionaryAudio, selected, text } = phoneticCandidates(
@@ -360,17 +487,30 @@ async function lookupPronunciationUncached(
     : null;
 
   const entry = selected?.entry ?? entries[0];
-  const meaning = entries
+  const meanings = entries
     .flatMap((item) => item.meanings ?? [])
-    .find((item) => item.definitions?.some((definition) => definition.definition));
+    .filter((item) => item.definitions?.some((definition) => definition.definition));
+  const meaning =
+    meanings.find(
+      (item) =>
+        bilingual?.partOfSpeech &&
+        item.partOfSpeech?.toLowerCase() === bilingual.partOfSpeech,
+    ) ?? meanings[0];
   const definitionItem =
     meaning?.definitions?.find((item) => item.example) ??
     meaning?.definitions?.find((item) => item.definition);
   const definition =
-    prior?.definition || definitionItem?.definition?.trim() || "";
+    (prior?.translation ? prior.definition : "") ||
+    definitionItem?.definition?.trim() ||
+    prior?.definition ||
+    "";
   const example =
     prior?.example || contextualExample || definitionItem?.example?.trim() || "";
-  const translation = await wordTranslation;
+  const translation =
+    prior?.translation ||
+    bilingual?.translation ||
+    localTranslation(word) ||
+    (await translateToChinese(resolvedWord));
   const exampleTranslation =
     (await contextualTranslation) ||
     (example ? await translateToChinese(example) : "");
@@ -381,6 +521,7 @@ async function lookupPronunciationUncached(
     accent,
     phonetic:
       prior?.phonetic ||
+      bilingual?.phonetic ||
       (text ? (text.startsWith("/") ? text : `/${text}/`) : ""),
     actualAccent: downloadedAudio?.accent ?? prior?.actualAccent ?? null,
     sourceUrl:
@@ -406,7 +547,8 @@ async function lookupPronunciationUncached(
     status: audioBlob ? "ready" : "tts_only",
     definition,
     translation,
-    partOfSpeech: meaning?.partOfSpeech?.trim() ?? "",
+    partOfSpeech:
+      meaning?.partOfSpeech?.trim() ?? bilingual?.partOfSpeech ?? "",
     example,
     exampleTranslation,
   };

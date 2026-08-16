@@ -3,6 +3,7 @@ import {
   ArticleAnswerState,
   ExamId,
   HistoryRecord,
+  InterestId,
   LearningSettings,
   ReaderSettings,
   ReadingProgress,
@@ -22,6 +23,7 @@ const KEYS = {
   articleAnswers: "rr:article-answers",
   readerHintSeen: "rr:reader-hint-seen",
   learningSettings: "rr:learning-settings",
+  interests: "rr:interests",
 };
 
 async function readJson<T>(key: string, fallback: T): Promise<T> {
@@ -107,4 +109,7 @@ export const storage = {
     readJson<LearningSettings | null>(KEYS.learningSettings, null),
   setLearningSettings: (settings: LearningSettings) =>
     AsyncStorage.setItem(KEYS.learningSettings, JSON.stringify(settings)),
+  getInterests: () => readJson<InterestId[]>(KEYS.interests, []),
+  setInterests: (interests: InterestId[]) =>
+    AsyncStorage.setItem(KEYS.interests, JSON.stringify(interests)),
 };

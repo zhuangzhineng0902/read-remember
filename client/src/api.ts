@@ -7,6 +7,8 @@ import {
   ArticleAnswerState,
   ExamId,
   HistoryRecord,
+  InterestCategory,
+  InterestId,
   LearningSettings,
   LearningStats,
   MemoryRating,
@@ -155,14 +157,22 @@ async function readPronunciationCache(word: string, accent: "us" | "uk") {
   const memoryEntry = pronunciationMemoryCache.get(key);
   if (
     memoryEntry &&
-    Date.now() - memoryEntry.cachedAt < PRONUNCIATION_CACHE_MAX_AGE_MS
+    Date.now() - memoryEntry.cachedAt < PRONUNCIATION_CACHE_MAX_AGE_MS &&
+    memoryEntry.value.translation.trim()
   ) {
     return memoryEntry;
+  }
+  if (memoryEntry && !memoryEntry.value.translation.trim()) {
+    pronunciationMemoryCache.delete(key);
   }
   try {
     const raw = await AsyncStorage.getItem(`${PRONUNCIATION_CACHE_PREFIX}${key}`);
     if (!raw) return null;
     const entry = JSON.parse(raw) as PronunciationCacheEntry;
+    if (!entry.value.translation.trim()) {
+      void AsyncStorage.removeItem(`${PRONUNCIATION_CACHE_PREFIX}${key}`);
+      return null;
+    }
     if (Date.now() - entry.cachedAt >= PRONUNCIATION_CACHE_MAX_AGE_MS) {
       void AsyncStorage.removeItem(`${PRONUNCIATION_CACHE_PREFIX}${key}`);
       return null;
@@ -176,6 +186,11 @@ async function readPronunciationCache(word: string, accent: "us" | "uk") {
 
 async function writePronunciationCache(value: Pronunciation) {
   const key = pronunciationCacheKey(value.word, value.accent);
+  if (!value.translation.trim()) {
+    pronunciationMemoryCache.delete(key);
+    void AsyncStorage.removeItem(`${PRONUNCIATION_CACHE_PREFIX}${key}`);
+    return;
+  }
   const entry: PronunciationCacheEntry = { cachedAt: Date.now(), value };
   pronunciationMemoryCache.set(key, entry);
   try {
@@ -310,11 +325,22 @@ export const api = {
   updatePreferences: (input: {
     learning?: LearningSettings;
     reader?: ReaderSettings;
+    interests?: InterestId[];
   }) =>
     request<UserPreferences>("/users/me/preferences", {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
+
+  getInterestCategories: () => request<InterestCategory[]>("/interests"),
+
+  async getInterestFeed(interestId?: InterestId): Promise<Article[]> {
+    const query = interestId
+      ? `?interestId=${encodeURIComponent(interestId)}`
+      : "";
+    const feed = await request<ArticleSummary[]>(`/interest-feed${query}`);
+    return Promise.all(feed.map((article) => this.getArticle(article.id)));
+  },
 
   getLearningStats: () => request<LearningStats>("/users/me/stats"),
 

@@ -60,6 +60,12 @@ import {
   getExam,
   lookupWord,
 } from "./src/data";
+import {
+  defaultInterestIds,
+  getInterestArticles,
+  getInterestCategory,
+  interestCategories,
+} from "./src/interest-data";
 import { storage } from "./src/storage";
 import { syncDailyReminder } from "./src/notifications";
 import { colors, radius, shadows, spacing } from "./src/theme";
@@ -75,6 +81,8 @@ import {
   ArticleAnswerState,
   ExamId,
   HistoryRecord,
+  InterestCategory,
+  InterestId,
   LearningSettings,
   LearningStats,
   MemoryRating,
@@ -324,6 +332,142 @@ function NativeChoiceSheet({
               );
             })}
           </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function InterestPickerSheet({
+  visible,
+  selected,
+  onSave,
+  onClose,
+}: {
+  visible: boolean;
+  selected: InterestId[];
+  onSave: (value: InterestId[]) => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const { width } = useWindowDimensions();
+  const tablet = width >= 768;
+  const [draft, setDraft] = useState<InterestId[]>(selected);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (visible) setDraft(selected);
+  }, [selected, visible]);
+
+  const save = async () => {
+    if (saving || draft.length === 0) return;
+    setSaving(true);
+    try {
+      await onSave(draft);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      animationType={tablet ? "fade" : "slide"}
+      transparent
+      visible={visible}
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <View
+        style={[
+          styles.nativeModalRoot,
+          tablet && styles.nativeModalRootDesktop,
+        ]}
+      >
+        <Pressable
+          accessibilityLabel="关闭兴趣选择"
+          onPress={onClose}
+          style={styles.nativeModalBackdrop}
+        />
+        <View
+          accessibilityViewIsModal
+          style={[styles.nativeSheet, tablet && styles.nativeSheetDesktop]}
+        >
+          {!tablet && <View style={styles.nativeSheetHandle} />}
+          <View style={styles.nativeSheetHeader}>
+            <View style={styles.flexOne}>
+              <Text style={styles.nativeSheetTitle}>选择兴趣栏目</Text>
+              <Text style={styles.nativeSheetSubtitle}>
+                每日推荐会从已选栏目中混入一篇，至少选择一项
+              </Text>
+            </View>
+            <Pressable
+              accessibilityLabel="关闭"
+              hitSlop={8}
+              onPress={onClose}
+              style={styles.nativeSheetClose}
+            >
+              <X size={18} color={colors.inkMuted} />
+            </Pressable>
+          </View>
+          <View style={styles.interestPickerGrid}>
+            {interestCategories.map((category) => {
+              const active = draft.includes(category.id);
+              return (
+                <Pressable
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: active }}
+                  aria-checked={active}
+                  key={category.id}
+                  onPress={() =>
+                    setDraft((current) =>
+                      current.includes(category.id)
+                        ? current.filter((id) => id !== category.id)
+                        : [...current, category.id],
+                    )
+                  }
+                  style={({ pressed }) => [
+                    styles.interestPickerItem,
+                    active && styles.interestPickerItemActive,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.interestPickerEmoji}>{category.emoji}</Text>
+                  <View style={styles.flexOne}>
+                    <Text style={styles.interestPickerTitle}>{category.name}</Text>
+                    <Text style={styles.interestPickerSubtitle}>
+                      {category.subtitle}
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.nativeChoiceCheck,
+                      active && styles.nativeChoiceCheckSelected,
+                    ]}
+                  >
+                    {active && <Check size={15} color="#fff" strokeWidth={3} />}
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+          {draft.length === 0 && (
+            <Text style={styles.interestPickerError}>请至少选择一个栏目</Text>
+          )}
+          <Pressable
+            accessibilityRole="button"
+            disabled={draft.length === 0 || saving}
+            onPress={() => void save()}
+            style={[
+              styles.primaryButton,
+              (draft.length === 0 || saving) && styles.disabledButton,
+            ]}
+          >
+            {saving ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.primaryButtonText}>保存兴趣</Text>
+            )}
+          </Pressable>
         </View>
       </View>
     </Modal>
@@ -1225,21 +1369,32 @@ function AppLogo({ compact = false }: { compact?: boolean }) {
 function Onboarding({
   onComplete,
 }: {
-  onComplete: (examId: ExamId, dailyGoal: number) => Promise<void>;
+  onComplete: (
+    examId: ExamId,
+    dailyGoal: number,
+    interests: InterestId[],
+  ) => Promise<void>;
 }) {
   const { width } = useWindowDimensions();
   const tablet = width >= 768;
   const [selected, setSelected] = useState<ExamId>("toefl");
   const [dailyGoal, setDailyGoal] = useState(3);
+  const [selectedInterests, setSelectedInterests] = useState<InterestId[]>(
+    defaultInterestIds,
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
   const finish = async () => {
     if (submitting) return;
+    if (selectedInterests.length === 0) {
+      setError("请至少选择一个感兴趣的栏目");
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
-      await onComplete(selected, dailyGoal);
+      await onComplete(selected, dailyGoal, selectedInterests);
     } catch (finishError) {
       setError(
         finishError instanceof Error
@@ -1366,6 +1521,51 @@ function Onboarding({
               </Pressable>
             </View>
           </View>
+          <View style={styles.onboardingInterestSection}>
+            <Text style={styles.stepLabel}>03 / 选择兴趣</Text>
+            <Text style={styles.onboardingGoalTitle}>你喜欢读什么？</Text>
+            <Text style={styles.panelHint}>
+              每天会混入一篇兴趣文章，可多选
+            </Text>
+            <View style={styles.interestChipGrid}>
+              {interestCategories.map((category) => {
+                const active = selectedInterests.includes(category.id);
+                return (
+                  <Pressable
+                    accessibilityRole="checkbox"
+                    accessibilityState={{ checked: active }}
+                    aria-checked={active}
+                    key={category.id}
+                    onPress={() =>
+                      setSelectedInterests((current) =>
+                        current.includes(category.id)
+                          ? current.filter((id) => id !== category.id)
+                          : [...current, category.id],
+                      )
+                    }
+                    style={({ pressed }) => [
+                      styles.interestChoice,
+                      active && styles.interestChoiceActive,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <Text style={styles.interestChoiceEmoji}>
+                      {category.emoji}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.interestChoiceText,
+                        active && styles.interestChoiceTextActive,
+                      ]}
+                    >
+                      {category.name}
+                    </Text>
+                    {active && <Check size={14} color={colors.primary} />}
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
           {!!error && <Text style={styles.onboardingError}>{error}</Text>}
           <Pressable
             disabled={submitting}
@@ -1445,28 +1645,41 @@ function Header({
 function TodayScreen({
   examId,
   daily,
+  interestFeed,
+  selectedInterests,
   dailyGoal,
   streakDays,
   manualPushes,
   completed,
   onOpen,
+  onOpenInterest,
   onOpenPush,
   onNavigate,
 }: {
   examId: ExamId;
   daily: Article[];
+  interestFeed: Article[];
+  selectedInterests: InterestId[];
   dailyGoal: LearningSettings["dailyGoal"];
   streakDays: number;
   manualPushes: ManualPush[];
   completed: string[];
   onOpen: (a: Article) => void;
+  onOpenInterest: (a: Article) => void;
   onOpenPush: (articleId: string) => void;
   onNavigate: (tab: TabId) => void;
 }) {
+  const [interestFilter, setInterestFilter] = useState<InterestId | "all">(
+    "all",
+  );
   const exam = getExam(examId);
   const done = daily.filter((item) => completed.includes(item.id)).length;
   const goalDone = Math.min(done, dailyGoal);
   const remaining = Math.max(0, dailyGoal - goalDone);
+  const visibleInterestArticles = interestFeed.filter(
+    (article) =>
+      interestFilter === "all" || article.interestId === interestFilter,
+  );
 
   return (
     <ScrollView
@@ -1533,6 +1746,83 @@ function TodayScreen({
           />
         ))}
       </View>
+
+      {interestFeed.length > 0 && (
+        <View style={styles.interestExploreSection}>
+          <View style={styles.sectionHeading}>
+            <View>
+              <Text style={styles.sectionTitle}>兴趣探索</Text>
+              <Text style={styles.sectionSubtitle}>
+                在喜欢的故事里遇见新单词
+              </Text>
+            </View>
+            <View style={styles.interestSparkBadge}>
+              <Sparkles size={14} color={colors.accent} />
+              <Text style={styles.interestSparkText}>课外阅读</Text>
+            </View>
+          </View>
+          <ScrollView
+            horizontal
+            contentContainerStyle={styles.interestFilterRow}
+            showsHorizontalScrollIndicator={false}
+          >
+            <Pressable
+              accessibilityRole="radio"
+              accessibilityState={{ checked: interestFilter === "all" }}
+              onPress={() => setInterestFilter("all")}
+              style={[
+                styles.interestFilterChip,
+                interestFilter === "all" && styles.interestFilterChipActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.interestFilterText,
+                  interestFilter === "all" && styles.interestFilterTextActive,
+                ]}
+              >
+                全部
+              </Text>
+            </Pressable>
+            {interestCategories
+              .filter((category) => selectedInterests.includes(category.id))
+              .map((category) => (
+                <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: interestFilter === category.id }}
+                  key={category.id}
+                  onPress={() => setInterestFilter(category.id)}
+                  style={[
+                    styles.interestFilterChip,
+                    interestFilter === category.id &&
+                      styles.interestFilterChipActive,
+                  ]}
+                >
+                  <Text style={styles.interestFilterEmoji}>{category.emoji}</Text>
+                  <Text
+                    style={[
+                      styles.interestFilterText,
+                      interestFilter === category.id &&
+                        styles.interestFilterTextActive,
+                    ]}
+                  >
+                    {category.name}
+                  </Text>
+                </Pressable>
+              ))}
+          </ScrollView>
+          <View style={styles.interestArticleGrid}>
+            {visibleInterestArticles.map((article) => (
+              <InterestArticleCard
+                article={article}
+                completed={completed.includes(article.id)}
+                key={article.id}
+                onPress={() => onOpenInterest(article)}
+              />
+            ))}
+          </View>
+        </View>
+      )}
 
       {manualPushes.length > 0 && (
         <>
@@ -1624,6 +1914,7 @@ function ArticleCard({
   onPress: () => void;
 }) {
   const cardColors = ["#DCECE7", "#F2E5CF", "#E2E7EF"];
+  const interestCategory = getInterestCategory(article.interestId);
   return (
     <Pressable
       onPress={onPress}
@@ -1648,7 +1939,11 @@ function ArticleCard({
       <View style={styles.articleContent}>
         <View style={styles.articleMetaTop}>
           <Text style={styles.articleEyebrow}>{article.eyebrow}</Text>
-          <Text style={styles.articleYear}>{article.year} 真题精选</Text>
+          <Text style={styles.articleYear}>
+            {article.contentKind === "interest"
+              ? `${interestCategory?.emoji ?? "✨"} ${interestCategory?.name ?? "兴趣阅读"}`
+              : `${article.year} 真题精选`}
+          </Text>
         </View>
         <Text style={styles.articleTitle}>{article.title}</Text>
         <View style={styles.articleMeta}>
@@ -1666,6 +1961,61 @@ function ArticleCard({
             </Text>
             <ChevronRight size={16} color={colors.primary} />
           </View>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+function InterestArticleCard({
+  article,
+  completed,
+  onPress,
+}: {
+  article: Article;
+  completed: boolean;
+  onPress: () => void;
+}) {
+  const category = getInterestCategory(article.interestId);
+  return (
+    <Pressable
+      accessibilityLabel={`阅读${article.title}`}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.interestArticleCard,
+        pressed && styles.cardPressed,
+      ]}
+    >
+      <View
+        style={[
+          styles.interestArticleVisual,
+          { backgroundColor: `${category?.color ?? colors.primary}18` },
+        ]}
+      >
+        <Text style={styles.interestArticleEmoji}>{category?.emoji ?? "✨"}</Text>
+        {completed && (
+          <View style={styles.completedBadge}>
+            <Check size={12} color="#fff" />
+          </View>
+        )}
+      </View>
+      <View style={styles.interestArticleBody}>
+        <Text style={styles.interestArticleCategory}>
+          {article.seriesTitle
+            ? `${article.seriesTitle} · 第 ${article.episodeNumber} 章`
+            : category?.name ?? "兴趣阅读"}
+        </Text>
+        <Text style={styles.interestArticleTitle}>{article.title}</Text>
+        <View style={styles.interestArticleMeta}>
+          <Clock3 size={13} color={colors.inkMuted} />
+          <Text style={styles.metaText}>{article.readMinutes} 分钟</Text>
+          <Text style={styles.interestArticleDot}>·</Text>
+          <Text style={styles.metaText}>初中分级</Text>
+          <ChevronRight
+            size={17}
+            color={colors.primary}
+            style={styles.interestArticleChevron}
+          />
         </View>
       </View>
     </Pressable>
@@ -2495,16 +2845,48 @@ function ReaderScreen({
         >
           <View style={styles.readerHeading}>
             <Text style={styles.readerEyebrow}>
-              {article.eyebrow} · {article.year}
+              {article.contentKind === "interest"
+                ? `${getInterestCategory(article.interestId)?.emoji ?? "✨"} ${getInterestCategory(article.interestId)?.name ?? "兴趣阅读"}${article.seriesTitle ? ` · 第 ${article.episodeNumber} 章` : ""}`
+                : `${article.eyebrow} · ${article.year}`}
             </Text>
             <Text
               style={[styles.readerTitle, width < 480 && styles.readerTitleMobile]}
             >
-              {article.title}
+              {article.title.split(/(\s+)/).map((token, index) => {
+                if (/^\s+$/.test(token)) return token;
+                const clean = token.toLowerCase().replace(/[^a-z'-]/g, "");
+                const marked = clean && isSaved(clean);
+                return (
+                  <LongPressWord
+                    key={`title-${index}`}
+                    accessibilityHint="长按查看标题单词的中文释义和例句"
+                    onLongPress={(anchor) =>
+                      clean && openWord(token, article.title, anchor)
+                    }
+                    onPressIn={() => clean && setPressedWord(clean)}
+                    onPressOut={() =>
+                      setPressedWord((current) =>
+                        current === clean ? null : current,
+                      )
+                    }
+                    style={[
+                      styles.interactiveWord,
+                      Platform.OS === "web" && styles.webInteractiveWord,
+                      marked && styles.markedWord,
+                      pressedWord === clean && styles.pressedWord,
+                      selectedWord?.word === clean && styles.selectedInlineWord,
+                    ]}
+                  >
+                    {token}
+                  </LongPressWord>
+                );
+              })}
             </Text>
             <View style={styles.readerMeta}>
               <Text style={styles.readerMetaText}>
-                {getExam(article.examId).name}
+                {article.contentKind === "interest"
+                  ? "兴趣分级阅读"
+                  : getExam(article.examId).name}
               </Text>
               <View style={styles.metaDivider} />
               <Text style={styles.readerMetaText}>
@@ -2606,6 +2988,22 @@ function ReaderScreen({
                   })}
                 </Text>
               ))}
+
+              {article.contentKind === "interest" && (
+                <View style={styles.interestActivityCard}>
+                  <View style={styles.interestActivityIcon}>
+                    <Text style={styles.interestActivityEmoji}>
+                      {getInterestCategory(article.interestId)?.emoji ?? "✨"}
+                    </Text>
+                  </View>
+                  <View style={styles.flexOne}>
+                    <Text style={styles.interestActivityLabel}>读后兴趣任务</Text>
+                    <Text style={styles.interestActivityText}>
+                      {getInterestCategory(article.interestId)?.activityPrompt}
+                    </Text>
+                  </View>
+                </View>
+              )}
 
               <View
                 onLayout={({ nativeEvent }) => {
@@ -2854,7 +3252,9 @@ function ReaderScreen({
                 <Text style={styles.readerSequenceCount}>
                   {sequencePosition} / {sequenceTotal}
                 </Text>
-                <Text style={styles.readerSequenceHint}>今日文章</Text>
+                <Text style={styles.readerSequenceHint}>
+                  {article.contentKind === "interest" ? "兴趣书架" : "今日文章"}
+                </Text>
               </>
             )}
           </View>
@@ -4013,23 +4413,31 @@ function WordsScreen({
 function ProfileScreen({
   examId,
   settings,
+  selectedInterests,
   user,
   onChangeExam,
   onChangeSettings,
+  onChangeInterests,
   onOpenAccount,
 }: {
   examId: ExamId;
   settings: LearningSettings;
+  selectedInterests: InterestId[];
   user: UserProfile | null;
   onChangeExam: (id: ExamId) => void;
   onChangeSettings: (settings: LearningSettings) => void | Promise<void>;
+  onChangeInterests: (interests: InterestId[]) => void | Promise<void>;
   onOpenAccount: () => void;
 }) {
   const [activePicker, setActivePicker] = useState<
-    "exam" | "time" | "accent" | "goal" | null
+    "exam" | "interests" | "time" | "accent" | "goal" | null
   >(null);
   const accentName =
     settings.pronunciationAccent === "us" ? "美式发音" : "英式发音";
+  const interestNames = interestCategories
+    .filter((category) => selectedInterests.includes(category.id))
+    .map((category) => category.name)
+    .join("、");
   const pickerConfig =
     activePicker === "exam"
       ? {
@@ -4140,6 +4548,26 @@ function ProfileScreen({
             <ChevronRight size={18} color={colors.inkMuted} />
           </Pressable>
           <View style={styles.settingSeparator} />
+          <Pressable
+            accessibilityLabel="修改兴趣阅读栏目"
+            onPress={() => setActivePicker("interests")}
+            style={({ pressed }) => [
+              styles.settingRow,
+              pressed && styles.settingRowPressed,
+            ]}
+          >
+            <View style={styles.settingIcon}>
+              <Sparkles size={19} color={colors.primary} />
+            </View>
+            <View style={styles.flexOne}>
+              <Text style={styles.settingLabel}>兴趣阅读</Text>
+              <Text numberOfLines={1} style={styles.settingValue}>
+                {interestNames || "尚未选择"}
+              </Text>
+            </View>
+            <ChevronRight size={18} color={colors.inkMuted} />
+          </Pressable>
+          <View style={styles.settingSeparator} />
           <View style={styles.settingRow}>
             <Pressable
               accessibilityLabel="修改每日提醒时间"
@@ -4220,7 +4648,7 @@ function ProfileScreen({
           <Text style={styles.quoteAuthor}>— George R. R. Martin</Text>
         </View>
       </ScrollView>
-      {activePicker && activePicker !== "goal" && (
+      {activePicker && activePicker !== "goal" && activePicker !== "interests" && (
         <NativeChoiceSheet
           visible
           title={pickerConfig.title}
@@ -4231,6 +4659,12 @@ function ProfileScreen({
           onClose={() => setActivePicker(null)}
         />
       )}
+      <InterestPickerSheet
+        visible={activePicker === "interests"}
+        selected={selectedInterests}
+        onSave={onChangeInterests}
+        onClose={() => setActivePicker(null)}
+      />
       <DailyGoalSheet
         visible={activePicker === "goal"}
         value={settings.dailyGoal}
@@ -4397,6 +4831,10 @@ function AppContent() {
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [completed, setCompleted] = useState<string[]>([]);
   const [daily, setDaily] = useState<Article[]>([]);
+  const [interestFeed, setInterestFeed] = useState<Article[]>([]);
+  const [selectedInterests, setSelectedInterests] = useState<InterestId[]>(
+    defaultInterestIds,
+  );
   const [manualPushes, setManualPushes] = useState<ManualPush[]>([]);
   const [apiOnline, setApiOnline] = useState(false);
   const [learningSettings, setLearningSettings] = useState<LearningSettings>(
@@ -4426,6 +4864,7 @@ function AppContent() {
         token,
         cachedLearningSettings,
         cachedReaderSettings,
+        cachedInterests,
       ] = await Promise.all([
         storage.getExam(),
         storage.getWords(),
@@ -4435,6 +4874,7 @@ function AppContent() {
         storage.getAuthToken(),
         storage.getLearningSettings(),
         storage.getReaderSettings(),
+        storage.getInterests(),
       ]);
 
       setExamId(savedExam);
@@ -4454,8 +4894,21 @@ function AppContent() {
           ...cachedReaderSettings,
         });
       }
+      const initialInterests = cachedInterests.length
+        ? cachedInterests
+        : defaultInterestIds;
+      setSelectedInterests(initialInterests);
       if (savedExam) {
-        setDaily(getDailyArticles(savedExam));
+        setDaily(
+          getDailyArticles(
+            savedExam,
+            new Date(),
+            [],
+            cachedLearningSettings?.dailyGoal ?? 3,
+            initialInterests,
+          ),
+        );
+        setInterestFeed(getInterestArticles(savedExam, initialInterests));
       }
 
       if (!token) {
@@ -4488,6 +4941,7 @@ function AppContent() {
             preferences,
             stats,
             remoteMistakes,
+            remoteInterestFeed,
           ] =
             await Promise.all([
               api.getDaily(),
@@ -4497,6 +4951,7 @@ function AppContent() {
               api.getPreferences(),
               api.getLearningStats(),
               api.getMistakes(),
+              api.getInterestFeed(),
             ]);
           const completedIds = [
             ...new Set([
@@ -4515,6 +4970,8 @@ function AppContent() {
           setReaderPreferences(preferences.reader);
           setLearningStats(stats);
           setMistakes(remoteMistakes);
+          setSelectedInterests(preferences.interests);
+          setInterestFeed(remoteInterestFeed);
           void syncDailyReminder(preferences.learning).catch(() => undefined);
           await Promise.all([
             storage.setHistory(remoteHistory.records),
@@ -4522,6 +4979,7 @@ function AppContent() {
             storage.setWords(remoteWords),
             storage.setLearningSettings(preferences.learning),
             storage.setReaderSettings(preferences.reader),
+            storage.setInterests(preferences.interests),
           ]);
         }
         setApiOnline(true);
@@ -4620,7 +5078,15 @@ function AppContent() {
         });
       }
     } else if (goalChanged && examId) {
-      setDaily(getDailyArticles(examId, new Date(), [], next.dailyGoal));
+      setDaily(
+        getDailyArticles(
+          examId,
+          new Date(),
+          [],
+          next.dailyGoal,
+          selectedInterests,
+        ),
+      );
     }
     const permissionRequested =
       next.dailyReminderEnabled &&
@@ -4660,6 +5126,45 @@ function AppContent() {
       );
   };
 
+  const updateInterests = async (next: InterestId[]) => {
+    if (next.length === 0) return;
+    const previous = selectedInterests;
+    setSelectedInterests(next);
+    await storage.setInterests(next);
+    if (!examId) return;
+    if (!apiOnline) {
+      setDaily(
+        getDailyArticles(
+          examId,
+          new Date(),
+          [],
+          learningSettings.dailyGoal,
+          next,
+        ),
+      );
+      setInterestFeed(getInterestArticles(examId, next));
+      return;
+    }
+    try {
+      await api.updatePreferences({ interests: next });
+      const [remoteDaily, remoteInterestFeed] = await Promise.all([
+        api.getDaily(),
+        api.getInterestFeed(),
+      ]);
+      setDaily(remoteDaily);
+      setInterestFeed(remoteInterestFeed);
+    } catch (error) {
+      setSelectedInterests(previous);
+      await storage.setInterests(previous);
+      setAppNotice({
+        title: "兴趣设置同步失败",
+        message: error instanceof Error ? error.message : "请稍后重试",
+        tone: "error",
+      });
+      throw error;
+    }
+  };
+
   const updateReaderPreferences = (next: ReaderSettings) => {
     setReaderPreferences(next);
     void storage.setReaderSettings(next);
@@ -4691,6 +5196,7 @@ function AppContent() {
       preferences,
       stats,
       remoteMistakes,
+      remoteInterestFeed,
     ] = await Promise.all([
       api.getDaily(),
       api.getHistory(),
@@ -4699,6 +5205,7 @@ function AppContent() {
       api.getPreferences(),
       api.getLearningStats(),
       api.getMistakes(),
+      api.getInterestFeed(),
     ]);
     const completedIds = [
       ...new Set([
@@ -4717,6 +5224,8 @@ function AppContent() {
     setReaderPreferences(preferences.reader);
     setLearningStats(stats);
     setMistakes(remoteMistakes);
+    setSelectedInterests(preferences.interests);
+    setInterestFeed(remoteInterestFeed);
     void syncDailyReminder(preferences.learning).catch(() => undefined);
     await Promise.all([
       storage.setHistory(remoteHistory.records),
@@ -4724,6 +5233,7 @@ function AppContent() {
       storage.setWords(remoteWords),
       storage.setLearningSettings(preferences.learning),
       storage.setReaderSettings(preferences.reader),
+      storage.setInterests(preferences.interests),
     ]);
   };
 
@@ -4737,9 +5247,12 @@ function AppContent() {
       await Promise.all([
         storage.clearExam(),
         storage.setLearningSettings(DEFAULT_LEARNING_SETTINGS),
+        storage.setInterests(defaultInterestIds),
       ]);
       setExamId(null);
       setLearningSettings(DEFAULT_LEARNING_SETTINGS);
+      setSelectedInterests(defaultInterestIds);
+      setInterestFeed([]);
       setApiOnline(true);
       setAuthRequired(false);
       return;
@@ -4754,16 +5267,19 @@ function AppContent() {
   const completeOnboarding = async (
     nextExam: ExamId,
     dailyGoal: number,
+    interests: InterestId[],
   ) => {
     const nextLearning = { ...learningSettings, dailyGoal };
     const updatedUser = await api.setExam(nextExam);
-    await api.updatePreferences({ learning: nextLearning });
+    await api.updatePreferences({ learning: nextLearning, interests });
     setCurrentUser(updatedUser);
     setExamId(nextExam);
     setLearningSettings(nextLearning);
+    setSelectedInterests(interests);
     await Promise.all([
       storage.setExam(nextExam),
       storage.setLearningSettings(nextLearning),
+      storage.setInterests(interests),
     ]);
     await applyRemoteSnapshot();
     setApiOnline(true);
@@ -4783,17 +5299,21 @@ function AppContent() {
     setExamId(nextExam);
     setCurrentUser((user) => (user ? { ...user, examId: nextExam } : user));
     await storage.setExam(nextExam);
-    setDaily(getDailyArticles(nextExam));
+    setDaily(
+      getDailyArticles(nextExam, new Date(), [], learningSettings.dailyGoal, selectedInterests),
+    );
+    setInterestFeed(getInterestArticles(nextExam, selectedInterests));
     if (navigateToToday) setTab("today");
     try {
       const updatedUser = await api.setExam(nextExam);
       setCurrentUser(updatedUser);
-      const [remoteDaily, remoteHistory, remoteWords, pushes] =
+      const [remoteDaily, remoteHistory, remoteWords, pushes, remoteInterestFeed] =
         await Promise.all([
           api.getDaily(),
           api.getHistory(),
           api.getVocabulary(),
           api.getPushes(),
+          api.getInterestFeed(),
         ]);
       const completedIds = [
         ...new Set([
@@ -4808,6 +5328,7 @@ function AppContent() {
       setHistory(remoteHistory.records);
       setCompleted(completedIds);
       setSavedWords(remoteWords);
+      setInterestFeed(remoteInterestFeed);
       setApiOnline(true);
       await Promise.all([
         storage.setHistory(remoteHistory.records),
@@ -5016,6 +5537,12 @@ function AppContent() {
     setReader(article);
   };
 
+  const openInterestArticle = (article: Article) => {
+    setReaderPracticeMode(false);
+    setReaderQueue(interestFeed.map((item) => item.id));
+    setReader(article);
+  };
+
   const openPushedArticle = async (articleId: string) => {
     setReaderPracticeMode(false);
     const queue = manualPushes.map((push) => push.article.id);
@@ -5169,11 +5696,14 @@ function AppContent() {
       <TodayScreen
         examId={examId}
         daily={daily}
+        interestFeed={interestFeed}
+        selectedInterests={selectedInterests}
         dailyGoal={learningSettings.dailyGoal}
         streakDays={learningStats.streakDays}
         manualPushes={manualPushes}
         completed={completed}
         onOpen={openDailyArticle}
+        onOpenInterest={openInterestArticle}
         onOpenPush={openPushedArticle}
         onNavigate={setTab}
       />
@@ -5199,9 +5729,11 @@ function AppContent() {
       <ProfileScreen
         examId={examId}
         settings={learningSettings}
+        selectedInterests={selectedInterests}
         user={currentUser}
         onChangeExam={(id) => void selectExam(id, false)}
         onChangeSettings={updateLearningSettings}
+        onChangeInterests={updateInterests}
         onOpenAccount={() =>
           setAccountMode(currentUser?.isRegistered ? "profile" : "login")
         }
@@ -5413,6 +5945,32 @@ const styles = StyleSheet.create({
   nativeChoiceCheckSelected: {
     backgroundColor: colors.primary,
     borderColor: colors.primary,
+  },
+  interestPickerGrid: { gap: 10 },
+  interestPickerItem: {
+    minHeight: 66,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  interestPickerItemActive: {
+    borderColor: colors.primary,
+    backgroundColor: "#F2F8F6",
+  },
+  interestPickerEmoji: { fontSize: 24 },
+  interestPickerTitle: { color: colors.ink, fontSize: 14, fontWeight: "800" },
+  interestPickerSubtitle: { color: colors.inkMuted, fontSize: 11, marginTop: 3 },
+  interestPickerError: {
+    color: colors.danger,
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 12,
   },
   goalStepper: {
     flexDirection: "row",
@@ -5839,6 +6397,36 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: "700",
   },
+  onboardingInterestSection: {
+    marginTop: 22,
+    paddingTop: 20,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+  },
+  interestChipGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 14,
+  },
+  interestChoice: {
+    minHeight: 42,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surfaceMuted,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+  interestChoiceActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+  },
+  interestChoiceEmoji: { fontSize: 16 },
+  interestChoiceText: { color: colors.inkMuted, fontSize: 12, fontWeight: "700" },
+  interestChoiceTextActive: { color: colors.primaryDark, fontWeight: "800" },
   onboardingError: {
     color: colors.danger,
     fontSize: 12,
@@ -5966,6 +6554,78 @@ const styles = StyleSheet.create({
   },
   countPillText: { color: colors.inkMuted, fontSize: 11, fontWeight: "700" },
   articleList: { gap: 12 },
+  interestExploreSection: { marginTop: 2 },
+  interestSparkBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    backgroundColor: "#FFF2DA",
+  },
+  interestSparkText: { color: "#9B681B", fontSize: 10, fontWeight: "800" },
+  interestFilterRow: { gap: 8, paddingRight: 12, marginBottom: 12 },
+  interestFilterChip: {
+    minHeight: 38,
+    paddingHorizontal: 12,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  interestFilterChipActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+  },
+  interestFilterEmoji: { fontSize: 14 },
+  interestFilterText: { color: colors.inkMuted, fontSize: 11, fontWeight: "700" },
+  interestFilterTextActive: { color: colors.primaryDark, fontWeight: "800" },
+  interestArticleGrid: { gap: 10 },
+  interestArticleCard: {
+    minHeight: 104,
+    flexDirection: "row",
+    padding: 12,
+    gap: 13,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  interestArticleVisual: {
+    width: 72,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  interestArticleEmoji: { fontSize: 30 },
+  interestArticleBody: { flex: 1, paddingVertical: 2 },
+  interestArticleCategory: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+  },
+  interestArticleTitle: {
+    color: colors.ink,
+    fontSize: 16,
+    lineHeight: 21,
+    fontWeight: "800",
+    marginTop: 7,
+  },
+  interestArticleMeta: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginTop: "auto",
+    paddingTop: 9,
+  },
+  interestArticleDot: { color: colors.inkMuted, fontSize: 11 },
+  interestArticleChevron: { marginLeft: "auto" },
   articleCard: {
     flexDirection: "row",
     borderRadius: radius.lg,
@@ -6295,6 +6955,39 @@ const styles = StyleSheet.create({
   selectedInlineWord: {
     backgroundColor: "#C7E4DC",
     color: colors.primary,
+  },
+  interestActivityCard: {
+    marginTop: 28,
+    padding: 15,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: "#E6D8BC",
+    backgroundColor: "#FFF8E9",
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  interestActivityIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFF0CF",
+  },
+  interestActivityEmoji: { fontSize: 19 },
+  interestActivityLabel: {
+    color: "#9B681B",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  interestActivityText: {
+    color: colors.ink,
+    fontSize: 13,
+    lineHeight: 20,
+    fontWeight: "600",
+    marginTop: 5,
   },
   practiceHeader: {
     marginTop: 38,

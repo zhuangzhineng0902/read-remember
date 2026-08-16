@@ -1,5 +1,21 @@
 export type ExamId = "toefl" | "ielts" | "toeic" | "middle" | "high";
 
+export type InterestId =
+  | "military"
+  | "art"
+  | "science"
+  | "why"
+  | "fantasy";
+
+export type InterestCategory = {
+  id: InterestId;
+  name: string;
+  subtitle: string;
+  emoji: string;
+  color: string;
+  activityPrompt: string;
+};
+
 export type Exam = {
   id: ExamId;
   name: string;
@@ -38,6 +54,10 @@ export type Article = {
   eyebrow: string;
   readMinutes: number;
   difficulty: number;
+  contentKind?: "exam" | "interest";
+  interestId?: InterestId | null;
+  seriesTitle?: string | null;
+  episodeNumber?: number | null;
   paragraphs: string[];
   questions: Question[];
 };
@@ -141,5 +161,6 @@ export type ReadingProgress = {
 export type UserPreferences = {
   learning: LearningSettings;
   reader: ReaderSettings;
+  interests: InterestId[];
   updatedAt: string;
 };

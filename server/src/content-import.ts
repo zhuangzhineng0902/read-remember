@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ExamId } from "../../client/src/types";
 import type { AppDatabase } from "./database";
+import { contentFingerprint } from "./content-fingerprint";
 import { ApiError } from "./http";
 
 const questionSchema = z
@@ -15,16 +15,28 @@ const questionSchema = z
     message: "answer 必须对应一个有效选项",
   });
 
-export const importedArticleSchema = z.object({
-  externalId: z.string().trim().min(1).max(160),
-  year: z.number().int().min(1980).max(2100),
-  title: z.string().trim().min(3).max(300),
-  eyebrow: z.string().trim().min(2).max(80).default("READING"),
-  readMinutes: z.number().int().min(1).max(60).default(8),
-  difficulty: z.number().int().min(1).max(5),
-  paragraphs: z.array(z.string().trim().min(10).max(20000)).min(1).max(30),
-  questions: z.array(questionSchema).min(1).max(50),
-});
+export const importedArticleSchema = z
+  .object({
+    externalId: z.string().trim().min(1).max(160),
+    year: z.number().int().min(1980).max(2100),
+    title: z.string().trim().min(3).max(300),
+    eyebrow: z.string().trim().min(2).max(80).default("READING"),
+    readMinutes: z.number().int().min(1).max(60).default(8),
+    difficulty: z.number().int().min(1).max(5),
+    contentKind: z.enum(["exam", "interest"]).default("exam"),
+    interestId: z
+      .enum(["military", "art", "science", "why", "fantasy"])
+      .nullable()
+      .optional(),
+    seriesTitle: z.string().trim().min(2).max(160).nullable().optional(),
+    episodeNumber: z.number().int().min(1).max(999).nullable().optional(),
+    paragraphs: z.array(z.string().trim().min(10).max(20000)).min(1).max(30),
+    questions: z.array(questionSchema).min(1).max(50),
+  })
+  .refine(
+    (article) => article.contentKind !== "interest" || Boolean(article.interestId),
+    { message: "兴趣文章必须选择 interestId", path: ["interestId"] },
+  );
 
 export const importPayloadSchema = z.object({
   examId: z.enum(["toefl", "ielts", "toeic", "middle", "high"]),
@@ -43,11 +55,19 @@ export function importArticles(db: AppDatabase, payload: ImportPayload) {
     FROM article_sources
     WHERE source_url IS ? AND external_id = ?
   `);
+  const existingContent = db.prepare(`
+    SELECT s.article_id AS articleId
+    FROM article_sources s
+    JOIN articles a ON a.id = s.article_id
+    WHERE a.exam_id = ? AND s.content_hash = ?
+    LIMIT 1
+  `);
   const insertArticle = db.prepare(`
     INSERT INTO articles(
       id, exam_id, year, title, eyebrow, read_minutes, difficulty,
+      content_kind, interest_id, series_title, episode_number,
       paragraphs_json, questions_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       exam_id = excluded.exam_id,
       year = excluded.year,
@@ -55,6 +75,10 @@ export function importArticles(db: AppDatabase, payload: ImportPayload) {
       eyebrow = excluded.eyebrow,
       read_minutes = excluded.read_minutes,
       difficulty = excluded.difficulty,
+      content_kind = excluded.content_kind,
+      interest_id = excluded.interest_id,
+      series_title = excluded.series_title,
+      episode_number = excluded.episode_number,
       paragraphs_json = excluded.paragraphs_json,
       questions_json = excluded.questions_json
   `);
@@ -75,12 +99,18 @@ export function importArticles(db: AppDatabase, payload: ImportPayload) {
   db.exec("BEGIN IMMEDIATE");
   try {
     for (const article of payload.articles) {
-      const serialized = JSON.stringify(article);
-      const hash = createHash("sha256").update(serialized).digest("hex");
+      const hash = contentFingerprint(article);
       const prior = existingSource.get(
         payload.sourceUrl ?? null,
         article.externalId,
       ) as { articleId: string } | undefined;
+      const duplicate = existingContent.get(payload.examId, hash) as
+        | { articleId: string }
+        | undefined;
+      if (duplicate && duplicate.articleId !== prior?.articleId) {
+        imported.push(duplicate.articleId);
+        continue;
+      }
       const id =
         prior?.articleId ?? `${payload.examId}-sync-${hash.slice(0, 18)}`;
       insertArticle.run(
@@ -91,6 +121,10 @@ export function importArticles(db: AppDatabase, payload: ImportPayload) {
         article.eyebrow,
         article.readMinutes,
         article.difficulty,
+        article.contentKind,
+        article.contentKind === "interest" ? article.interestId ?? null : null,
+        article.seriesTitle ?? null,
+        article.episodeNumber ?? null,
         JSON.stringify(article.paragraphs),
         JSON.stringify(article.questions),
       );

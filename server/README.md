@@ -37,6 +37,8 @@ npm start
 
 每日自动推荐默认按 `Asia/Shanghai` 时区在 08:00 后，为每位用户从其当前选择的考试分类中分配一篇未推送过的文章。服务晚启动会补发当天任务，客户端在线时每分钟刷新应用内推送列表。
 
+兴趣题库会为 TOEFL、IELTS、TOEIC、高中和初中五个阶段分别初始化五个栏目。每个“阶段 × 栏目”至少 100 篇，当前为 102 篇，共 2,550 篇；同一主题会按考试阶段调整句式、篇幅、任务语境和题目推理强度。兴趣书架按栏目均衡抽取未出现过的文章，已经进入书架或每日任务的文章不会再次推荐。
+
 运营后台：`http://localhost:4000/admin/`
 
 本地默认管理员密钥为 `dev-admin-change-me`。正式部署必须通过 `ADMIN_API_KEY` 修改，并仅在 HTTPS 后使用。
@@ -69,6 +71,7 @@ Authorization: Bearer <token>
 | -------- | --------------------------------------- | -------------------------- |
 | `GET`    | `/health`                               | 健康检查                   |
 | `GET`    | `/api/v1/exams`                         | 考试类型                   |
+| `GET`    | `/api/v1/interests`                     | 兴趣阅读栏目               |
 | `POST`   | `/api/v1/auth/anonymous`                | 匿名设备登录               |
 | `GET`    | `/api/v1/users/me`                      | 当前用户                   |
 | `PATCH`  | `/api/v1/users/me/exam`                 | 切换考试目标               |
@@ -76,6 +79,7 @@ Authorization: Bearer <token>
 | `PATCH`  | `/api/v1/users/me/preferences`          | 同步学习与阅读偏好         |
 | `GET`    | `/api/v1/users/me/stats`                | 真实学习统计               |
 | `GET`    | `/api/v1/daily?date=YYYY-MM-DD`         | 当日 3 篇文章              |
+| `GET`    | `/api/v1/interest-feed`                 | 当前用户的兴趣阅读书架     |
 | `GET`    | `/api/v1/articles/:id`                  | 文章与答题选项，不泄露答案 |
 | `GET`    | `/api/v1/articles/:id/answers`          | 恢复答题记录与已提交解析   |
 | `PUT`    | `/api/v1/articles/:id/answers`          | 保存未提交的答题记录       |
@@ -94,6 +98,7 @@ Authorization: Bearer <token>
 后台 API 使用 `X-Admin-Key` 认证，支持：
 
 - 题库检索、分类、来源和授权信息查看
+- 按考试、内容类型和兴趣栏目筛选题库
 - 手动 JSON 导入授权题目
 - 从域名白名单中的 HTTPS JSON Feed 同步题目
 - 给指定用户或全部用户推送一篇或多篇文章
@@ -117,6 +122,10 @@ Feed 格式：
       "eyebrow": "SCIENCE",
       "readMinutes": 8,
       "difficulty": 3,
+      "contentKind": "interest",
+      "interestId": "science",
+      "seriesTitle": null,
+      "episodeNumber": null,
       "paragraphs": ["Licensed passage..."],
       "questions": [
         {
@@ -135,10 +144,14 @@ Feed 格式：
 
 ## 去重规则
 
+文章导入前会对标准化后的标题、正文、题干和选项计算 SHA-256 内容指纹；同一考试阶段中，即使外部 ID 不同，完全相同的内容也只会保留一份。原创初始化文章使用稳定 ID，可以安全地反复启动和升级。
+
 `deliveries` 表具有两个数据库唯一约束：
 
 - `(user_id, delivery_date, slot)`：同一天重复请求始终获得同一批内容。
 - `(user_id, article_id)`：一篇文章不会重复推送给同一用户。
+
+兴趣阅读另由 `interest_deliveries(user_id, article_id)` 保证不重复，日常推荐也会同时排除已经出现在兴趣书架中的文章。
 
 当未读题库不足 3 篇时，接口返回现有未读文章并将 `corpusExhausted` 设为 `true`，不会为了凑数重复投递。生产环境应在此状态出现前由授权题库持续补充内容。
 

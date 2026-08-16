@@ -26,6 +26,13 @@ const examNames = {
   high: "高中",
   middle: "初中",
 };
+const interestNames = {
+  military: "军事科技",
+  art: "画画与设计",
+  science: "科普知识",
+  why: "十万个为什么",
+  fantasy: "奇幻冒险",
+};
 
 function escapeHtml(value = "") {
   return String(value)
@@ -108,7 +115,7 @@ async function renderOverview() {
   const data = await api("/overview");
   const metrics = [
     ["注册用户", data.metrics.users, "已建立设备身份"],
-    ["题库文章", data.metrics.articles, "覆盖 4 类考试"],
+    ["题库文章", data.metrics.articles, `含 ${data.metrics.interestArticles || 0} 篇兴趣内容`],
     ["累计推送", data.metrics.pushedArticles, "每日 + 手动推送"],
     ["完成阅读", data.metrics.readArticles, "已提交答案的文章"],
   ];
@@ -153,9 +160,13 @@ function activityRow(item) {
 async function renderArticles() {
   const search = state.articleSearch || "";
   const exam = state.articleExam || "";
+  const kind = state.articleKind || "";
+  const interest = state.articleInterest || "";
   const query = new URLSearchParams({ limit: "100" });
   if (search) query.set("search", search);
   if (exam) query.set("examId", exam);
+  if (kind) query.set("contentKind", kind);
+  if (interest) query.set("interestId", interest);
   const result = await fetch(`/api/v1/admin/articles?${query}`, {
     headers: { "x-admin-key": state.key },
   }).then(async (response) => {
@@ -167,13 +178,15 @@ async function renderArticles() {
   state.articles = result.data;
   content.innerHTML = `
     <div class="section-head"><div><h2>全部阅读题</h2><p>共 ${result.pagination.total} 篇，答案在用户提交后返回</p></div><div class="actions"><button class="button secondary" data-go="sync">导入题库</button><button class="button primary" data-go="push">选择并推送</button></div></div>
-    <div class="toolbar"><input id="article-search" placeholder="搜索标题或主题" value="${escapeHtml(search)}"><select id="article-exam"><option value="">全部考试</option>${examOptions(exam)}</select><button id="article-filter" class="button secondary">筛选</button></div>
-    <div class="table-wrap"><table><thead><tr><th>文章</th><th>考试</th><th>年份</th><th>题目数</th><th>难度</th><th>来源</th></tr></thead><tbody>
-      ${state.articles.map((item) => `<tr><td><strong>${escapeHtml(item.title)}</strong><br><span class="muted">${escapeHtml(item.eyebrow)} · ${item.readMinutes} 分钟</span></td><td><span class="badge">${examNames[item.examId]}</span></td><td>${item.year}</td><td>${item.questionCount}</td><td>${"●".repeat(item.difficulty)}<span style="color:#d7dcda">${"●".repeat(5 - item.difficulty)}</span></td><td>${escapeHtml(item.sourceName)}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">没有匹配的题目</td></tr>'}
+    <div class="toolbar"><input id="article-search" placeholder="搜索标题或主题" value="${escapeHtml(search)}"><select id="article-exam"><option value="">全部考试</option>${examOptions(exam)}</select><select id="article-kind"><option value="">全部内容</option><option value="exam" ${kind === "exam" ? "selected" : ""}>考试阅读</option><option value="interest" ${kind === "interest" ? "selected" : ""}>兴趣阅读</option></select><select id="article-interest"><option value="">全部兴趣</option>${Object.entries(interestNames).map(([id, name]) => `<option value="${id}" ${interest === id ? "selected" : ""}>${name}</option>`).join("")}</select><button id="article-filter" class="button secondary">筛选</button></div>
+    <div class="table-wrap"><table><thead><tr><th>文章</th><th>内容类型</th><th>考试</th><th>年份</th><th>题目数</th><th>难度</th><th>来源</th></tr></thead><tbody>
+      ${state.articles.map((item) => `<tr><td><strong>${escapeHtml(item.title)}</strong><br><span class="muted">${escapeHtml(item.seriesTitle ? `${item.seriesTitle} · 第 ${item.episodeNumber} 章` : item.eyebrow)} · ${item.readMinutes} 分钟</span></td><td><span class="badge">${item.contentKind === "interest" ? interestNames[item.interestId] || "兴趣阅读" : "考试阅读"}</span></td><td><span class="badge">${examNames[item.examId]}</span></td><td>${item.year}</td><td>${item.questionCount}</td><td>${"●".repeat(item.difficulty)}<span style="color:#d7dcda">${"●".repeat(5 - item.difficulty)}</span></td><td>${escapeHtml(item.sourceName)}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">没有匹配的题目</td></tr>'}
     </tbody></table></div>`;
   $("#article-filter").onclick = () => {
     state.articleSearch = $("#article-search").value.trim();
     state.articleExam = $("#article-exam").value;
+    state.articleKind = $("#article-kind").value;
+    state.articleInterest = $("#article-interest").value;
     render("articles");
   };
   $("#article-search").onkeydown = (event) =>
@@ -192,6 +205,10 @@ function renderSync() {
           eyebrow: "EDUCATION",
           readMinutes: 7,
           difficulty: 3,
+          contentKind: "interest",
+          interestId: "science",
+          seriesTitle: null,
+          episodeNumber: null,
           paragraphs: [
             "Paste the licensed reading passage here. This example sentence is intentionally long enough for validation.",
           ],

@@ -1,4 +1,5 @@
-import { Article, Exam, ExamId, WordInfo } from "./types";
+import { interestArticles } from "./interest-data";
+import { Article, Exam, ExamId, InterestId, WordInfo } from "./types";
 
 export const exams: Exam[] = [
   {
@@ -241,7 +242,7 @@ const passages = [
   },
 ];
 
-export const articles: Article[] = (
+const examArticles: Article[] = (
   ["toefl", "ielts", "toeic", "high", "middle"] as ExamId[]
 ).flatMap((examId, examIndex) =>
   passages.map((passage, index) => ({
@@ -252,10 +253,16 @@ export const articles: Article[] = (
     eyebrow: passage.eyebrow,
     readMinutes: 5 + (index % 4),
     difficulty: Math.min(5, 2 + ((index + examIndex) % 4)),
+    contentKind: "exam" as const,
+    interestId: null,
+    seriesTitle: null,
+    episodeNumber: null,
     paragraphs: passage.body,
     questions: passage.questions,
   })),
 );
+
+export const articles: Article[] = [...examArticles, ...interestArticles];
 
 const vocabulary: Record<string, [string, string]> = {
   mature: ["/məˈtʃʊr/", "成熟的"],
@@ -285,6 +292,11 @@ const vocabulary: Record<string, [string, string]> = {
   ecosystem: ["/ˈiːkoʊsɪstəm/", "生态系统"],
   interpret: ["/ɪnˈtɜːrprɪt/", "解释；理解"],
   instrument: ["/ˈɪnstrəmənt/", "仪器"],
+  deliver: ["/dɪˈlɪvər/", "递送；运送；交付"],
+  delivering: ["/dɪˈlɪvərɪŋ/", "正在递送；正在运送"],
+  cargo: ["/ˈkɑːrɡoʊ/", "货物；货运"],
+  medical: ["/ˈmedɪkəl/", "医学的；医疗的"],
+  supplies: ["/səˈplaɪz/", "物资；补给品"],
 };
 
 export function lookupWord(raw: string): WordInfo {
@@ -312,16 +324,33 @@ export function getDailyArticles(
   date = new Date(),
   excludedIds: string[] = [],
   limit = 3,
+  selectedInterests: InterestId[] = [],
 ): Article[] {
-  const pool = articles.filter((item) => item.examId === examId);
+  const examPool = examArticles.filter((item) => item.examId === examId);
+  const interestPool = interestArticles.filter(
+    (item) =>
+      item.examId === examId &&
+      item.interestId &&
+      selectedInterests.includes(item.interestId),
+  );
   const dayIndex = Math.floor(
     Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000,
   );
-  const start = (dayIndex * 3) % Math.max(1, pool.length);
-  const rotated = [...pool.slice(start), ...pool.slice(0, start)];
+  const rotate = (pool: Article[], factor: number) => {
+    const start = (dayIndex * factor) % Math.max(1, pool.length);
+    return [...pool.slice(start), ...pool.slice(0, start)].filter(
+      (item) => !excludedIds.includes(item.id),
+    );
+  };
+  const examSelection = rotate(examPool, 3);
+  const interestSelection = rotate(interestPool, 5);
+  const goal = Math.max(1, Math.trunc(limit));
+  const interestGoal = goal >= 3 && interestSelection.length > 0 ? 1 : 0;
+  const mixed = [
+    ...examSelection.slice(0, goal - interestGoal),
+    ...interestSelection.slice(0, interestGoal),
+  ];
   // Delivered items never enter the result again. The production API can keep
   // this unseen pool replenished as the local demo corpus runs low.
-  return rotated
-    .filter((item) => !excludedIds.includes(item.id))
-    .slice(0, Math.max(1, Math.trunc(limit)));
+  return mixed.slice(0, goal);
 }

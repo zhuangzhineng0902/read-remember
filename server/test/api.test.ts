@@ -4,6 +4,7 @@ import { after, before, test } from "node:test";
 import { createApp } from "../src/app";
 import { createDatabase } from "../src/database";
 import { dispatchDailyPushes } from "../src/daily-push";
+import { lookupPronunciation } from "../src/pronunciation";
 
 const db = createDatabase(":memory:");
 const server = createServer(
@@ -52,6 +53,10 @@ test("health and exam list are public", async () => {
   const exams = await request("/api/v1/exams");
   assert.equal(exams.status, 200);
   assert.equal((await exams.json()).data.length, 5);
+
+  const interests = await request("/api/v1/interests");
+  assert.equal(interests.status, 200);
+  assert.equal((await interests.json()).data.length, 5);
 });
 
 test("pronunciation metadata and cached audio are public", async () => {
@@ -125,6 +130,67 @@ test("partial pronunciation cache returns immediately without requiring examples
   assert.equal(value.cached, true);
   assert.equal(value.translation, "部分的");
   assert.equal(value.example, "");
+});
+
+test("empty cached translations are refreshed from the bilingual dictionary", async () => {
+  for (const word of ["delivering", "cargo", "medical"]) {
+    db.prepare(
+      `INSERT INTO pronunciation_cache(
+        word, accent, phonetic, status, definition_en, translation_zh
+      ) VALUES (?, 'us', '', 'tts_only', 'Cached definition.', '')`,
+    ).run(word);
+  }
+  const translations: Record<string, string> = {
+    delivering: "v. 投递，运送；交付",
+    cargo: "n. 货物；货运",
+    medical: "adj. 医学的，医疗的",
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.hostname === "dict.youdao.com") {
+      const word = url.searchParams.get("q") ?? "";
+      return new Response(
+        JSON.stringify({
+          ec: {
+            word: [
+              {
+                usphone: "test-phone",
+                trs: [{ tr: [{ l: { i: [translations[word]] } }] }],
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.hostname === "api.dictionaryapi.dev") {
+      return new Response(
+        JSON.stringify([
+          {
+            meanings: [
+              {
+                partOfSpeech: "noun",
+                definitions: [{ definition: "A deterministic test entry." }],
+              },
+            ],
+          },
+        ]),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`Unexpected fetch in pronunciation test: ${url}`);
+  };
+  try {
+    for (const [word, translation] of Object.entries(translations)) {
+      const result = await lookupPronunciation(db, word, "us");
+      assert.equal(result.translation, translation);
+      assert.equal(result.phonetic, "/test-phone/");
+      assert.equal(result.cached, false);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("anonymous device login returns a reusable token", async () => {
@@ -227,7 +293,88 @@ test("anonymous account can register, login, and update profile", async () => {
     }),
   });
   assert.equal(preferences.status, 200);
-  assert.equal((await preferences.json()).data.learning.dailyGoal, 3);
+  const preferenceData = (await preferences.json()).data;
+  assert.equal(preferenceData.learning.dailyGoal, 3);
+  assert.equal(preferenceData.interests.length, 5);
+});
+
+test("interest preferences drive the interest feed and mixed daily reading", async () => {
+  const preferences = await request("/api/v1/users/me/preferences", {
+    method: "PATCH",
+    body: JSON.stringify({ interests: ["military", "art"] }),
+  });
+  assert.equal(preferences.status, 200);
+  assert.deepEqual((await preferences.json()).data.interests, ["military", "art"]);
+
+  const feed = await request("/api/v1/interest-feed");
+  assert.equal(feed.status, 200);
+  const feedItems = (await feed.json()).data as Array<{
+    id: string;
+    contentKind: string;
+    interestId: string;
+  }>;
+  assert.equal(feedItems.length, 20);
+  assert.ok(feedItems.every((item) => item.contentKind === "interest"));
+  assert.ok(
+    feedItems.every((item) => ["military", "art"].includes(item.interestId)),
+  );
+  assert.equal(
+    feedItems.filter((item) => item.interestId === "military").length,
+    10,
+  );
+  assert.equal(
+    feedItems.filter((item) => item.interestId === "art").length,
+    10,
+  );
+
+  const nextFeed = await request("/api/v1/interest-feed");
+  assert.equal(nextFeed.status, 200);
+  const nextFeedItems = (await nextFeed.json()).data as Array<{ id: string }>;
+  assert.equal(nextFeedItems.length, 20);
+  const firstFeedIds = new Set(feedItems.map((item) => item.id));
+  assert.ok(nextFeedItems.every((item) => !firstFeedIds.has(item.id)));
+
+  const article = await request(`/api/v1/articles/${feedItems[0].id}`);
+  assert.equal(article.status, 200);
+
+  const daily = await request("/api/v1/daily?date=2026-08-08");
+  assert.equal(daily.status, 200);
+  const dailyItems = (await daily.json()).data.articles as Array<{
+    contentKind: string;
+  }>;
+  assert.equal(dailyItems.length, 3);
+  assert.equal(
+    dailyItems.filter((item) => item.contentKind === "interest").length,
+    1,
+  );
+});
+
+test("interest corpus contains at least one hundred unique articles per stage and category", () => {
+  const rows = db
+    .prepare(
+      `SELECT exam_id AS examId, interest_id AS interestId,
+        COUNT(*) AS total, COUNT(DISTINCT id) AS uniqueIds,
+        COUNT(DISTINCT paragraphs_json) AS uniqueBodies
+       FROM articles
+       WHERE content_kind = 'interest'
+       GROUP BY exam_id, interest_id`,
+    )
+    .all() as Array<{
+    examId: string;
+    interestId: string;
+    total: number;
+    uniqueIds: number;
+    uniqueBodies: number;
+  }>;
+  assert.equal(rows.length, 25);
+  assert.ok(
+    rows.every(
+      (row) =>
+        row.total >= 100 &&
+        row.uniqueIds === row.total &&
+        row.uniqueBodies >= 100,
+    ),
+  );
 });
 
 test("daily delivery is idempotent and never repeats across dates", async () => {
@@ -367,7 +514,7 @@ test("article answers can be submitted and appear in history", async () => {
   const mistakes = await request("/api/v1/mistakes");
   assert.equal((await mistakes.json()).data.length, article.questions.length);
 
-  const history = await request("/api/v1/history");
+  const history = await request("/api/v1/history?limit=100");
   const historyData = (await history.json()).data;
   const completed = historyData.find(
     (item: { article: { id: string } }) => item.article.id === articleId,

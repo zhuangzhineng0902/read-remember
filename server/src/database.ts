@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { articles, exams } from "../../client/src/data";
+import { interestSourceGuides } from "../../client/src/interest-data";
+import { contentFingerprint } from "./content-fingerprint";
 
 // Some bundlers do not yet recognize node:sqlite as a built-in module and
 // rewrite it to a non-existent `sqlite` package. createRequire preserves the
@@ -38,6 +40,10 @@ export function createDatabase(filename: string): AppDatabase {
       eyebrow TEXT NOT NULL,
       read_minutes INTEGER NOT NULL,
       difficulty INTEGER NOT NULL CHECK(difficulty BETWEEN 1 AND 5),
+      content_kind TEXT NOT NULL DEFAULT 'exam' CHECK(content_kind IN ('exam', 'interest')),
+      interest_id TEXT,
+      series_title TEXT,
+      episode_number INTEGER,
       paragraphs_json TEXT NOT NULL,
       questions_json TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -90,6 +96,7 @@ export function createDatabase(filename: string): AppDatabase {
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       learning_json TEXT NOT NULL DEFAULT '{}',
       reader_json TEXT NOT NULL DEFAULT '{}',
+      interests_json TEXT NOT NULL DEFAULT '[]',
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -198,6 +205,15 @@ export function createDatabase(filename: string): AppDatabase {
       UNIQUE(user_id, article_id)
     );
 
+    CREATE TABLE IF NOT EXISTS interest_deliveries (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+      delivery_date TEXT NOT NULL,
+      opened_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_id, article_id)
+    );
+
     CREATE TABLE IF NOT EXISTS admin_audit_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       action TEXT NOT NULL,
@@ -211,6 +227,8 @@ export function createDatabase(filename: string): AppDatabase {
     CREATE INDEX IF NOT EXISTS idx_pronunciation_updated ON pronunciation_cache(updated_at);
     CREATE INDEX IF NOT EXISTS idx_user_push_user ON user_push_items(user_id, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_daily_auto_push_date ON daily_auto_pushes(delivery_date);
+    CREATE INDEX IF NOT EXISTS idx_interest_deliveries_user_date ON interest_deliveries(user_id, delivery_date DESC);
+    CREATE INDEX IF NOT EXISTS idx_article_sources_content_hash ON article_sources(content_hash);
     CREATE INDEX IF NOT EXISTS idx_progress_completed ON article_progress(completed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_answer_states_updated ON article_answer_states(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_reading_states_updated ON article_reading_states(updated_at DESC);
@@ -249,6 +267,15 @@ export function createDatabase(filename: string): AppDatabase {
     "display_name TEXT NOT NULL DEFAULT '阅读学习者'",
   );
   ensureColumn("users", "email", "email TEXT NOT NULL DEFAULT ''");
+  ensureColumn("articles", "content_kind", "content_kind TEXT NOT NULL DEFAULT 'exam'");
+  ensureColumn("articles", "interest_id", "interest_id TEXT");
+  ensureColumn("articles", "series_title", "series_title TEXT");
+  ensureColumn("articles", "episode_number", "episode_number INTEGER");
+  ensureColumn("user_preferences", "interests_json", "interests_json TEXT NOT NULL DEFAULT '[]'");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_articles_interest
+    ON articles(content_kind, interest_id, exam_id);
+  `);
 
   const deliveryColumns = db.prepare("PRAGMA table_info(deliveries)").all() as Array<{
     name: string;
@@ -338,8 +365,9 @@ function seedContent(db: AppDatabase) {
   const insertArticle = db.prepare(`
     INSERT INTO articles(
       id, exam_id, year, title, eyebrow, read_minutes, difficulty,
+      content_kind, interest_id, series_title, episode_number,
       paragraphs_json, questions_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       exam_id = excluded.exam_id,
       year = excluded.year,
@@ -347,6 +375,10 @@ function seedContent(db: AppDatabase) {
       eyebrow = excluded.eyebrow,
       read_minutes = excluded.read_minutes,
       difficulty = excluded.difficulty,
+      content_kind = excluded.content_kind,
+      interest_id = excluded.interest_id,
+      series_title = excluded.series_title,
+      episode_number = excluded.episode_number,
       paragraphs_json = excluded.paragraphs_json,
       questions_json = excluded.questions_json
   `);
@@ -365,9 +397,30 @@ function seedContent(db: AppDatabase) {
         article.eyebrow,
         article.readMinutes,
         article.difficulty,
+        article.contentKind ?? "exam",
+        article.interestId ?? null,
+        article.seriesTitle ?? null,
+        article.episodeNumber ?? null,
         JSON.stringify(article.paragraphs),
         JSON.stringify(article.questions),
       );
+    }
+    const insertSource = db.prepare(`
+      INSERT INTO article_sources(
+        article_id, source_name, source_url, external_id, license_note, content_hash
+      ) VALUES (?, ?, ?, ?, '基于教育主题原创撰写；正文、题目与解析均为原创', ?)
+      ON CONFLICT(article_id) DO UPDATE SET
+        source_name = excluded.source_name,
+        source_url = excluded.source_url,
+        external_id = excluded.external_id,
+        license_note = excluded.license_note,
+        content_hash = excluded.content_hash,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+    for (const article of articles.filter((item) => item.contentKind === "interest")) {
+      const guide = interestSourceGuides[article.interestId!];
+      const hash = contentFingerprint(article);
+      insertSource.run(article.id, guide.name, guide.url, article.id, hash);
     }
     db.exec("COMMIT");
   } catch (error) {

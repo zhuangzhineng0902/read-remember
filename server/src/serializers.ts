@@ -8,6 +8,10 @@ export type ArticleRow = {
   eyebrow: string;
   readMinutes: number;
   difficulty: number;
+  contentKind: "exam" | "interest";
+  interestId: string | null;
+  seriesTitle: string | null;
+  episodeNumber: number | null;
   paragraphsJson: string;
   questionsJson: string;
 };
@@ -20,6 +24,10 @@ export const articleSelect = `
   a.eyebrow,
   a.read_minutes AS readMinutes,
   a.difficulty,
+  a.content_kind AS contentKind,
+  a.interest_id AS interestId,
+  a.series_title AS seriesTitle,
+  a.episode_number AS episodeNumber,
   a.paragraphs_json AS paragraphsJson,
   a.questions_json AS questionsJson
 `;
@@ -34,6 +42,10 @@ export function serializeArticle(row: ArticleRow) {
     eyebrow: row.eyebrow,
     readMinutes: row.readMinutes,
     difficulty: row.difficulty,
+    contentKind: row.contentKind,
+    interestId: row.interestId,
+    seriesTitle: row.seriesTitle,
+    episodeNumber: row.episodeNumber,
     paragraphs: JSON.parse(row.paragraphsJson) as string[],
     questions: questions.map(({ prompt, options }, index) => ({
       id: index,
@@ -52,5 +64,9 @@ export function serializeArticleSummary(row: ArticleRow) {
     eyebrow: row.eyebrow,
     readMinutes: row.readMinutes,
     difficulty: row.difficulty,
+    contentKind: row.contentKind,
+    interestId: row.interestId,
+    seriesTitle: row.seriesTitle,
+    episodeNumber: row.episodeNumber,
   };
 }

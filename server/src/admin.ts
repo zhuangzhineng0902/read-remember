@@ -42,8 +42,10 @@ export function createAdminRouter(
       SELECT
         (SELECT COUNT(*) FROM users) AS users,
         (SELECT COUNT(*) FROM articles) AS articles,
+        (SELECT COUNT(*) FROM articles WHERE content_kind = 'interest') AS interestArticles,
         (SELECT COUNT(*) FROM deliveries) +
-          (SELECT COUNT(*) FROM user_push_items) AS pushedArticles,
+          (SELECT COUNT(*) FROM user_push_items) +
+          (SELECT COUNT(*) FROM interest_deliveries) AS pushedArticles,
         (SELECT COUNT(*) FROM article_progress) AS readArticles,
         (SELECT COUNT(*) FROM vocabulary) AS savedWords,
         (SELECT COUNT(*) FROM push_batches) AS pushBatches
@@ -81,6 +83,10 @@ export function createAdminRouter(
           .optional(),
         search: z.string().trim().max(100).optional(),
         eyebrow: z.string().trim().max(120).optional(),
+        contentKind: z.enum(["exam", "interest"]).optional(),
+        interestId: z
+          .enum(["military", "art", "science", "why", "fantasy"])
+          .optional(),
         limit: z.coerce.number().int().min(1).max(500).default(50),
         offset: z.coerce.number().int().min(0).default(0),
       }),
@@ -100,6 +106,14 @@ export function createAdminRouter(
       conditions.push("a.eyebrow = ?");
       params.push(query.eyebrow);
     }
+    if (query.contentKind) {
+      conditions.push("a.content_kind = ?");
+      params.push(query.contentKind);
+    }
+    if (query.interestId) {
+      conditions.push("a.interest_id = ?");
+      params.push(query.interestId);
+    }
     const count = db
       .prepare(
         `SELECT COUNT(*) AS total FROM articles a WHERE ${conditions.join(" AND ")}`,
@@ -111,6 +125,8 @@ export function createAdminRouter(
       SELECT
         a.id, a.exam_id AS examId, a.year, a.title, a.eyebrow,
         a.read_minutes AS readMinutes, a.difficulty,
+        a.content_kind AS contentKind, a.interest_id AS interestId,
+        a.series_title AS seriesTitle, a.episode_number AS episodeNumber,
         json_array_length(a.questions_json) AS questionCount,
         COALESCE(s.source_name, '内置示例') AS sourceName,
         s.source_url AS sourceUrl,
@@ -214,7 +230,8 @@ export function createAdminRouter(
         u.id, u.device_id AS deviceId, u.exam_id AS examId,
         u.created_at AS createdAt,
         (SELECT COUNT(*) FROM deliveries d WHERE d.user_id = u.id) +
-          (SELECT COUNT(*) FROM user_push_items up WHERE up.user_id = u.id) AS pushedArticles,
+          (SELECT COUNT(*) FROM user_push_items up WHERE up.user_id = u.id) +
+          (SELECT COUNT(*) FROM interest_deliveries i WHERE i.user_id = u.id) AS pushedArticles,
         (SELECT COUNT(*) FROM article_progress p WHERE p.user_id = u.id) AS readArticles,
         COALESCE((
           SELECT SUM(json_array_length(a.questions_json))
@@ -224,6 +241,10 @@ export function createAdminRouter(
           SELECT SUM(json_array_length(a.questions_json))
           FROM user_push_items up JOIN articles a ON a.id = up.article_id
           WHERE up.user_id = u.id
+        ), 0) + COALESCE((
+          SELECT SUM(json_array_length(a.questions_json))
+          FROM interest_deliveries i JOIN articles a ON a.id = i.article_id
+          WHERE i.user_id = u.id
         ), 0) AS pushedQuestions,
         COALESCE((SELECT SUM(p.total) FROM article_progress p WHERE p.user_id = u.id), 0) AS answeredQuestions,
         (SELECT COUNT(*) FROM vocabulary v WHERE v.user_id = u.id) AS savedWords,
