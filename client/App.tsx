@@ -1724,6 +1724,7 @@ function ReaderScreen({
   onChangeReaderSettings: (settings: ReaderSettings) => void;
 }) {
   const { width, height } = useWindowDimensions();
+  const { top: safeTop, bottom: safeBottom } = useSafeAreaInsets();
   const reducedMotion = useReducedMotion();
   const scrollRef = useRef<ScrollView>(null);
   const scrollOffsetRef = useRef(0);
@@ -1770,6 +1771,7 @@ function ReaderScreen({
   const [readingProgress, setReadingProgress] = useState(0);
   const [sequenceBarVisible, setSequenceBarVisible] = useState(false);
   const [restoredOffset, setRestoredOffset] = useState<number | null>(null);
+  const [wordCardHeight, setWordCardHeight] = useState(0);
   const isSaved = (word: string) =>
     savedWords.some(
       (item) =>
@@ -1804,7 +1806,13 @@ function ReaderScreen({
   const activeTone = readerTone[readerSettings.pageTone];
   const showAnchoredWordCard = width >= 768;
   const wordPopoverWidth = Math.min(380, width - 32);
-  const wordPopoverHeight = 440;
+  const wordPopoverGap = 12;
+  const wordPopoverViewportTop = Math.max(16, safeTop + 8);
+  const wordPopoverViewportBottom = height - Math.max(16, safeBottom + 8);
+  const estimatedWordPopoverHeight = Math.min(
+    wordCardHeight || 440,
+    wordPopoverViewportBottom - wordPopoverViewportTop,
+  );
   const wordPopoverLeft = Math.max(
     16,
     Math.min(
@@ -1813,14 +1821,47 @@ function ReaderScreen({
         wordPopoverWidth / 2,
     ),
   );
-  const wordPopoverTop = wordAnchor
-    ? wordAnchor.y > height * 0.56
-      ? Math.max(72, wordAnchor.y - wordPopoverHeight - 12)
-      : Math.min(
-          height - wordPopoverHeight - 16,
-          wordAnchor.y + wordAnchor.height + 12,
-        )
-    : Math.max(72, (height - wordPopoverHeight) / 2);
+  const wordAnchorTop = wordAnchor?.y ?? height / 2;
+  const wordAnchorBottom = wordAnchor
+    ? wordAnchor.y + wordAnchor.height
+    : height / 2;
+  const wordPopoverSpaceAbove = Math.max(
+    0,
+    wordAnchorTop - wordPopoverGap - wordPopoverViewportTop,
+  );
+  const wordPopoverSpaceBelow = Math.max(
+    0,
+    wordPopoverViewportBottom - wordAnchorBottom - wordPopoverGap,
+  );
+  const placeWordPopoverBelow =
+    wordPopoverSpaceBelow >= estimatedWordPopoverHeight ||
+    wordPopoverSpaceBelow >= wordPopoverSpaceAbove;
+  const selectedWordPopoverSpace = placeWordPopoverBelow
+    ? wordPopoverSpaceBelow
+    : wordPopoverSpaceAbove;
+  const wordPopoverMaxHeight = Math.min(
+    520,
+    Math.max(
+      160,
+      selectedWordPopoverSpace ||
+        wordPopoverViewportBottom - wordPopoverViewportTop,
+    ),
+  );
+  const displayedWordPopoverHeight = Math.min(
+    estimatedWordPopoverHeight,
+    wordPopoverMaxHeight,
+  );
+  const desiredWordPopoverTop = placeWordPopoverBelow
+    ? wordAnchorBottom + wordPopoverGap
+    : wordAnchorTop - wordPopoverGap - displayedWordPopoverHeight;
+  const wordPopoverTop = Math.max(
+    wordPopoverViewportTop,
+    Math.min(
+      wordPopoverViewportBottom - displayedWordPopoverHeight,
+      desiredWordPopoverTop,
+    ),
+  );
+  const wordSheetMaxHeight = Math.max(320, height - safeTop - 12);
   const allAnswered = article.questions.every(
     (_, index) => selectedAnswers[index] !== undefined,
   );
@@ -2152,6 +2193,7 @@ function ReaderScreen({
     );
     const localWord: WordInfo = savedWord ?? lookupWord(token);
     if (!localWord.word) return;
+    setWordCardHeight(0);
     setSelectedWord(localWord);
     setWordAnchor(anchor ?? null);
     setPressedWord(localWord.word);
@@ -2198,6 +2240,7 @@ function ReaderScreen({
       closingWordRef.current = false;
       setSelectedWord(null);
       setWordAnchor(null);
+      setWordCardHeight(0);
     };
     if (reducedMotion || !selectedWord) {
       finish();
@@ -2848,6 +2891,13 @@ function ReaderScreen({
         />
         {selectedWord && (
           <Animated.View
+            onLayout={({ nativeEvent }) => {
+              if (!showAnchoredWordCard) return;
+              const measuredHeight = nativeEvent.layout.height;
+              if (Math.abs(measuredHeight - wordCardHeight) > 1) {
+                setWordCardHeight(measuredHeight);
+              }
+            }}
             style={[
               showAnchoredWordCard
                 ? [
@@ -2856,9 +2906,10 @@ function ReaderScreen({
                       width: wordPopoverWidth,
                       left: wordPopoverLeft,
                       top: wordPopoverTop,
+                      maxHeight: wordPopoverMaxHeight,
                     },
                   ]
-                : styles.wordSheet,
+                : [styles.wordSheet, { maxHeight: wordSheetMaxHeight }],
               {
                 opacity: wordCardTransition,
                 transform: [
@@ -2901,35 +2952,48 @@ function ReaderScreen({
                 </Pressable>
               </View>
             </View>
-            <View style={styles.translationRow}>
-              <Text style={styles.translationLabel}>释义</Text>
-              <View style={styles.translationContent}>
-                {wordLoading ? (
-                  <ActivityIndicator size="small" color={colors.primary} />
-                ) : null}
-                <Text style={styles.translation}>{selectedWord.translation}</Text>
-                {!!selectedWord.partOfSpeech && (
-                  <Text style={styles.partOfSpeech}>{selectedWord.partOfSpeech}</Text>
-                )}
-                {!!selectedWord.definition && (
-                  <Text style={styles.englishDefinition}>
-                    {selectedWord.definition}
-                  </Text>
-                )}
+            <ScrollView
+              bounces={false}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+              showsVerticalScrollIndicator
+              style={styles.wordDetailsScroll}
+            >
+              <View style={styles.translationRow}>
+                <Text style={styles.translationLabel}>释义</Text>
+                <View style={styles.translationContent}>
+                  {wordLoading ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : null}
+                  <Text style={styles.translation}>{selectedWord.translation}</Text>
+                  {!!selectedWord.partOfSpeech && (
+                    <Text style={styles.partOfSpeech}>{selectedWord.partOfSpeech}</Text>
+                  )}
+                  {!!selectedWord.definition && (
+                    <Text style={styles.englishDefinition}>
+                      {selectedWord.definition}
+                    </Text>
+                  )}
+                </View>
               </View>
-            </View>
-            {!!selectedWord.example && (
-              <View style={styles.exampleCard}>
-                <Text style={styles.exampleLabel}>例句</Text>
-                <Text style={styles.exampleEnglish}>{selectedWord.example}</Text>
-                {!!selectedWord.exampleTranslation && (
-                  <Text style={styles.exampleChinese}>
-                    {selectedWord.exampleTranslation}
-                  </Text>
-                )}
-              </View>
-            )}
+              {!!selectedWord.example && (
+                <View style={styles.exampleCard}>
+                  <Text style={styles.exampleLabel}>例句</Text>
+                  <Text style={styles.exampleEnglish}>{selectedWord.example}</Text>
+                  {!!selectedWord.exampleTranslation && (
+                    <Text style={styles.exampleChinese}>
+                      {selectedWord.exampleTranslation}
+                    </Text>
+                  )}
+                </View>
+              )}
+            </ScrollView>
             <Pressable
+              accessibilityLabel={
+                isSaved(selectedWord.word) ? "移出生词库" : "标记为生词"
+              }
+              accessibilityRole="button"
+              hitSlop={6}
               onPress={() => {
                 onToggleWord(selectedWord, article);
                 closeWord();
@@ -6420,6 +6484,9 @@ const styles = StyleSheet.create({
   wordTitle: { color: colors.ink, fontSize: 30, fontWeight: "800" },
   phonetic: { color: colors.primary, fontSize: 14, marginTop: 4 },
   wordActions: { flexDirection: "row", gap: 8 },
+  wordDetailsScroll: {
+    flexShrink: 1,
+  },
   wordAudioButton: {
     minWidth: 86,
     height: 44,
