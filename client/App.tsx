@@ -131,6 +131,7 @@ const EMPTY_LEARNING_STATS: LearningStats = {
 };
 
 const USE_NATIVE_DRIVER = Platform.OS !== "web";
+const MOBILE_NAV_HEIGHT = Platform.OS === "ios" ? 52 : 64;
 
 type ChoiceOption = {
   id: string;
@@ -287,6 +288,7 @@ function NativeChoiceSheet({
                 <Pressable
                   accessibilityRole="radio"
                   accessibilityState={{ checked: selected }}
+                  aria-checked={selected}
                   key={option.id}
                   onPress={() => onSelect(option.id)}
                   style={({ pressed }) => [
@@ -751,9 +753,12 @@ function AccountSheet({
           </View>
 
           {mode !== "profile" && !user?.isRegistered && (
-            <View style={styles.accountModeTabs}>
+            <View accessibilityRole="tablist" style={styles.accountModeTabs}>
               {(["login", "register"] as const).map((item) => (
                 <Pressable
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: mode === item }}
+                  aria-selected={mode === item}
                   key={item}
                   onPress={() => switchMode(item)}
                   style={[
@@ -1050,6 +1055,152 @@ async function playWord(
   }
 }
 
+function WordAudioButton({
+  word,
+  pronunciationAccent,
+  variant = "popover",
+}: {
+  word: string;
+  pronunciationAccent: LearningSettings["pronunciationAccent"];
+  variant?: "popover" | "memory";
+}) {
+  const reducedMotion = useReducedMotion();
+  const [audioState, setAudioState] = useState<AudioPlaybackState>("idle");
+  const audioPulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    setAudioState("idle");
+    stopWordAudio();
+    return stopWordAudio;
+  }, [pronunciationAccent, word]);
+
+  useEffect(() => {
+    audioPulse.stopAnimation();
+    if (audioState !== "playing" || reducedMotion) {
+      audioPulse.setValue(0);
+      return;
+    }
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(audioPulse, {
+          toValue: 1,
+          duration: 760,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: USE_NATIVE_DRIVER,
+        }),
+        Animated.timing(audioPulse, {
+          toValue: 0,
+          duration: 760,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: USE_NATIVE_DRIVER,
+        }),
+      ]),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [audioPulse, audioState, reducedMotion]);
+
+  const toggle = () => {
+    if (!word || audioState === "loading") return;
+    if (audioState === "playing") {
+      stopWordAudio();
+      setAudioState("idle");
+      return;
+    }
+    void playWord(
+      word,
+      {
+        onLoading: () => setAudioState("loading"),
+        onPlaying: () => setAudioState("playing"),
+        onFinished: () => setAudioState("idle"),
+        onError: () => setAudioState("error"),
+      },
+      pronunciationAccent,
+    );
+  };
+
+  return (
+    <Pressable
+      accessibilityLabel={
+        audioState === "playing"
+          ? `停止播放 ${word} 的发音`
+          : audioState === "loading"
+            ? `正在加载 ${word} 的发音`
+            : audioState === "error"
+              ? `重新播放 ${word} 的发音`
+              : `播放 ${word} 的发音`
+      }
+      accessibilityState={{
+        busy: audioState === "loading",
+        selected: audioState === "playing",
+        disabled: audioState === "loading",
+      }}
+      disabled={audioState === "loading"}
+      onPress={(event) => {
+        event.stopPropagation();
+        toggle();
+      }}
+      style={[
+        styles.wordAudioButton,
+        variant === "memory" && styles.memoryAudioButton,
+        audioState === "playing" && styles.wordAudioButtonPlaying,
+        audioState === "error" && styles.wordAudioButtonError,
+      ]}
+    >
+      <View style={styles.wordAudioIcon}>
+        {audioState === "playing" && !reducedMotion && (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.wordAudioPulse,
+              {
+                opacity: audioPulse.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.45, 0],
+                }),
+                transform: [
+                  {
+                    scale: audioPulse.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.8, 1.45],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
+        )}
+        {audioState === "loading" ? (
+          <ActivityIndicator size="small" color={colors.primary} />
+        ) : audioState === "playing" ? (
+          <Square size={13} color="#fff" fill="#fff" />
+        ) : (
+          <Volume2
+            size={18}
+            color={audioState === "error" ? colors.danger : colors.primary}
+          />
+        )}
+      </View>
+      <Text
+        accessibilityLiveRegion="polite"
+        style={[
+          styles.wordAudioText,
+          audioState === "playing" && styles.wordAudioTextPlaying,
+          audioState === "error" && styles.wordAudioTextError,
+        ]}
+      >
+        {audioState === "loading"
+          ? "加载中"
+          : audioState === "playing"
+            ? "播放中"
+            : audioState === "error"
+              ? "重试"
+              : "播放"}
+      </Text>
+    </Pressable>
+  );
+}
+
 function AppLogo({ compact = false }: { compact?: boolean }) {
   return (
     <View style={styles.logoRow}>
@@ -1148,6 +1299,7 @@ function Onboarding({
                 <Pressable
                   accessibilityRole="radio"
                   accessibilityState={{ checked: active }}
+                  aria-checked={active}
                   key={exam.id}
                   onPress={() => setSelected(exam.id)}
                   style={({ pressed }) => [
@@ -1587,7 +1739,6 @@ function ReaderScreen({
   const tabIndicator = useRef(new Animated.Value(0)).current;
   const tabContentTransition = useRef(new Animated.Value(1)).current;
   const wordCardTransition = useRef(new Animated.Value(0)).current;
-  const audioPulse = useRef(new Animated.Value(0)).current;
   const sequenceBarTransition = useRef(new Animated.Value(0)).current;
   const sequenceBarVisibleRef = useRef(false);
   const closingWordRef = useRef(false);
@@ -1601,7 +1752,6 @@ function ReaderScreen({
   } | null>(null);
   const [pressedWord, setPressedWord] = useState<string | null>(null);
   const [wordLoading, setWordLoading] = useState(false);
-  const [audioState, setAudioState] = useState<AudioPlaybackState>("idle");
   const [selectedAnswers, setSelectedAnswers] = useState<
     Record<number, number>
   >({});
@@ -1781,38 +1931,6 @@ function ReaderScreen({
       useNativeDriver: USE_NATIVE_DRIVER,
     }).start();
   }, [reducedMotion, selectedWord?.word, wordCardTransition]);
-
-  useEffect(() => {
-    setAudioState("idle");
-    stopWordAudio();
-    return stopWordAudio;
-  }, [selectedWord?.word]);
-
-  useEffect(() => {
-    audioPulse.stopAnimation();
-    if (audioState !== "playing" || reducedMotion) {
-      audioPulse.setValue(0);
-      return;
-    }
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(audioPulse, {
-          toValue: 1,
-          duration: 760,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: USE_NATIVE_DRIVER,
-        }),
-        Animated.timing(audioPulse, {
-          toValue: 0,
-          duration: 760,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: USE_NATIVE_DRIVER,
-        }),
-      ]),
-    );
-    animation.start();
-    return () => animation.stop();
-  }, [audioPulse, audioState, reducedMotion]);
 
   useEffect(() => {
     let active = true;
@@ -2067,7 +2185,6 @@ function ReaderScreen({
 
   const closeWord = () => {
     stopWordAudio();
-    setAudioState("idle");
     const finish = () => {
       closingWordRef.current = false;
       setSelectedWord(null);
@@ -2085,21 +2202,6 @@ function ReaderScreen({
       easing: Easing.in(Easing.cubic),
       useNativeDriver: USE_NATIVE_DRIVER,
     }).start(finish);
-  };
-
-  const toggleWordPronunciation = () => {
-    if (!selectedWord || audioState === "loading") return;
-    if (audioState === "playing") {
-      stopWordAudio();
-      setAudioState("idle");
-      return;
-    }
-    void playWord(selectedWord.word, {
-      onLoading: () => setAudioState("loading"),
-      onPlaying: () => setAudioState("playing"),
-      onFinished: () => setAudioState("idle"),
-      onError: () => setAudioState("error"),
-    }, pronunciationAccent);
   };
 
   const openAnswers = async () => {
@@ -2212,7 +2314,7 @@ function ReaderScreen({
         >
           <ArrowLeft size={22} color={colors.ink} />
         </Pressable>
-        <View style={styles.readerTabs}>
+        <View accessibilityRole="tablist" style={styles.readerTabs}>
           <Animated.View
             pointerEvents="none"
             style={[
@@ -2230,6 +2332,9 @@ function ReaderScreen({
             ]}
           />
           <Pressable
+            accessibilityRole="tab"
+            accessibilityState={{ selected: readerTab === "article" }}
+            aria-selected={readerTab === "article"}
             onPress={() => setReaderTab("article")}
             style={({ pressed }) => [
               styles.readerTab,
@@ -2246,6 +2351,9 @@ function ReaderScreen({
             </Text>
           </Pressable>
           <Pressable
+            accessibilityRole="tab"
+            accessibilityState={{ selected: readerTab === "answer" }}
+            aria-selected={readerTab === "answer"}
             onPress={openAnswers}
             style={({ pressed }) => [
               styles.readerTab,
@@ -2305,8 +2413,8 @@ function ReaderScreen({
               offsetY,
           );
           const shouldShowSequenceBar = sequenceBarVisibleRef.current
-            ? distanceFromBottom <= 96
-            : distanceFromBottom <= 24;
+            ? distanceFromBottom <= 180
+            : distanceFromBottom <= 96;
           if (shouldShowSequenceBar !== sequenceBarVisibleRef.current) {
             sequenceBarVisibleRef.current = shouldShowSequenceBar;
             setSequenceBarVisible(shouldShowSequenceBar);
@@ -2323,6 +2431,7 @@ function ReaderScreen({
         contentContainerStyle={[
           styles.readerScroll,
           width < 480 && styles.readerScrollMobile,
+          sequenceBarVisible && styles.readerScrollWithFloatingNavigation,
         ]}
       >
         <View
@@ -2479,6 +2588,7 @@ function ReaderScreen({
                               checked: selected,
                               disabled: submitted || !answersRestored,
                             }}
+                            aria-checked={selected}
                             disabled={submitted || !answersRestored}
                             key={option}
                             onPress={() => selectAnswer(qIndex, index)}
@@ -2656,6 +2766,8 @@ function ReaderScreen({
           style={[
             styles.readerSequenceBar,
             {
+              width: contentWidth,
+              left: (width - contentWidth) / 2,
               opacity: sequenceBarTransition,
               transform: [
                 {
@@ -2674,7 +2786,8 @@ function ReaderScreen({
             onPress={onPreviousArticle}
             style={({ pressed }) => [
               styles.readerSequenceButton,
-              (!onPreviousArticle || navigatingArticle) && styles.readerSequenceDisabled,
+              (!onPreviousArticle || navigatingArticle) &&
+                styles.readerSequenceDisabled,
               pressed && styles.pressed,
             ]}
           >
@@ -2700,7 +2813,8 @@ function ReaderScreen({
             style={({ pressed }) => [
               styles.readerSequenceButton,
               styles.readerSequenceButtonNext,
-              (!onNextArticle || navigatingArticle) && styles.readerSequenceDisabled,
+              (!onNextArticle || navigatingArticle) &&
+                styles.readerSequenceDisabled,
               pressed && styles.pressed,
             ]}
           >
@@ -2765,82 +2879,10 @@ function ReaderScreen({
                 </Text>
               </View>
               <View style={styles.wordActions}>
-                <Pressable
-                  accessibilityLabel={
-                    audioState === "playing"
-                      ? "停止播放发音"
-                      : audioState === "loading"
-                        ? "正在加载发音"
-                        : audioState === "error"
-                          ? "重新播放发音"
-                          : "播放发音"
-                  }
-                  accessibilityState={{
-                    busy: audioState === "loading",
-                    selected: audioState === "playing",
-                    disabled: audioState === "loading",
-                  }}
-                  disabled={audioState === "loading"}
-                  onPress={toggleWordPronunciation}
-                  style={[
-                    styles.wordAudioButton,
-                    audioState === "playing" && styles.wordAudioButtonPlaying,
-                    audioState === "error" && styles.wordAudioButtonError,
-                  ]}
-                >
-                  <View style={styles.wordAudioIcon}>
-                    {audioState === "playing" && !reducedMotion && (
-                      <Animated.View
-                        pointerEvents="none"
-                        style={[
-                          styles.wordAudioPulse,
-                          {
-                            opacity: audioPulse.interpolate({
-                              inputRange: [0, 1],
-                              outputRange: [0.45, 0],
-                            }),
-                            transform: [
-                              {
-                                scale: audioPulse.interpolate({
-                                  inputRange: [0, 1],
-                                  outputRange: [0.8, 1.45],
-                                }),
-                              },
-                            ],
-                          },
-                        ]}
-                      />
-                    )}
-                    {audioState === "loading" ? (
-                      <ActivityIndicator size="small" color={colors.primary} />
-                    ) : audioState === "playing" ? (
-                      <Square size={13} color="#fff" fill="#fff" />
-                    ) : (
-                      <Volume2
-                        size={18}
-                        color={
-                          audioState === "error" ? colors.danger : colors.primary
-                        }
-                      />
-                    )}
-                  </View>
-                  <Text
-                    accessibilityLiveRegion="polite"
-                    style={[
-                      styles.wordAudioText,
-                      audioState === "playing" && styles.wordAudioTextPlaying,
-                      audioState === "error" && styles.wordAudioTextError,
-                    ]}
-                  >
-                    {audioState === "loading"
-                      ? "加载中"
-                      : audioState === "playing"
-                        ? "播放中"
-                        : audioState === "error"
-                          ? "重试"
-                          : "播放"}
-                  </Text>
-                </Pressable>
+                <WordAudioButton
+                  pronunciationAccent={pronunciationAccent}
+                  word={selectedWord.word}
+                />
                 <Pressable
                   accessibilityLabel="关闭"
                   onPress={closeWord}
@@ -2996,6 +3038,11 @@ function ReaderScreen({
                 ["relaxed", "宽松"],
               ] as const).map(([value, label]) => (
                 <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{
+                    checked: readerSettings.lineSpacing === value,
+                  }}
+                  aria-checked={readerSettings.lineSpacing === value}
                   key={value}
                   onPress={() =>
                     updateReaderSettings({ ...readerSettings, lineSpacing: value })
@@ -3029,6 +3076,11 @@ function ReaderScreen({
                   ["sans", "无衬线"],
                 ] as const).map(([value, label]) => (
                   <Pressable
+                    accessibilityRole="radio"
+                    accessibilityState={{
+                      checked: readerSettings.fontFamily === value,
+                    }}
+                    aria-checked={readerSettings.fontFamily === value}
                     key={value}
                     onPress={() =>
                       updateReaderSettings({ ...readerSettings, fontFamily: value })
@@ -3061,6 +3113,11 @@ function ReaderScreen({
                   ["wide", "宽"],
                 ] as const).map(([value, label]) => (
                   <Pressable
+                    accessibilityRole="radio"
+                    accessibilityState={{
+                      checked: readerSettings.columnWidth === value,
+                    }}
+                    aria-checked={readerSettings.columnWidth === value}
                     key={value}
                     onPress={() =>
                       updateReaderSettings({ ...readerSettings, columnWidth: value })
@@ -3095,6 +3152,11 @@ function ReaderScreen({
                 ["green", "护眼", "#EAF1E8"],
               ] as const).map(([value, label, color]) => (
                 <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{
+                    checked: readerSettings.pageTone === value,
+                  }}
+                  aria-checked={readerSettings.pageTone === value}
                   key={value}
                   onPress={() =>
                     updateReaderSettings({ ...readerSettings, pageTone: value })
@@ -3218,12 +3280,15 @@ function HistoryScreen({
           <Text style={styles.summaryLabel}>阅读分钟</Text>
         </View>
       </View>
-      <View style={styles.historyModeTabs}>
+      <View accessibilityRole="tablist" style={styles.historyModeTabs}>
         {([
           ["history", "阅读记录"],
           ["mistakes", `错题本 ${mistakes.length}`],
         ] as const).map(([id, label]) => (
           <Pressable
+            accessibilityRole="tab"
+            accessibilityState={{ selected: mode === id }}
+            aria-selected={mode === id}
             key={id}
             onPress={() => setMode(id)}
             style={[styles.historyModeTab, mode === id && styles.historyModeTabActive]}
@@ -3243,6 +3308,9 @@ function HistoryScreen({
               ["pending", "未完成"],
             ] as const).map(([id, label]) => (
               <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ selected: filter === id }}
+                aria-pressed={filter === id}
                 key={id}
                 onPress={() => setFilter(id)}
                 style={[styles.historyFilter, filter === id && styles.historyFilterActive]}
@@ -3367,6 +3435,11 @@ function MemoryReviewSession({
   const progress = words.length ? Math.min(100, (index / words.length) * 100) : 0;
   const cardWidth = Math.min(620, width - (width >= 768 ? 120 : 28));
 
+  const closeReview = () => {
+    stopWordAudio();
+    onClose();
+  };
+
   const rateWord = async (rating: MemoryRating) => {
     if (!current || submittingRating) return;
     setSubmittingRating(rating);
@@ -3382,16 +3455,23 @@ function MemoryReviewSession({
   };
 
   return (
-    <Modal visible animationType="slide" onRequestClose={onClose}>
+    <Modal visible animationType="slide" onRequestClose={closeReview}>
       <SafeAreaView style={styles.memoryReviewSafe}>
         <ExpoStatusBar style="dark" />
         <View style={styles.memoryReviewHeader}>
           <Pressable
             accessibilityLabel="退出记忆卡复习"
-            onPress={onClose}
-            style={styles.iconButton}
+            accessibilityRole="button"
+            hitSlop={10}
+            onPress={closeReview}
+            pressRetentionOffset={12}
+            style={({ pressed }) => [
+              styles.memoryExitButton,
+              pressed && styles.pressed,
+            ]}
           >
-            <X size={21} color={colors.ink} />
+            <ArrowLeft size={19} color={colors.ink} />
+            <Text style={styles.memoryExitText}>退出</Text>
           </Pressable>
           <View style={styles.memoryReviewHeaderCenter}>
             <Text style={styles.memoryReviewHeaderTitle}>记忆卡复习</Text>
@@ -3420,7 +3500,7 @@ function MemoryReviewSession({
               已复习 {words.length} 个生词。系统会根据记忆反馈，在合适的时间再次提醒你。
             </Text>
             <Pressable
-              onPress={onClose}
+              onPress={closeReview}
               style={({ pressed }) => [
                 styles.memoryCompleteButton,
                 pressed && styles.primaryButtonPressed,
@@ -3431,6 +3511,7 @@ function MemoryReviewSession({
           </View>
         ) : current ? (
           <ScrollView
+            style={styles.memoryReviewScroller}
             contentContainerStyle={styles.memoryReviewContent}
             showsVerticalScrollIndicator={false}
           >
@@ -3460,16 +3541,11 @@ function MemoryReviewSession({
                   ? current.phonetic
                   : "音标待更新"}
               </Text>
-              <Pressable
-                accessibilityLabel={`播放 ${current.word} 的发音`}
-                onPress={() =>
-                  playWord(current.word, undefined, pronunciationAccent)
-                }
-                style={styles.memoryAudioButton}
-              >
-                <Volume2 size={19} color={colors.primary} />
-                <Text style={styles.memoryAudioText}>播放发音</Text>
-              </Pressable>
+              <WordAudioButton
+                pronunciationAccent={pronunciationAccent}
+                variant="memory"
+                word={current.word}
+              />
 
               {revealed ? (
                 <View style={styles.memoryAnswer}>
@@ -3658,6 +3734,9 @@ function WordsScreen({
           >
             {exams.map((exam) => (
               <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ selected: filter === exam.id }}
+                aria-pressed={filter === exam.id}
                 key={exam.id}
                 onPress={() => setFilter(exam.id)}
                 style={[
@@ -4102,14 +4181,41 @@ function Navigation({
   bottomInset?: number;
   onChange: (tab: TabId) => void;
 }) {
+  const reducedMotion = useReducedMotion();
+  const indicatorAnimations = useRef<Record<TabId, Animated.Value>>({
+    today: new Animated.Value(active === "today" ? 1 : 0),
+    history: new Animated.Value(active === "history" ? 1 : 0),
+    words: new Animated.Value(active === "words" ? 1 : 0),
+    profile: new Animated.Value(active === "profile" ? 1 : 0),
+  }).current;
+
+  useEffect(() => {
+    navItems.forEach(({ id }) => {
+      if (reducedMotion) {
+        indicatorAnimations[id].setValue(active === id ? 1 : 0);
+        return;
+      }
+      Animated.spring(indicatorAnimations[id], {
+        toValue: active === id ? 1 : 0,
+        damping: 20,
+        stiffness: 260,
+        mass: 0.72,
+        useNativeDriver: USE_NATIVE_DRIVER,
+      }).start();
+    });
+  }, [active, indicatorAnimations, reducedMotion]);
+
   if (tablet) {
     return (
       <View style={styles.sideNav}>
         <AppLogo compact />
-        <View style={styles.sideNavItems}>
+        <View accessibilityRole="tablist" style={styles.sideNavItems}>
           {navItems.map(({ id, label, icon: Icon }) => (
             <Pressable
               accessibilityLabel={label}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active === id }}
+              aria-selected={active === id}
               key={id}
               onPress={() => onChange(id)}
               style={({ pressed }) => [
@@ -4142,10 +4248,11 @@ function Navigation({
   }
   return (
     <View
+      accessibilityRole="tablist"
       style={[
         styles.bottomNav,
         {
-          height: 64 + bottomInset,
+          height: MOBILE_NAV_HEIGHT + bottomInset,
           paddingBottom: bottomInset,
         },
       ]}
@@ -4153,19 +4260,35 @@ function Navigation({
       {navItems.map(({ id, label, icon: Icon }) => (
         <Pressable
           accessibilityLabel={label}
+          accessibilityRole="tab"
+          accessibilityState={{ selected: active === id }}
+          aria-selected={active === id}
           key={id}
           onPress={() => onChange(id)}
           style={({ pressed }) => [
             styles.bottomNavItem,
+            Platform.OS === "ios" && styles.bottomNavItemIOS,
             pressed && styles.bottomNavItemPressed,
           ]}
         >
-          <View
-            style={[
-              styles.bottomIconWrap,
-              active === id && styles.bottomIconWrapActive,
-            ]}
-          >
+          <View style={styles.bottomIconWrap}>
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.bottomIconIndicator,
+                {
+                  opacity: indicatorAnimations[id],
+                  transform: [
+                    {
+                      scale: indicatorAnimations[id].interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [0.78, 1],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            />
             <Icon
               size={21}
               color={active === id ? colors.primary : colors.inkMuted}
@@ -5020,7 +5143,7 @@ function AppContent() {
         <View
           style={[
             styles.mainContent,
-            !tablet && { paddingBottom: 64 + bottomInset },
+            !tablet && { paddingBottom: MOBILE_NAV_HEIGHT + bottomInset },
             tablet && styles.mainContentTablet,
           ]}
         >
@@ -5117,7 +5240,7 @@ const styles = StyleSheet.create({
   screenContent: {
     paddingHorizontal: 20,
     paddingTop: 16,
-    paddingBottom: 42,
+    paddingBottom: 24,
     width: "100%",
     maxWidth: 1050,
     alignSelf: "center",
@@ -5173,9 +5296,9 @@ const styles = StyleSheet.create({
     marginTop: 5,
   },
   nativeSheetClose: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: colors.surfaceMuted,
@@ -5384,7 +5507,7 @@ const styles = StyleSheet.create({
   },
   accountModeTab: {
     flex: 1,
-    height: 40,
+    height: 44,
     borderRadius: 11,
     alignItems: "center",
     justifyContent: "center",
@@ -5620,9 +5743,9 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   onboardingGoalButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 13,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
     backgroundColor: colors.primarySoft,
     alignItems: "center",
     justifyContent: "center",
@@ -5699,8 +5822,8 @@ const styles = StyleSheet.create({
   },
   avatarText: { color: "#fff", fontSize: 16, fontWeight: "800" },
   iconButton: {
-    width: 42,
-    height: 42,
+    width: 44,
+    height: 44,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 14,
@@ -5933,8 +6056,9 @@ const styles = StyleSheet.create({
   },
   readerTab: {
     width: 76,
-    paddingVertical: 8,
+    height: 44,
     alignItems: "center",
+    justifyContent: "center",
     borderRadius: 9,
     zIndex: 1,
   },
@@ -5943,8 +6067,8 @@ const styles = StyleSheet.create({
   readerTabText: { color: colors.inkMuted, fontSize: 12, fontWeight: "600" },
   readerTabTextActive: { color: colors.ink, fontWeight: "800" },
   fontButton: {
-    width: 42,
-    height: 42,
+    width: 44,
+    height: 44,
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
@@ -5962,9 +6086,7 @@ const styles = StyleSheet.create({
   },
   readerSequenceBar: {
     position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
+    bottom: 8,
     zIndex: 12,
     minHeight: 66,
     flexDirection: "row",
@@ -5972,9 +6094,10 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingHorizontal: 14,
     paddingVertical: 9,
+    borderRadius: radius.md,
     backgroundColor: "rgba(255,255,255,0.98)",
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.line,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
     ...shadows.card,
   },
   readerSequenceButton: {
@@ -6006,9 +6129,10 @@ const styles = StyleSheet.create({
   readerScroll: {
     alignItems: "center",
     paddingVertical: 30,
-    paddingBottom: 100,
+    paddingBottom: 36,
   },
-  readerScrollMobile: { paddingVertical: 14, paddingBottom: 92 },
+  readerScrollMobile: { paddingVertical: 14, paddingBottom: 24 },
+  readerScrollWithFloatingNavigation: { paddingBottom: 104 },
   readerPaper: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
@@ -6289,7 +6413,7 @@ const styles = StyleSheet.create({
   wordActions: { flexDirection: "row", gap: 8 },
   wordAudioButton: {
     minWidth: 86,
-    height: 42,
+    height: 44,
     paddingHorizontal: 11,
     borderRadius: 14,
     flexDirection: "row",
@@ -6326,8 +6450,8 @@ const styles = StyleSheet.create({
   wordAudioTextPlaying: { color: "#fff" },
   wordAudioTextError: { color: colors.danger },
   roundButton: {
-    width: 42,
-    height: 42,
+    width: 44,
+    height: 44,
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
@@ -6495,7 +6619,7 @@ const styles = StyleSheet.create({
   },
   readerChoice: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 44,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 10,
@@ -6628,7 +6752,7 @@ const styles = StyleSheet.create({
   },
   historyModeTab: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 44,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 12,
@@ -6639,7 +6763,7 @@ const styles = StyleSheet.create({
   historyFilters: { flexDirection: "row", gap: 8, marginBottom: 20 },
   historyFilter: {
     paddingHorizontal: 14,
-    minHeight: 36,
+    minHeight: 44,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 18,
@@ -6743,6 +6867,9 @@ const styles = StyleSheet.create({
   memoryReviewHeader: {
     height: 62,
     paddingHorizontal: 16,
+    position: "relative",
+    zIndex: 20,
+    elevation: 20,
     flexDirection: "row",
     alignItems: "center",
     borderBottomWidth: 1,
@@ -6760,9 +6887,24 @@ const styles = StyleSheet.create({
     fontSize: 10,
     marginTop: 2,
   },
-  memoryReviewHeaderSpacer: { width: 42 },
+  memoryExitButton: {
+    width: 72,
+    height: 44,
+    position: "relative",
+    zIndex: 22,
+    elevation: 22,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    backgroundColor: colors.surfaceMuted,
+  },
+  memoryExitText: { color: colors.ink, fontSize: 12, fontWeight: "800" },
+  memoryReviewHeaderSpacer: { width: 72 },
   memoryProgressTrack: { height: 4, backgroundColor: colors.surfaceMuted },
   memoryProgressFill: { height: 4, backgroundColor: colors.accent },
+  memoryReviewScroller: { flex: 1, position: "relative", zIndex: 0 },
   memoryReviewContent: {
     alignItems: "center",
     paddingTop: 28,
@@ -6819,16 +6961,9 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   memoryAudioButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 13,
-    height: 38,
-    borderRadius: radius.pill,
-    backgroundColor: colors.primarySoft,
+    minWidth: 104,
     marginTop: 18,
   },
-  memoryAudioText: { color: colors.primary, fontSize: 11, fontWeight: "700" },
   memoryRevealHint: {
     flexDirection: "row",
     alignItems: "center",
@@ -7020,7 +7155,7 @@ const styles = StyleSheet.create({
   stickyArea: { backgroundColor: colors.background, paddingBottom: 12 },
   examFilters: { gap: 8, paddingRight: 20 },
   filterPill: {
-    height: 38,
+    height: 44,
     borderRadius: radius.pill,
     backgroundColor: colors.surface,
     paddingHorizontal: 13,
@@ -7073,9 +7208,9 @@ const styles = StyleSheet.create({
   wordCardPhonetic: { color: colors.primary, fontSize: 12, marginTop: 3 },
   wordCardActions: { flexDirection: "row", gap: 7 },
   miniRoundButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 11,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: colors.surfaceMuted,
@@ -7219,7 +7354,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   inlineExamItem: {
-    height: 42,
+    height: 44,
     borderRadius: 10,
     paddingHorizontal: 11,
     flexDirection: "row",
@@ -7267,18 +7402,26 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    gap: 2,
+    gap: 3,
+  },
+  bottomNavItemIOS: {
+    transform: [{ translateY: 4 }],
   },
   bottomNavItemPressed: { opacity: 0.65 },
   bottomIconWrap: {
-    height: 29,
-    minWidth: 39,
+    width: 56,
+    height: 32,
     borderRadius: radius.pill,
     alignItems: "center",
     justifyContent: "center",
+    position: "relative",
   },
-  bottomIconWrapActive: { backgroundColor: colors.primarySoft },
-  bottomNavText: { color: colors.inkMuted, fontSize: 9 },
+  bottomIconIndicator: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primarySoft,
+  },
+  bottomNavText: { color: colors.inkMuted, fontSize: 11, fontWeight: "600" },
   bottomNavTextActive: { color: colors.primary, fontWeight: "800" },
   sideNav: {
     width: 180,
