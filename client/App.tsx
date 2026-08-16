@@ -1588,6 +1588,8 @@ function ReaderScreen({
   const tabContentTransition = useRef(new Animated.Value(1)).current;
   const wordCardTransition = useRef(new Animated.Value(0)).current;
   const audioPulse = useRef(new Animated.Value(0)).current;
+  const sequenceBarTransition = useRef(new Animated.Value(0)).current;
+  const sequenceBarVisibleRef = useRef(false);
   const closingWordRef = useRef(false);
   const [readerTab, setReaderTab] = useState<"article" | "answer">("article");
   const [selectedWord, setSelectedWord] = useState<WordInfo | null>(null);
@@ -1616,6 +1618,7 @@ function ReaderScreen({
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [showReaderHint, setShowReaderHint] = useState(false);
   const [readingProgress, setReadingProgress] = useState(0);
+  const [sequenceBarVisible, setSequenceBarVisible] = useState(false);
   const [restoredOffset, setRestoredOffset] = useState<number | null>(null);
   const isSaved = (word: string) =>
     savedWords.some(
@@ -1721,6 +1724,21 @@ function ReaderScreen({
       useNativeDriver: USE_NATIVE_DRIVER,
     }).start();
   }, [reducedMotion, screenTransition]);
+
+  useEffect(() => {
+    if (reducedMotion) {
+      sequenceBarTransition.setValue(sequenceBarVisible ? 1 : 0);
+      return;
+    }
+    Animated.timing(sequenceBarTransition, {
+      toValue: sequenceBarVisible ? 1 : 0,
+      duration: sequenceBarVisible ? 220 : 160,
+      easing: sequenceBarVisible
+        ? Easing.out(Easing.cubic)
+        : Easing.in(Easing.cubic),
+      useNativeDriver: USE_NATIVE_DRIVER,
+    }).start();
+  }, [reducedMotion, sequenceBarTransition, sequenceBarVisible]);
 
   useEffect(() => {
     const target = readerTab === "article" ? 0 : 1;
@@ -2280,6 +2298,19 @@ function ReaderScreen({
             nativeEvent.contentSize.height - nativeEvent.layoutMeasurement.height,
           );
           const offsetY = Math.max(0, nativeEvent.contentOffset.y);
+          const distanceFromBottom = Math.max(
+            0,
+            nativeEvent.contentSize.height -
+              nativeEvent.layoutMeasurement.height -
+              offsetY,
+          );
+          const shouldShowSequenceBar = sequenceBarVisibleRef.current
+            ? distanceFromBottom <= 96
+            : distanceFromBottom <= 24;
+          if (shouldShowSequenceBar !== sequenceBarVisibleRef.current) {
+            sequenceBarVisibleRef.current = shouldShowSequenceBar;
+            setSequenceBarVisible(shouldShowSequenceBar);
+          }
           const ratio = Math.max(0, Math.min(1, offsetY / maxOffset));
           scrollOffsetRef.current = offsetY;
           scrollProgressRef.current = ratio;
@@ -2616,7 +2647,27 @@ function ReaderScreen({
       </ScrollView>
 
       {sequenceTotal > 1 && (
-        <View style={styles.readerSequenceBar}>
+        <Animated.View
+          accessibilityElementsHidden={!sequenceBarVisible}
+          importantForAccessibility={
+            sequenceBarVisible ? "auto" : "no-hide-descendants"
+          }
+          pointerEvents={sequenceBarVisible ? "auto" : "none"}
+          style={[
+            styles.readerSequenceBar,
+            {
+              opacity: sequenceBarTransition,
+              transform: [
+                {
+                  translateY: sequenceBarTransition.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [18, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
           <Pressable
             accessibilityLabel="上一篇文章"
             disabled={!onPreviousArticle || navigatingArticle}
@@ -2656,7 +2707,7 @@ function ReaderScreen({
             <Text style={styles.readerSequenceButtonTextNext}>下一篇</Text>
             <ChevronRight size={18} color="#fff" />
           </Pressable>
-        </View>
+        </Animated.View>
       )}
 
       <Modal
@@ -5910,6 +5961,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
   },
   readerSequenceBar: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 12,
     minHeight: 66,
     flexDirection: "row",
     alignItems: "center",
@@ -5919,6 +5975,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.98)",
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.line,
+    ...shadows.card,
   },
   readerSequenceButton: {
     flex: 1,
@@ -5949,9 +6006,9 @@ const styles = StyleSheet.create({
   readerScroll: {
     alignItems: "center",
     paddingVertical: 30,
-    paddingBottom: 80,
+    paddingBottom: 100,
   },
-  readerScrollMobile: { paddingVertical: 14, paddingBottom: 64 },
+  readerScrollMobile: { paddingVertical: 14, paddingBottom: 92 },
   readerPaper: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
