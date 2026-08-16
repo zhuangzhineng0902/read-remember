@@ -311,6 +311,7 @@ export function getDailyArticles(
   examId: ExamId,
   date = new Date(),
   excludedIds: string[] = [],
+  limit = 3,
 ): Article[] {
   const pool = articles.filter((item) => item.examId === examId);
   const dayIndex = Math.floor(
@@ -320,5 +321,7 @@ export function getDailyArticles(
   const rotated = [...pool.slice(start), ...pool.slice(0, start)];
   // Delivered items never enter the result again. The production API can keep
   // this unseen pool replenished as the local demo corpus runs low.
-  return rotated.filter((item) => !excludedIds.includes(item.id)).slice(0, 3);
+  return rotated
+    .filter((item) => !excludedIds.includes(item.id))
+    .slice(0, Math.max(1, Math.trunc(limit)));
 }

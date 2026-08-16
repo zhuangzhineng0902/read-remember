@@ -118,7 +118,7 @@ export type LearningSettings = {
   dailyReminderEnabled: boolean;
   reminderTime: string;
   pronunciationAccent: "us" | "uk";
-  dailyGoal: 1 | 2 | 3;
+  dailyGoal: number;
 };
 
 export type UserProfile = {

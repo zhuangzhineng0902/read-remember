@@ -25,3 +25,5 @@ server/data/*.sqlite-wal
 # Logs and coverage
 *.log
 **/coverage/
+
+expo-go-qr.png

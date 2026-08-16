@@ -54,7 +54,7 @@ const learningSettingsSchema = z.object({
   dailyReminderEnabled: z.boolean(),
   reminderTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
   pronunciationAccent: z.enum(["us", "uk"]),
-  dailyGoal: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  dailyGoal: z.number().int().min(1).max(10),
 });
 const readerSettingsSchema = z.object({
   fontScale: z.number().min(0.8).max(1.4),
@@ -168,6 +168,64 @@ function userPreferences(db: AppDatabase, userId: string) {
       ? sqliteTimestampToIso(row.updatedAt)
       : new Date(0).toISOString(),
   };
+}
+
+function ensureDailyDeliveries(
+  db: AppDatabase,
+  userId: string,
+  examId: string,
+  date: string,
+  requestedGoal: number,
+) {
+  const goal = Math.min(10, Math.max(1, Math.trunc(requestedGoal)));
+  const delivered = db.prepare(`
+    SELECT ${articleSelect}
+    FROM deliveries d
+    JOIN articles a ON a.id = d.article_id
+    WHERE d.user_id = ? AND d.delivery_date = ? AND d.exam_id = ?
+    ORDER BY d.slot
+  `);
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    let rows = delivered.all(userId, date, examId) as unknown as ArticleRow[];
+    if (rows.length < goal) {
+      const missingCount = goal - rows.length;
+      const nextSlot =
+        (db
+          .prepare(
+            `SELECT COALESCE(MAX(slot), 0) AS maxSlot FROM deliveries
+             WHERE user_id = ? AND delivery_date = ? AND exam_id = ?`,
+          )
+          .get(userId, date, examId) as { maxSlot: number }).maxSlot + 1;
+      const additions = db
+        .prepare(
+          `SELECT ${articleSelect}
+           FROM articles a
+           WHERE a.exam_id = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM deliveries d
+               WHERE d.user_id = ? AND d.article_id = a.id
+             )
+           ORDER BY a.year DESC, a.id ASC
+           LIMIT ?`,
+        )
+        .all(examId, userId, missingCount) as unknown as ArticleRow[];
+      const insert = db.prepare(`
+        INSERT INTO deliveries(user_id, article_id, exam_id, delivery_date, slot)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      additions.forEach((row, index) =>
+        insert.run(userId, row.id, examId, date, nextSlot + index),
+      );
+      rows = delivered.all(userId, date, examId) as unknown as ArticleRow[];
+    }
+    db.exec("COMMIT");
+    return rows.slice(0, goal);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function createApp(
@@ -424,6 +482,22 @@ export function createApp(
          reader_json = excluded.reader_json,
          updated_at = CURRENT_TIMESTAMP`,
     ).run(user.id, JSON.stringify(learning), JSON.stringify(reader));
+    if (
+      body.learning &&
+      learning.dailyGoal !== current.learning.dailyGoal
+    ) {
+      const today = localDateParts(
+        new Date(),
+        config.dailyPushTimeZone ?? "Asia/Shanghai",
+      ).date;
+      ensureDailyDeliveries(
+        db,
+        user.id,
+        user.examId,
+        today,
+        learning.dailyGoal,
+      );
+    }
     res.json({ data: userPreferences(db, user.id) });
   });
 
@@ -560,55 +634,21 @@ export function createApp(
       req.query,
     );
     const user = currentUser(res);
-    const date = query.date ?? new Date().toISOString().slice(0, 10);
-    const delivered = db.prepare(`
-      SELECT ${articleSelect}
-      FROM deliveries d
-      JOIN articles a ON a.id = d.article_id
-      WHERE d.user_id = ? AND d.delivery_date = ? AND d.exam_id = ?
-      ORDER BY d.slot
-    `);
-
-    let rows = delivered.all(user.id, date, user.examId) as unknown as ArticleRow[];
-    if (rows.length === 0) {
-      db.exec("BEGIN IMMEDIATE");
-      try {
-        rows = db
-          .prepare(
-            `
-          SELECT ${articleSelect}
-          FROM articles a
-          WHERE a.exam_id = ?
-            AND NOT EXISTS (
-              SELECT 1 FROM deliveries d
-              WHERE d.user_id = ? AND d.article_id = a.id
-            )
-          ORDER BY a.year DESC, a.id ASC
-          LIMIT 3
-        `,
-          )
-          .all(user.examId, user.id) as unknown as ArticleRow[];
-
-        const insert = db.prepare(`
-          INSERT INTO deliveries(user_id, article_id, exam_id, delivery_date, slot)
-          VALUES (?, ?, ?, ?, ?)
-        `);
-        rows.forEach((row, index) =>
-          insert.run(user.id, row.id, user.examId, date, index + 1),
-        );
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
-    }
+    const date =
+      query.date ??
+      localDateParts(
+        new Date(),
+        config.dailyPushTimeZone ?? "Asia/Shanghai",
+      ).date;
+    const goal = userPreferences(db, user.id).learning.dailyGoal;
+    const rows = ensureDailyDeliveries(db, user.id, user.examId, date, goal);
 
     res.json({
       data: {
         date,
         examId: user.examId,
         articles: rows.map(serializeArticleSummary),
-        corpusExhausted: rows.length < 3,
+        corpusExhausted: rows.length < goal,
       },
     });
   });

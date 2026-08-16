@@ -62,7 +62,7 @@ export function createDatabase(filename: string): AppDatabase {
       article_id TEXT NOT NULL REFERENCES articles(id),
       exam_id TEXT NOT NULL REFERENCES exams(id),
       delivery_date TEXT NOT NULL,
-      slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 3),
+      slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 10),
       delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(user_id, delivery_date, exam_id, slot),
       UNIQUE(user_id, article_id)
@@ -262,7 +262,7 @@ export function createDatabase(filename: string): AppDatabase {
         article_id TEXT NOT NULL REFERENCES articles(id),
         exam_id TEXT NOT NULL REFERENCES exams(id),
         delivery_date TEXT NOT NULL,
-        slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 3),
+        slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 10),
         delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(user_id, delivery_date, exam_id, slot),
         UNIQUE(user_id, article_id)
@@ -275,6 +275,37 @@ export function createDatabase(filename: string): AppDatabase {
       FROM deliveries_legacy d
       JOIN articles a ON a.id = d.article_id;
       DROP TABLE deliveries_legacy;
+    `);
+  }
+  const deliveryTable = db
+    .prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'deliveries'",
+    )
+    .get() as { sql: string } | undefined;
+  if (
+    deliveryTable?.sql.match(
+      /slot\s+INTEGER\s+NOT\s+NULL\s+CHECK\s*\(slot\s+BETWEEN\s+1\s+AND\s+3\)/i,
+    )
+  ) {
+    db.exec(`
+      ALTER TABLE deliveries RENAME TO deliveries_goal_legacy;
+      CREATE TABLE deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        article_id TEXT NOT NULL REFERENCES articles(id),
+        exam_id TEXT NOT NULL REFERENCES exams(id),
+        delivery_date TEXT NOT NULL,
+        slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 10),
+        delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, delivery_date, exam_id, slot),
+        UNIQUE(user_id, article_id)
+      );
+      INSERT INTO deliveries(
+        id, user_id, article_id, exam_id, delivery_date, slot, delivered_at
+      )
+      SELECT id, user_id, article_id, exam_id, delivery_date, slot, delivered_at
+      FROM deliveries_goal_legacy;
+      DROP TABLE deliveries_goal_legacy;
     `);
   }
   db.exec(`

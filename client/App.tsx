@@ -9,9 +9,7 @@ import {
   Modal,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
-  StatusBar,
   StyleSheet,
   Switch,
   Text,
@@ -35,6 +33,8 @@ import {
   Home,
   Library,
   Menu,
+  Minus,
+  Plus,
   Search,
   Settings,
   Sparkles,
@@ -43,6 +43,11 @@ import {
   Volume2,
   X,
 } from "lucide-react-native";
+import {
+  SafeAreaProvider,
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { createAudioPlayer, type AudioPlayer } from "expo-audio";
 import * as Speech from "expo-speech";
@@ -318,6 +323,147 @@ function NativeChoiceSheet({
           </View>
         </View>
       </View>
+    </Modal>
+  );
+}
+
+function DailyGoalSheet({
+  visible,
+  value,
+  onSave,
+  onClose,
+}: {
+  visible: boolean;
+  value: number;
+  onSave: (value: number) => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const { width } = useWindowDimensions();
+  const tablet = width >= 768;
+  const [draft, setDraft] = useState(String(value));
+  const [saving, setSaving] = useState(false);
+  const parsed = Number(draft);
+  const valid = Number.isInteger(parsed) && parsed >= 1 && parsed <= 10;
+
+  useEffect(() => {
+    if (visible) setDraft(String(value));
+  }, [value, visible]);
+
+  const adjust = (amount: number) => {
+    const base = valid ? parsed : value;
+    setDraft(String(Math.min(10, Math.max(1, base + amount))));
+  };
+
+  const save = async () => {
+    if (!valid || saving) return;
+    setSaving(true);
+    try {
+      await onSave(parsed);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      animationType={tablet ? "fade" : "slide"}
+      transparent
+      visible={visible}
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={[
+          styles.nativeModalRoot,
+          tablet && styles.nativeModalRootDesktop,
+        ]}
+      >
+        <Pressable
+          accessibilityLabel="关闭每日阅读目标设置"
+          onPress={onClose}
+          style={styles.nativeModalBackdrop}
+        />
+        <View
+          accessibilityViewIsModal
+          style={[styles.nativeSheet, tablet && styles.nativeSheetDesktop]}
+        >
+          {!tablet && <View style={styles.nativeSheetHandle} />}
+          <View style={styles.nativeSheetHeader}>
+            <View style={styles.flexOne}>
+              <Text style={styles.nativeSheetTitle}>每日阅读目标</Text>
+              <Text style={styles.nativeSheetSubtitle}>
+                保存后会立即补足今天的推荐，文章不会重复
+              </Text>
+            </View>
+            <Pressable
+              accessibilityLabel="关闭"
+              hitSlop={8}
+              onPress={onClose}
+              style={styles.nativeSheetClose}
+            >
+              <X size={18} color={colors.inkMuted} />
+            </Pressable>
+          </View>
+          <View style={styles.goalStepper}>
+            <Pressable
+              accessibilityLabel="减少一篇"
+              disabled={valid && parsed <= 1}
+              onPress={() => adjust(-1)}
+              style={({ pressed }) => [
+                styles.goalStepButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Minus size={22} color={colors.primary} />
+            </Pressable>
+            <View style={styles.goalInputWrap}>
+              <TextInput
+                accessibilityLabel="每日阅读文章篇数"
+                autoFocus
+                keyboardType="number-pad"
+                maxLength={2}
+                onChangeText={(text) => setDraft(text.replace(/\D/g, ""))}
+                selectTextOnFocus
+                style={styles.goalInput}
+                value={draft}
+              />
+              <Text style={styles.goalInputUnit}>篇 / 天</Text>
+            </View>
+            <Pressable
+              accessibilityLabel="增加一篇"
+              disabled={valid && parsed >= 10}
+              onPress={() => adjust(1)}
+              style={({ pressed }) => [
+                styles.goalStepButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Plus size={22} color={colors.primary} />
+            </Pressable>
+          </View>
+          <Text style={[styles.goalRangeHint, !valid && styles.goalRangeError]}>
+            {valid ? "可设置 1–10 篇" : "请输入 1–10 之间的整数"}
+          </Text>
+          <Pressable
+            accessibilityLabel="保存每日阅读目标"
+            disabled={!valid || saving}
+            onPress={() => void save()}
+            style={({ pressed }) => [
+              styles.goalSaveButton,
+              pressed && styles.pressed,
+              (!valid || saving) && styles.disabledButton,
+            ]}
+          >
+            {saving ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.goalSaveText}>保存并更新今日推荐</Text>
+            )}
+          </Pressable>
+        </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -3588,7 +3734,7 @@ function ProfileScreen({
   settings: LearningSettings;
   user: UserProfile | null;
   onChangeExam: (id: ExamId) => void;
-  onChangeSettings: (settings: LearningSettings) => void;
+  onChangeSettings: (settings: LearningSettings) => void | Promise<void>;
   onOpenAccount: () => void;
 }) {
   const [activePicker, setActivePicker] = useState<
@@ -3631,14 +3777,10 @@ function ProfileScreen({
               ],
             }
           : {
-              title: "每日阅读目标",
-              subtitle: "每天仍会推荐 3 篇文章，目标只影响进度计划",
-              selectedId: String(settings.dailyGoal),
-              options: [
-                { id: "1", label: "每天 1 篇", description: "轻松保持连续学习" },
-                { id: "2", label: "每天 2 篇", description: "稳步提升阅读量" },
-                { id: "3", label: "每天 3 篇", description: "完成全部每日推荐" },
-              ],
+              title: "选择单词发音",
+              subtitle: "会应用到文章、生词库和记忆卡",
+              selectedId: settings.pronunciationAccent,
+              options: [],
             };
 
   const handlePickerSelect = (id: string) => {
@@ -3650,11 +3792,6 @@ function ProfileScreen({
       onChangeSettings({
         ...settings,
         pronunciationAccent: id as "us" | "uk",
-      });
-    } else if (activePicker === "goal") {
-      onChangeSettings({
-        ...settings,
-        dailyGoal: Number(id) as LearningSettings["dailyGoal"],
       });
     }
     setActivePicker(null);
@@ -3736,16 +3873,19 @@ function ProfileScreen({
                 </Text>
               </View>
             </Pressable>
-            <Switch
-              accessibilityLabel="每日提醒开关"
-              value={settings.dailyReminderEnabled}
-              onValueChange={(dailyReminderEnabled) =>
-                onChangeSettings({ ...settings, dailyReminderEnabled })
-              }
-              trackColor={{ false: "#D6DCD9", true: colors.primary }}
-              thumbColor="#FFFFFF"
-              ios_backgroundColor="#D6DCD9"
-            />
+            <View style={styles.settingSwitchWrap}>
+              <Switch
+                accessibilityLabel="每日提醒开关"
+                value={settings.dailyReminderEnabled}
+                onValueChange={(dailyReminderEnabled) =>
+                  onChangeSettings({ ...settings, dailyReminderEnabled })
+                }
+                trackColor={{ false: "#D6DCD9", true: colors.primary }}
+                thumbColor="#FFFFFF"
+                ios_backgroundColor="#D6DCD9"
+                style={styles.settingSwitch}
+              />
+            </View>
           </View>
           <View style={styles.settingSeparator} />
           <Pressable
@@ -3792,7 +3932,7 @@ function ProfileScreen({
           <Text style={styles.quoteAuthor}>— George R. R. Martin</Text>
         </View>
       </ScrollView>
-      {activePicker && (
+      {activePicker && activePicker !== "goal" && (
         <NativeChoiceSheet
           visible
           title={pickerConfig.title}
@@ -3803,6 +3943,14 @@ function ProfileScreen({
           onClose={() => setActivePicker(null)}
         />
       )}
+      <DailyGoalSheet
+        visible={activePicker === "goal"}
+        value={settings.dailyGoal}
+        onSave={(dailyGoal) =>
+          onChangeSettings({ ...settings, dailyGoal })
+        }
+        onClose={() => setActivePicker(null)}
+      />
     </View>
   );
 }
@@ -3810,10 +3958,12 @@ function ProfileScreen({
 function Navigation({
   active,
   tablet,
+  bottomInset = 0,
   onChange,
 }: {
   active: TabId;
   tablet: boolean;
+  bottomInset?: number;
   onChange: (tab: TabId) => void;
 }) {
   if (tablet) {
@@ -3855,7 +4005,15 @@ function Navigation({
     );
   }
   return (
-    <View style={styles.bottomNav}>
+    <View
+      style={[
+        styles.bottomNav,
+        {
+          height: 64 + bottomInset,
+          paddingBottom: bottomInset,
+        },
+      ]}
+    >
       {navItems.map(({ id, label, icon: Icon }) => (
         <Pressable
           accessibilityLabel={label}
@@ -3892,8 +4050,9 @@ function Navigation({
   );
 }
 
-export default function App() {
+function AppContent() {
   const { width } = useWindowDimensions();
+  const { bottom: bottomInset } = useSafeAreaInsets();
   const tablet = width >= 768;
   const [loading, setLoading] = useState(true);
   const [examId, setExamId] = useState<ExamId | null>(null);
@@ -4111,16 +4270,25 @@ export default function App() {
     };
   }, [apiOnline, learningSettings.pronunciationAccent, savedWords]);
 
-  const updateLearningSettings = (next: LearningSettings) => {
+  const updateLearningSettings = async (next: LearningSettings) => {
+    const goalChanged = next.dailyGoal !== learningSettings.dailyGoal;
     setLearningSettings(next);
     void storage.setLearningSettings(next);
     if (apiOnline) {
-      void api.updatePreferences({ learning: next }).catch((error) =>
+      try {
+        await api.updatePreferences({ learning: next });
+        if (goalChanged) {
+          const remoteDaily = await api.getDaily();
+          setDaily(remoteDaily);
+        }
+      } catch (error) {
         setAppNotice({
           title: "设置已保存在本机",
           message: error instanceof Error ? error.message : "账号同步暂时失败",
-        }),
-      );
+        });
+      }
+    } else if (goalChanged && examId) {
+      setDaily(getDailyArticles(examId, new Date(), [], next.dailyGoal));
     }
     const permissionRequested =
       next.dailyReminderEnabled &&
@@ -4672,15 +4840,26 @@ export default function App() {
     );
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView edges={["top", "left", "right"]} style={styles.safeArea}>
       <ExpoStatusBar style="dark" />
       <View style={styles.appShell}>
         {tablet && <Navigation active={tab} tablet onChange={setTab} />}
-        <View style={[styles.mainContent, tablet && styles.mainContentTablet]}>
+        <View
+          style={[
+            styles.mainContent,
+            !tablet && { paddingBottom: 64 + bottomInset },
+            tablet && styles.mainContentTablet,
+          ]}
+        >
           <PageTransition transitionKey={tab}>{content}</PageTransition>
         </View>
         {!tablet && (
-          <Navigation active={tab} tablet={false} onChange={setTab} />
+          <Navigation
+            active={tab}
+            tablet={false}
+            bottomInset={bottomInset}
+            onChange={setTab}
+          />
         )}
       </View>
       <NativeNoticeModal
@@ -4700,6 +4879,14 @@ export default function App() {
         />
       )}
     </SafeAreaView>
+  );
+}
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppContent />
+    </SafeAreaProvider>
   );
 }
 
@@ -4736,12 +4923,10 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: colors.background,
-    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight : 0,
   },
   readerSafe: {
     flex: 1,
     backgroundColor: "#F3F1EA",
-    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight : 0,
   },
   loading: {
     flex: 1,
@@ -4753,7 +4938,7 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.82 },
   cardPressed: { transform: [{ scale: 0.992 }], opacity: 0.92 },
   appShell: { flex: 1, flexDirection: "row" },
-  mainContent: { flex: 1, paddingBottom: 76 },
+  mainContent: { flex: 1 },
   mainContentTablet: { paddingBottom: 0 },
   screen: { flex: 1 },
   screenContent: {
@@ -4860,6 +5045,64 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     borderColor: colors.primary,
   },
+  goalStepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 8,
+  },
+  goalStepButton: {
+    width: 50,
+    height: 50,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.primarySoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  goalInputWrap: {
+    flex: 1,
+    minHeight: 78,
+    borderRadius: 18,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    backgroundColor: "#F2F8F6",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  goalInput: {
+    minWidth: 72,
+    paddingHorizontal: 12,
+    paddingVertical: 0,
+    color: colors.primaryDark,
+    fontSize: 32,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  goalInputUnit: {
+    color: colors.inkMuted,
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+  goalRangeHint: {
+    color: colors.inkMuted,
+    fontSize: 11,
+    lineHeight: 18,
+    textAlign: "center",
+    marginTop: 10,
+  },
+  goalRangeError: { color: colors.danger },
+  goalSaveButton: {
+    height: 50,
+    borderRadius: 16,
+    backgroundColor: colors.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 16,
+  },
+  goalSaveText: { color: "#fff", fontSize: 14, fontWeight: "800" },
   nativeNoticeSheet: {
     width: "100%",
     backgroundColor: colors.surface,
@@ -6694,6 +6937,16 @@ const styles = StyleSheet.create({
     marginLeft: -15,
     paddingLeft: 15,
   },
+  settingSwitchWrap: {
+    width: 52,
+    minHeight: 68,
+    alignItems: "flex-end",
+    justifyContent: "center",
+  },
+  settingSwitch: {
+    margin: 0,
+    transform: [{ scale: Platform.OS === "ios" ? 0.88 : 0.92 }],
+  },
   settingRowPressed: { backgroundColor: "#F3F7F5" },
   settingIcon: {
     width: 38,
@@ -6767,8 +7020,6 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    height: Platform.OS === "ios" ? 82 : 72,
-    paddingBottom: Platform.OS === "ios" ? 14 : 6,
     flexDirection: "row",
     backgroundColor: "rgba(255,255,255,0.98)",
     borderTopWidth: StyleSheet.hairlineWidth,

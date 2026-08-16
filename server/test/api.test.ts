@@ -215,7 +215,7 @@ test("anonymous account can register, login, and update profile", async () => {
         dailyReminderEnabled: true,
         reminderTime: "08:00",
         pronunciationAccent: "uk",
-        dailyGoal: 2,
+        dailyGoal: 3,
       },
       reader: {
         fontScale: 1.1,
@@ -227,7 +227,7 @@ test("anonymous account can register, login, and update profile", async () => {
     }),
   });
   assert.equal(preferences.status, 200);
-  assert.equal((await preferences.json()).data.learning.dailyGoal, 2);
+  assert.equal((await preferences.json()).data.learning.dailyGoal, 3);
 });
 
 test("daily delivery is idempotent and never repeats across dates", async () => {
@@ -250,6 +250,48 @@ test("daily delivery is idempotent and never repeats across dates", async () => 
     (item: { id: string }) => item.id,
   );
   assert.equal(new Set(allIds).size, 6);
+});
+
+test("custom daily goal immediately replenishes today's target articles", async () => {
+  await request("/api/v1/users/me/exam", {
+    method: "PATCH",
+    body: JSON.stringify({ examId: "ielts" }),
+  });
+  const preferences = await request("/api/v1/users/me/preferences", {
+    method: "PATCH",
+    body: JSON.stringify({
+      learning: {
+        dailyReminderEnabled: true,
+        reminderTime: "08:00",
+        pronunciationAccent: "uk",
+        dailyGoal: 5,
+      },
+    }),
+  });
+  assert.equal(preferences.status, 200);
+  assert.equal((await preferences.json()).data.learning.dailyGoal, 5);
+
+  const daily = await request("/api/v1/daily");
+  const data = (await daily.json()).data;
+  assert.equal(data.examId, "ielts");
+  assert.equal(data.articles.length, 5);
+  assert.equal(new Set(data.articles.map((item: { id: string }) => item.id)).size, 5);
+
+  await request("/api/v1/users/me/preferences", {
+    method: "PATCH",
+    body: JSON.stringify({
+      learning: {
+        dailyReminderEnabled: true,
+        reminderTime: "08:00",
+        pronunciationAccent: "uk",
+        dailyGoal: 3,
+      },
+    }),
+  });
+  await request("/api/v1/users/me/exam", {
+    method: "PATCH",
+    body: JSON.stringify({ examId: "toefl" }),
+  });
 });
 
 test("article answers can be submitted and appear in history", async () => {
