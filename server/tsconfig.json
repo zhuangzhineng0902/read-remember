@@ -11,6 +11,7 @@
   },
   "include": [
     "src/**/*.ts",
+    "scripts/**/*.ts",
     "test/**/*.ts",
     "../client/src/data.ts",
     "../client/src/types.ts"

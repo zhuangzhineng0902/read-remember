@@ -35,7 +35,10 @@ import {
   Library,
   Menu,
   Minus,
+  Pause,
+  Play,
   Plus,
+  RotateCcw,
   Search,
   Settings,
   Sparkles,
@@ -52,7 +55,11 @@ import {
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { createAudioPlayer, type AudioPlayer } from "expo-audio";
 import * as Speech from "expo-speech";
-import { api, type ManualPush } from "./src/api";
+import {
+  api,
+  type ArticleAudioConfig,
+  type ManualPush,
+} from "./src/api";
 import {
   articles,
   exams,
@@ -1098,6 +1105,7 @@ let pronunciationReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 let pronunciationStartTimer: ReturnType<typeof setTimeout> | null = null;
 let pronunciationStatusSubscription: { remove: () => void } | null = null;
 let pronunciationPlaybackGeneration = 0;
+let stopActiveArticleNarration: (() => void) | null = null;
 
 type AudioPlaybackState = "idle" | "loading" | "playing" | "error";
 
@@ -1120,7 +1128,12 @@ function stopWordAudio() {
   }
   pronunciationStatusSubscription?.remove();
   pronunciationStatusSubscription = null;
-  pronunciationPlayer?.release();
+  try {
+    pronunciationPlayer?.pause();
+    pronunciationPlayer?.release();
+  } catch {
+    // The player may already have stopped or released itself.
+  }
   pronunciationPlayer = null;
   Speech.stop();
 }
@@ -1135,6 +1148,7 @@ async function playWord(
   },
   accent: "us" | "uk" = "us",
 ) {
+  stopActiveArticleNarration?.();
   stopWordAudio();
   const playbackGeneration = pronunciationPlaybackGeneration;
   const isCurrent = () =>
@@ -1160,6 +1174,7 @@ async function playWord(
   callbacks.onLoading();
   try {
     const pronunciation = await api.getPronunciation(word, accent, "", true);
+    if (!isCurrent()) return;
     const matchesRequestedAccent =
       !pronunciation.actualAccent ||
       pronunciation.actualAccent === "unknown" ||
@@ -1183,6 +1198,7 @@ async function playWord(
   } catch {
     // Device speech remains available when the dictionary service is offline.
   }
+  if (!isCurrent()) return;
   try {
     pronunciationStartTimer = setTimeout(fail, 5_000);
     Speech.speak(word, {
@@ -2034,6 +2050,309 @@ function Difficulty({ value }: { value: number }) {
           ]}
         />
       ))}
+    </View>
+  );
+}
+
+type NarrationState = "idle" | "loading" | "playing" | "paused" | "error";
+
+function playbackTime(value: number) {
+  const seconds = Math.max(0, Math.floor(value || 0));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function ArticleNarrationPlayer({ article }: { article: Article }) {
+  const playerRef = useRef<AudioPlayer | null>(null);
+  const subscriptionRef = useRef<{ remove: () => void } | null>(null);
+  const requestGenerationRef = useRef(0);
+  const [config, setConfig] = useState<ArticleAudioConfig | null>(null);
+  const [voice, setVoice] = useState("");
+  const [speed, setSpeed] = useState(1);
+  const [state, setState] = useState<NarrationState>("idle");
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [message, setMessage] = useState("正在检查朗读服务…");
+
+  const releasePlayer = () => {
+    subscriptionRef.current?.remove();
+    subscriptionRef.current = null;
+    try {
+      playerRef.current?.pause();
+      playerRef.current?.clearLockScreenControls();
+      playerRef.current?.release();
+    } catch {
+      // The native player may already have been released after an interruption.
+    }
+    playerRef.current = null;
+  };
+
+  useEffect(() => {
+    let active = true;
+    api
+      .getArticleAudioConfig()
+      .then((value) => {
+        if (!active) return;
+        setConfig(value);
+        setVoice(
+          value.voices.some((item) => item.id === value.defaultVoice)
+            ? value.defaultVoice
+            : value.voices[0]?.id ?? "",
+        );
+        setMessage(
+          value.enabled
+            ? "首次播放会生成音频，之后直接读取缓存"
+            : "服务端尚未配置 Kokoro",
+        );
+      })
+      .catch(() => {
+        if (!active) return;
+        setConfig({
+          enabled: false,
+          provider: "kokoro",
+          defaultVoice: "",
+          voices: [],
+          playbackSpeeds: [0.8, 1, 1.2],
+        });
+        setMessage("暂时无法连接朗读服务");
+      });
+    return () => {
+      active = false;
+    };
+  }, [article.id]);
+
+  useEffect(() => {
+    const pause = () => {
+      requestGenerationRef.current += 1;
+      if (playerRef.current) {
+        playerRef.current.pause();
+        setState("paused");
+      } else {
+        setState("idle");
+        setMessage("朗读已停止");
+      }
+    };
+    stopActiveArticleNarration = pause;
+    return () => {
+      if (stopActiveArticleNarration === pause) {
+        stopActiveArticleNarration = null;
+      }
+      requestGenerationRef.current += 1;
+      releasePlayer();
+    };
+  }, [article.id]);
+
+  useEffect(() => {
+    if (!playerRef.current) return;
+    playerRef.current.setPlaybackRate(speed, "high");
+  }, [speed]);
+
+  const selectVoice = (nextVoice: string) => {
+    if (nextVoice === voice) return;
+    requestGenerationRef.current += 1;
+    releasePlayer();
+    setVoice(nextVoice);
+    setState("idle");
+    setPosition(0);
+    setDuration(0);
+    setMessage("切换音色后将在播放时生成或读取对应缓存");
+  };
+
+  const start = async () => {
+    if (!config?.enabled || !voice || state === "loading") return;
+    if (playerRef.current) {
+      if (state === "playing") {
+        playerRef.current.pause();
+        setState("paused");
+      } else {
+        stopWordAudio();
+        playerRef.current.play();
+        setState("playing");
+      }
+      return;
+    }
+    stopWordAudio();
+    const requestGeneration = requestGenerationRef.current + 1;
+    requestGenerationRef.current = requestGeneration;
+    setState("loading");
+    setMessage("正在生成或读取整篇音频，首次播放可能需要一些时间…");
+    try {
+      const audio = await api.ensureArticleAudio(article.id, voice);
+      if (requestGeneration !== requestGenerationRef.current) return;
+      const player = createAudioPlayer(audio.audioUrl, {
+        updateInterval: 250,
+        downloadFirst: Platform.OS !== "web",
+      });
+      playerRef.current = player;
+      player.setPlaybackRate(speed, "high");
+      if (Platform.OS !== "web") {
+        player.setActiveForLockScreen(true, {
+          title: article.title,
+          artist: "拾词 · 整篇朗读",
+        });
+      }
+      subscriptionRef.current = player.addListener(
+        "playbackStatusUpdate",
+        (status) => {
+          setPosition(status.currentTime || 0);
+          if (status.duration) setDuration(status.duration);
+          if (status.playing) {
+            setState("playing");
+            setMessage(audio.cached ? "正在播放缓存音频" : "音频已生成并缓存");
+          }
+          if (status.didJustFinish) {
+            setState("idle");
+            setPosition(0);
+            setMessage("朗读完成，可以重新播放");
+            void player.seekTo(0);
+          }
+        },
+      );
+      player.play();
+    } catch (error) {
+      if (requestGeneration !== requestGenerationRef.current) return;
+      releasePlayer();
+      setState("error");
+      setMessage(error instanceof Error ? error.message : "整篇朗读生成失败");
+    }
+  };
+
+  const restart = () => {
+    if (!playerRef.current) return;
+    void playerRef.current.seekTo(0).then(() => {
+      setPosition(0);
+      playerRef.current?.play();
+      setState("playing");
+    });
+  };
+
+  const progress = duration > 0 ? Math.min(1, position / duration) : 0;
+  return (
+    <View style={styles.articleNarrationCard}>
+      <View style={styles.articleNarrationTopRow}>
+        <View style={styles.articleNarrationIdentity}>
+          <View style={styles.articleNarrationIcon}>
+            <Headphones size={17} color={colors.primary} />
+          </View>
+          <View style={styles.flexOne}>
+            <Text style={styles.articleNarrationTitle}>整篇朗读</Text>
+            <Text
+              numberOfLines={2}
+              style={[
+                styles.articleNarrationMessage,
+                state === "error" && styles.articleNarrationError,
+              ]}
+            >
+              {message}
+            </Text>
+          </View>
+        </View>
+        <View style={styles.articleNarrationActions}>
+          {playerRef.current && position > 0 && (
+            <Pressable
+              accessibilityLabel="从头播放"
+              hitSlop={8}
+              onPress={restart}
+              style={({ pressed }) => [
+                styles.articleNarrationRestart,
+                pressed && styles.pressed,
+              ]}
+            >
+              <RotateCcw size={15} color={colors.inkMuted} />
+            </Pressable>
+          )}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={state === "playing" ? "暂停整篇朗读" : "播放整篇朗读"}
+            accessibilityState={{ disabled: !config?.enabled || !voice }}
+            disabled={!config?.enabled || !voice}
+            onPress={start}
+            style={({ pressed }) => [
+              styles.articleNarrationPlay,
+              state === "playing" && styles.articleNarrationPlayActive,
+              (!config?.enabled || !voice) && styles.disabledButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            {state === "loading" ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : state === "playing" ? (
+              <Pause size={17} color="#fff" fill="#fff" />
+            ) : (
+              <Play size={17} color="#fff" fill="#fff" />
+            )}
+          </Pressable>
+        </View>
+      </View>
+
+      {(duration > 0 || state === "loading") && (
+        <View style={styles.articleNarrationProgressRow}>
+          <Text style={styles.articleNarrationTime}>{playbackTime(position)}</Text>
+          <View style={styles.articleNarrationTrack}>
+            <View
+              style={[
+                styles.articleNarrationTrackFill,
+                { width: `${Math.max(state === "loading" ? 3 : 0, progress * 100)}%` },
+              ]}
+            />
+          </View>
+          <Text style={styles.articleNarrationTime}>
+            {duration ? playbackTime(duration) : "生成中"}
+          </Text>
+        </View>
+      )}
+
+      {config?.enabled && config.voices.length > 0 && (
+        <View style={styles.articleNarrationControls}>
+          <View style={styles.articleNarrationChoiceRow}>
+            {config.voices.map((item) => (
+              <Pressable
+                key={item.id}
+                accessibilityRole="button"
+                accessibilityState={{ selected: voice === item.id }}
+                onPress={() => selectVoice(item.id)}
+                style={({ pressed }) => [
+                  styles.articleNarrationChoice,
+                  voice === item.id && styles.articleNarrationChoiceActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.articleNarrationChoiceText,
+                    voice === item.id && styles.articleNarrationChoiceTextActive,
+                  ]}
+                >
+                  {item.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <View style={styles.articleNarrationSpeedRow}>
+            <Text style={styles.articleNarrationSpeedLabel}>语速</Text>
+            {config.playbackSpeeds.map((item) => (
+              <Pressable
+                key={item}
+                accessibilityState={{ selected: speed === item }}
+                onPress={() => setSpeed(item)}
+                style={({ pressed }) => [
+                  styles.articleNarrationSpeed,
+                  speed === item && styles.articleNarrationSpeedActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.articleNarrationSpeedText,
+                    speed === item && styles.articleNarrationSpeedTextActive,
+                  ]}
+                >
+                  {item}×
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -2893,6 +3212,7 @@ function ReaderScreen({
                 约 {article.readMinutes} 分钟
               </Text>
             </View>
+            <ArticleNarrationPlayer key={article.id} article={article} />
           </View>
 
           <Animated.View
@@ -6901,6 +7221,150 @@ const styles = StyleSheet.create({
   readerTitleMobile: { fontSize: 27, lineHeight: 35 },
   readerMeta: { flexDirection: "row", alignItems: "center", marginTop: 12 },
   readerMetaText: { fontSize: 11, color: colors.inkMuted },
+  articleNarrationCard: {
+    marginTop: 18,
+    padding: 13,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: "#D9E5E1",
+    backgroundColor: "#F5F9F7",
+  },
+  articleNarrationTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  articleNarrationIdentity: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  articleNarrationIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#E2EFEA",
+  },
+  articleNarrationTitle: {
+    color: colors.ink,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  articleNarrationMessage: {
+    color: colors.inkMuted,
+    fontSize: 10,
+    lineHeight: 15,
+    marginTop: 2,
+  },
+  articleNarrationError: { color: colors.danger },
+  articleNarrationActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+  articleNarrationRestart: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  articleNarrationPlay: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+  },
+  articleNarrationPlayActive: { backgroundColor: colors.accent },
+  articleNarrationProgressRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 11,
+  },
+  articleNarrationTrack: {
+    flex: 1,
+    height: 4,
+    borderRadius: 999,
+    overflow: "hidden",
+    backgroundColor: "#DDE7E3",
+  },
+  articleNarrationTrackFill: {
+    height: "100%",
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+  },
+  articleNarrationTime: {
+    minWidth: 31,
+    color: colors.inkMuted,
+    fontSize: 9,
+    fontVariant: ["tabular-nums"],
+  },
+  articleNarrationControls: { marginTop: 12, gap: 10 },
+  articleNarrationChoiceRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  articleNarrationChoice: {
+    minHeight: 30,
+    justifyContent: "center",
+    paddingHorizontal: 9,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  articleNarrationChoiceActive: {
+    borderColor: colors.primary,
+    backgroundColor: "#E1EFEA",
+  },
+  articleNarrationChoiceText: {
+    color: colors.inkMuted,
+    fontSize: 10,
+    fontWeight: "700",
+  },
+  articleNarrationChoiceTextActive: { color: colors.primary },
+  articleNarrationSpeedRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  articleNarrationSpeedLabel: {
+    color: colors.inkMuted,
+    fontSize: 10,
+    marginRight: 2,
+  },
+  articleNarrationSpeed: {
+    minWidth: 38,
+    height: 28,
+    borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  articleNarrationSpeedActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary,
+  },
+  articleNarrationSpeedText: {
+    color: colors.inkMuted,
+    fontSize: 10,
+    fontWeight: "700",
+  },
+  articleNarrationSpeedTextActive: { color: "#fff" },
   metaDivider: {
     height: 12,
     width: 1,

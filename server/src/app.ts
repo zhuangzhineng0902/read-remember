@@ -38,6 +38,7 @@ import {
 import { ensureDailyPushForUser, localDateParts } from "./daily-push";
 import type { EcdictDictionary } from "./ecdict";
 import { scheduleMemoryReview } from "../../client/src/memory";
+import type { ArticleAudioService } from "./article-audio";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -330,6 +331,7 @@ export function createApp(
       >
     >,
   dictionary: EcdictDictionary | null = null,
+  articleAudio: ArticleAudioService | null = null,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -351,6 +353,7 @@ export function createApp(
       service: "read-remember-api",
       timestamp: new Date().toISOString(),
       dictionary: dictionary ? "ecdict-ready" : "ecdict-unavailable",
+      articleAudio: articleAudio?.enabled ? "kokoro-ready" : "kokoro-unavailable",
     });
   });
 
@@ -420,6 +423,24 @@ export function createApp(
     } catch (error) {
       next(error);
     }
+  });
+
+  app.get("/api/v1/article-audio/files/:token", (req, res, next) => {
+    const token = req.params.token;
+    if (!/^[0-9a-f-]{36}$/i.test(token) || !articleAudio) {
+      next(new ApiError(404, "ARTICLE_AUDIO_NOT_FOUND", "朗读音频不存在"));
+      return;
+    }
+    const file = articleAudio.file(token);
+    if (!file) {
+      next(new ApiError(404, "ARTICLE_AUDIO_NOT_FOUND", "朗读音频不存在"));
+      return;
+    }
+    res.setHeader("cross-origin-resource-policy", "cross-origin");
+    res.setHeader("content-type", file.mimeType);
+    res.setHeader("content-length", String(file.byteSize));
+    res.setHeader("cache-control", "public, max-age=31536000, immutable");
+    res.sendFile(file.path, (error) => error && next(error));
   });
 
   app.post("/api/v1/auth/anonymous", (req, res) => {
@@ -552,6 +573,18 @@ export function createApp(
   });
 
   authenticated.use(requireRegistered);
+
+  authenticated.get("/article-audio/config", (_req, res) => {
+    res.json({
+      data: articleAudio?.publicConfig() ?? {
+        enabled: false,
+        provider: "kokoro",
+        defaultVoice: "af_heart",
+        voices: [],
+        playbackSpeeds: [0.8, 1, 1.2],
+      },
+    });
+  });
 
   authenticated.get("/users/me/preferences", (_req, res) => {
     const user = currentUser(res);
@@ -787,7 +820,7 @@ export function createApp(
       new Date(),
       config.dailyPushTimeZone ?? "Asia/Shanghai",
     ).date;
-    const deliver = db.prepare(
+    const deliverInterest = db.prepare(
       `INSERT OR IGNORE INTO interest_deliveries(
         user_id, article_id, delivery_date
       )
@@ -796,10 +829,25 @@ export function createApp(
         SELECT 1 FROM deliveries WHERE user_id = ? AND article_id = ?
       )`,
     );
+    const nextSlotRow = db
+      .prepare(
+        `SELECT COALESCE(MAX(slot), -1) AS maxSlot FROM deliveries
+         WHERE user_id = ? AND delivery_date = ? AND exam_id = ?`,
+      )
+      .get(user.id, today, user.examId) as { maxSlot: number };
+    const deliverExam = db.prepare(
+      `INSERT OR IGNORE INTO deliveries(
+        user_id, article_id, exam_id, delivery_date, slot
+      )
+      VALUES (?, ?, ?, ?, ?)`,
+    );
     db.exec("BEGIN IMMEDIATE");
     try {
+      let slot = nextSlotRow.maxSlot + 1;
       for (const row of rows) {
-        deliver.run(user.id, row.id, today, user.id, row.id);
+        deliverInterest.run(user.id, row.id, today, user.id, row.id);
+        deliverExam.run(user.id, row.id, user.examId, today, slot);
+        slot++;
       }
       db.exec("COMMIT");
     } catch (error) {
@@ -927,6 +975,41 @@ export function createApp(
     const row = articleFromId(db, req.params.id);
     if (!row) throw new ApiError(404, "ARTICLE_NOT_FOUND", "文章不存在");
     res.json({ data: serializeArticle(row) });
+  });
+
+  const articleAudioVoiceQuery = z.object({
+    voice: z.string().trim().min(1).max(64).optional(),
+  });
+
+  authenticated.get("/articles/:id/audio", (req, res) => {
+    const user = currentUser(res);
+    if (!hasArticleAccess(db, user.id, req.params.id)) {
+      throw new ApiError(403, "ARTICLE_NOT_DELIVERED", "该文章尚未推送给当前用户");
+    }
+    const { voice } = parse(articleAudioVoiceQuery, req.query);
+    const metadata = articleAudio?.metadata(req.params.id, voice) ?? null;
+    res.json({ data: { ready: Boolean(metadata), ...metadata } });
+  });
+
+  authenticated.post("/articles/:id/audio", async (req, res, next) => {
+    try {
+      const user = currentUser(res);
+      if (!hasArticleAccess(db, user.id, req.params.id)) {
+        throw new ApiError(
+          403,
+          "ARTICLE_NOT_DELIVERED",
+          "该文章尚未推送给当前用户",
+        );
+      }
+      if (!articleAudio) {
+        throw new ApiError(503, "KOKORO_NOT_CONFIGURED", "整篇朗读服务尚未配置");
+      }
+      const { voice } = parse(articleAudioVoiceQuery, req.body ?? {});
+      const metadata = await articleAudio.ensure(req.params.id, voice);
+      res.status(metadata.cached ? 200 : 201).json({ data: metadata });
+    } catch (error) {
+      next(error);
+    }
   });
 
   authenticated.get("/articles/:id/reading-state", (req, res) => {

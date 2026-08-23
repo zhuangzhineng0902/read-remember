@@ -9,6 +9,8 @@
     "build:web": "npm --prefix ../client run build:web",
     "build:site": "npm run build:web && npm run build",
     "setup:ecdict": "bash scripts/setup-ecdict.sh",
+    "translate:articles": "tsx scripts/translate-articles.ts",
+    "generate:article-audio": "tsx scripts/generate-article-audio.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts"

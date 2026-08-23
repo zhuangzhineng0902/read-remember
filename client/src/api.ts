@@ -67,6 +67,25 @@ export type Pronunciation = {
   exampleTranslation: string;
 };
 
+export type ArticleAudioConfig = {
+  enabled: boolean;
+  provider: "kokoro";
+  defaultVoice: string;
+  voices: Array<{ id: string; label: string }>;
+  playbackSpeeds: number[];
+};
+
+export type ArticleAudio = {
+  articleId: string;
+  voice: string;
+  voiceLabel: string;
+  format: string;
+  byteSize: number;
+  audioPath: string;
+  audioUrl: string;
+  cached: boolean;
+};
+
 type PronunciationCacheEntry = {
   cachedAt: number;
   value: Pronunciation;
@@ -364,6 +383,32 @@ export const api = {
     return hydrateArticle(
       await request<ApiArticle>(`/articles/${encodeURIComponent(id)}`),
     );
+  },
+
+  getArticleAudioConfig: () =>
+    request<ArticleAudioConfig>("/article-audio/config"),
+
+  async getArticleAudio(id: string, voice: string) {
+    const query = new URLSearchParams({ voice });
+    const value = await request<
+      { ready: false } | ({ ready: true } & Omit<ArticleAudio, "audioUrl">)
+    >(`/articles/${encodeURIComponent(id)}/audio?${query.toString()}`);
+    if (!value.ready) return null;
+    return {
+      ...value,
+      audioUrl: `${API_BASE_URL}${value.audioPath}`,
+    } satisfies ArticleAudio;
+  },
+
+  async ensureArticleAudio(id: string, voice: string) {
+    const value = await request<Omit<ArticleAudio, "audioUrl">>(
+      `/articles/${encodeURIComponent(id)}/audio`,
+      { method: "POST", body: JSON.stringify({ voice }) },
+    );
+    return {
+      ...value,
+      audioUrl: `${API_BASE_URL}${value.audioPath}`,
+    } satisfies ArticleAudio;
   },
 
   getReadingProgress: (id: string) =>

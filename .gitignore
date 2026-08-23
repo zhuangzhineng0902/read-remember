@@ -24,6 +24,8 @@ server/data/*.sqlite-wal
 server/data/*.bak
 server/data/*.db
 server/data/*.zip
+server/data/article-audio/
+server/config/translation.json
 
 # Logs and coverage
 *.log

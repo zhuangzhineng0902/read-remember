@@ -172,6 +172,45 @@ export function createDatabase(filename: string): AppDatabase {
       UNIQUE(source_url, external_id)
     );
 
+    CREATE TABLE IF NOT EXISTS translation_segments (
+      source_hash TEXT NOT NULL,
+      target_language TEXT NOT NULL,
+      segment_kind TEXT NOT NULL CHECK(segment_kind IN ('title', 'paragraph')),
+      source_text TEXT NOT NULL,
+      translated_text TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      translated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(source_hash, target_language)
+    );
+
+    CREATE TABLE IF NOT EXISTS article_translations (
+      article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+      target_language TEXT NOT NULL,
+      source_hash TEXT NOT NULL,
+      translated_title TEXT NOT NULL,
+      translated_paragraphs_json TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      translated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(article_id, target_language)
+    );
+
+    CREATE TABLE IF NOT EXISTS article_audio_cache (
+      article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+      voice TEXT NOT NULL,
+      source_hash TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      format TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      public_token TEXT NOT NULL UNIQUE,
+      byte_size INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(article_id, voice)
+    );
+
     CREATE TABLE IF NOT EXISTS push_batches (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -230,6 +269,9 @@ export function createDatabase(filename: string): AppDatabase {
     CREATE INDEX IF NOT EXISTS idx_daily_auto_push_date ON daily_auto_pushes(delivery_date);
     CREATE INDEX IF NOT EXISTS idx_interest_deliveries_user_date ON interest_deliveries(user_id, delivery_date DESC);
     CREATE INDEX IF NOT EXISTS idx_article_sources_content_hash ON article_sources(content_hash);
+    CREATE INDEX IF NOT EXISTS idx_translation_segments_language ON translation_segments(target_language, translated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_article_translations_language ON article_translations(target_language, translated_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_article_audio_public_token ON article_audio_cache(public_token);
     CREATE INDEX IF NOT EXISTS idx_progress_completed ON article_progress(completed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_answer_states_updated ON article_answer_states(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_reading_states_updated ON article_reading_states(updated_at DESC);

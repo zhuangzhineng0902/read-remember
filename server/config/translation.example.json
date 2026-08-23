@@ -1,0 +1,15 @@
+{
+  "databasePath": "./data/read-remember.sqlite",
+  "baseUrl": "http://127.0.0.1:11434/v1",
+  "apiPath": "/chat/completions",
+  "apiKey": "",
+  "model": "your-translation-model",
+  "targetLanguage": "zh-CN",
+  "batchSize": 8,
+  "concurrency": 2,
+  "timeoutMs": 120000,
+  "maxRetries": 3,
+  "temperature": 0.1,
+  "jsonMode": false,
+  "headers": {}
+}
