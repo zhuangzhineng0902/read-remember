@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ArticleAnswerState,
+  ArticleTimerSettings,
   ExamId,
   HistoryRecord,
   InterestId,
@@ -21,6 +22,7 @@ const KEYS = {
   readerSettings: "rr:reader-settings",
   readingProgress: "rr:reading-progress",
   articleAnswers: "rr:article-answers",
+  articleTimers: "rr:article-timers",
   readerHintSeen: "rr:reader-hint-seen",
   learningSettings: "rr:learning-settings",
   interests: "rr:interests",
@@ -100,6 +102,25 @@ export const storage = {
     );
     states[`${userId}:${articleId}`] = value;
     await AsyncStorage.setItem(KEYS.articleAnswers, JSON.stringify(states));
+  },
+  async getArticleTimerSettings(userId: string, articleId: string) {
+    const settings = await readJson<Record<string, ArticleTimerSettings>>(
+      KEYS.articleTimers,
+      {},
+    );
+    return settings[`${userId}:${articleId}`] ?? null;
+  },
+  async setArticleTimerSettings(
+    userId: string,
+    articleId: string,
+    value: ArticleTimerSettings,
+  ) {
+    const settings = await readJson<Record<string, ArticleTimerSettings>>(
+      KEYS.articleTimers,
+      {},
+    );
+    settings[`${userId}:${articleId}`] = value;
+    await AsyncStorage.setItem(KEYS.articleTimers, JSON.stringify(settings));
   },
   async getReaderHintSeen() {
     return (await AsyncStorage.getItem(KEYS.readerHintSeen)) === "true";

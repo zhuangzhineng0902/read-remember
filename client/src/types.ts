@@ -134,6 +134,14 @@ export type ReaderSettings = {
   columnWidth: "narrow" | "standard" | "wide";
 };
 
+export type ReminderStyle = "mecha-blade";
+
+export type ArticleTimerSettings = {
+  enabled: boolean;
+  durationMinutes: number;
+  reminderStyle: ReminderStyle;
+};
+
 export type LearningSettings = {
   dailyReminderEnabled: boolean;
   reminderTime: string;

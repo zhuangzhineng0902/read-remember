@@ -54,6 +54,7 @@ import {
 } from "react-native-safe-area-context";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { createAudioPlayer, type AudioPlayer } from "expo-audio";
+import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
 import {
   api,
@@ -86,6 +87,7 @@ import {
   AnswerResult,
   Article,
   ArticleAnswerState,
+  ArticleTimerSettings,
   ExamId,
   HistoryRecord,
   InterestCategory,
@@ -95,6 +97,7 @@ import {
   MemoryRating,
   MistakeItem,
   ReaderSettings,
+  ReminderStyle,
   SavedWord,
   UserProfile,
   WordInfo,
@@ -165,6 +168,16 @@ const readerTone = {
   white: { background: "#F7F7F5", paper: "#FFFFFF" },
   green: { background: "#EAF1E8", paper: "#F7FBF5" },
 } as const;
+
+const clampTimerMinutes = (value: number) =>
+  Math.max(1, Math.min(180, Math.round(value || 1)));
+
+const formatCountdown = (seconds: number) => {
+  const safe = Math.max(0, seconds);
+  const minutes = Math.floor(safe / 60);
+  const remainder = safe % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+};
 
 const AnimatedSafeAreaView = Animated.createAnimatedComponent(SafeAreaView);
 
@@ -2357,6 +2370,267 @@ function ArticleNarrationPlayer({ article }: { article: Article }) {
   );
 }
 
+function TimeLimitReminder({
+  visible,
+  reminderStyle,
+  onAddMinute,
+  onDismiss,
+}: {
+  visible: boolean;
+  reminderStyle: ReminderStyle;
+  onAddMinute: () => void;
+  onDismiss: () => void;
+}) {
+  const reducedMotion = useReducedMotion();
+  const entrance = useRef(new Animated.Value(0)).current;
+  const blade = useRef(new Animated.Value(0)).current;
+  const slash = useRef(new Animated.Value(0)).current;
+  const flash = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!visible) return;
+    entrance.setValue(reducedMotion ? 1 : 0);
+    blade.setValue(reducedMotion ? 1 : 0);
+    slash.setValue(reducedMotion ? 1 : 0);
+    flash.setValue(0);
+
+    void Haptics.notificationAsync(
+      Haptics.NotificationFeedbackType.Warning,
+    ).catch(() => undefined);
+
+    let voiceTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      Speech.stop();
+      Speech.speak("You're out of time.", {
+        language: "en-US",
+        rate: 0.68,
+        pitch: 0.55,
+      });
+    }, reducedMotion ? 80 : 760);
+    let impactTimer: ReturnType<typeof setTimeout> | null = null;
+
+    if (!reducedMotion) {
+      Animated.sequence([
+        Animated.parallel([
+          Animated.spring(entrance, {
+            toValue: 1,
+            damping: 13,
+            stiffness: 180,
+            mass: 0.9,
+            useNativeDriver: USE_NATIVE_DRIVER,
+          }),
+          Animated.sequence([
+            Animated.timing(flash, {
+              toValue: 1,
+              duration: 80,
+              useNativeDriver: USE_NATIVE_DRIVER,
+            }),
+            Animated.timing(flash, {
+              toValue: 0,
+              duration: 180,
+              useNativeDriver: USE_NATIVE_DRIVER,
+            }),
+          ]),
+        ]),
+        Animated.delay(160),
+        Animated.parallel([
+          Animated.timing(blade, {
+            toValue: 1,
+            duration: 460,
+            easing: Easing.out(Easing.back(1.25)),
+            useNativeDriver: USE_NATIVE_DRIVER,
+          }),
+          Animated.sequence([
+            Animated.delay(190),
+            Animated.timing(slash, {
+              toValue: 1,
+              duration: 250,
+              easing: Easing.out(Easing.cubic),
+              useNativeDriver: USE_NATIVE_DRIVER,
+            }),
+          ]),
+        ]),
+      ]).start();
+      impactTimer = setTimeout(() => {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
+          () => undefined,
+        );
+      }, 720);
+    }
+
+    return () => {
+      if (voiceTimer) clearTimeout(voiceTimer);
+      if (impactTimer) clearTimeout(impactTimer);
+      voiceTimer = null;
+      impactTimer = null;
+      entrance.stopAnimation();
+      blade.stopAnimation();
+      slash.stopAnimation();
+      flash.stopAnimation();
+      Speech.stop();
+    };
+  }, [blade, entrance, flash, reducedMotion, slash, visible]);
+
+  const close = (action: () => void) => {
+    Speech.stop();
+    action();
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      statusBarTranslucent
+      animationType="none"
+      onRequestClose={() => close(onDismiss)}
+    >
+      <View
+        accessibilityViewIsModal
+        accessibilityLabel="阅读时间已到。You're out of time."
+        style={styles.timeUpRoot}
+      >
+        <Animated.View
+          pointerEvents="none"
+          style={[styles.timeUpFlash, { opacity: flash }]}
+        />
+        <View pointerEvents="none" style={styles.timeUpGrid}>
+          {[0, 1, 2, 3, 4, 5].map((item) => (
+            <View
+              key={item}
+              style={[styles.timeUpScanLine, { top: `${12 + item * 15}%` }]}
+            />
+          ))}
+        </View>
+
+        <Animated.View
+          style={[
+            styles.timeUpContent,
+            {
+              opacity: entrance,
+              transform: [
+                {
+                  scale: entrance.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0.72, 1],
+                  }),
+                },
+                {
+                  translateY: entrance.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [38, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
+          <View style={styles.timeUpCodeRow}>
+            <View style={styles.timeUpCodeDot} />
+            <Text style={styles.timeUpCode}>ALERT // LIMIT-00</Text>
+            <Text style={styles.timeUpStyleTag}>
+              {reminderStyle === "mecha-blade" ? "MECHA BLADE" : "ALERT"}
+            </Text>
+          </View>
+
+          <View style={styles.mechaStage}>
+            <View style={styles.mechaBackGlow} />
+            <View style={styles.mechaUnit}>
+              <View style={styles.mechaFinLeft} />
+              <View style={styles.mechaFinRight} />
+              <View style={styles.mechaHead}>
+                <View style={styles.mechaFace} />
+                <View style={styles.mechaVisor} />
+              </View>
+              <View style={styles.mechaNeck} />
+              <View style={styles.mechaTorso}>
+                <View style={styles.mechaChestLeft} />
+                <View style={styles.mechaChestCore} />
+                <View style={styles.mechaChestRight} />
+              </View>
+              <View style={[styles.mechaShoulder, styles.mechaShoulderLeft]} />
+              <View style={[styles.mechaShoulder, styles.mechaShoulderRight]} />
+            </View>
+            <Animated.View
+              style={[
+                styles.mechaSword,
+                {
+                  transform: [
+                    { translateX: -74 },
+                    {
+                      rotate: blade.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: ["-62deg", "24deg"],
+                      }),
+                    },
+                    {
+                      translateX: blade.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [-22, 34],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            >
+              <View style={styles.mechaSwordBlade} />
+              <View style={styles.mechaSwordGuard} />
+              <View style={styles.mechaSwordHandle} />
+            </Animated.View>
+            <Animated.View
+              style={[
+                styles.mechaSlash,
+                {
+                  opacity: slash.interpolate({
+                    inputRange: [0, 0.15, 0.78, 1],
+                    outputRange: [0, 1, 0.9, 0],
+                  }),
+                  transform: [
+                    { rotate: "-22deg" },
+                    {
+                      translateX: slash.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [-260, 240],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            />
+          </View>
+
+          <Text style={styles.timeUpKicker}>TIME LIMIT EXCEEDED</Text>
+          <Text style={styles.timeUpTitle}>YOU'RE OUT OF TIME.</Text>
+          <Text style={styles.timeUpSubtitle}>本篇阅读时间已用尽</Text>
+
+          <View style={styles.timeUpActions}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => close(onAddMinute)}
+              style={({ pressed }) => [
+                styles.timeUpSecondaryButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Plus size={18} color="#BDEEFF" />
+              <Text style={styles.timeUpSecondaryText}>加 1 分钟</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => close(onDismiss)}
+              style={({ pressed }) => [
+                styles.timeUpPrimaryButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.timeUpPrimaryText}>继续阅读</Text>
+              <ChevronRight size={18} color="#071119" />
+            </Pressable>
+          </View>
+        </Animated.View>
+      </View>
+    </Modal>
+  );
+}
+
 function ReaderScreen({
   userId,
   article,
@@ -2412,6 +2686,7 @@ function ReaderScreen({
   const sequenceBarTransition = useRef(new Animated.Value(0)).current;
   const sequenceBarVisibleRef = useRef(false);
   const closingWordRef = useRef(false);
+  const timerDeadlineRef = useRef<number | null>(null);
   const [readerTab, setReaderTab] = useState<"article" | "answer">("article");
   const [selectedWord, setSelectedWord] = useState<WordInfo | null>(null);
   const [wordAnchor, setWordAnchor] = useState<{
@@ -2441,6 +2716,19 @@ function ReaderScreen({
   const [sequenceBarVisible, setSequenceBarVisible] = useState(false);
   const [restoredOffset, setRestoredOffset] = useState<number | null>(null);
   const [wordCardHeight, setWordCardHeight] = useState(0);
+  const [timerSettings, setTimerSettings] = useState<ArticleTimerSettings>(() => ({
+    enabled: true,
+    durationMinutes: clampTimerMinutes(article.readMinutes),
+    reminderStyle: "mecha-blade",
+  }));
+  const [timerMinutesInput, setTimerMinutesInput] = useState(
+    String(clampTimerMinutes(article.readMinutes)),
+  );
+  const [timerReady, setTimerReady] = useState(false);
+  const [remainingSeconds, setRemainingSeconds] = useState(
+    clampTimerMinutes(article.readMinutes) * 60,
+  );
+  const [timeUpVisible, setTimeUpVisible] = useState(false);
   const isSaved = (word: string) =>
     savedWords.some(
       (item) =>
@@ -2681,6 +2969,63 @@ function ReaderScreen({
 
   useEffect(() => {
     let active = true;
+    setTimerReady(false);
+    storage.getArticleTimerSettings(userId, article.id).then((saved) => {
+      if (!active) return;
+      const durationMinutes = clampTimerMinutes(
+        saved?.durationMinutes ?? article.readMinutes,
+      );
+      const next: ArticleTimerSettings = {
+        enabled: saved?.enabled ?? true,
+        durationMinutes,
+        reminderStyle:
+          saved?.reminderStyle === "mecha-blade"
+            ? saved.reminderStyle
+            : "mecha-blade",
+      };
+      const seconds = durationMinutes * 60;
+      setTimerSettings(next);
+      setTimerMinutesInput(String(durationMinutes));
+      setRemainingSeconds(seconds);
+      timerDeadlineRef.current = next.enabled ? Date.now() + seconds * 1000 : null;
+      setTimerReady(true);
+    });
+    return () => {
+      active = false;
+      timerDeadlineRef.current = null;
+    };
+  }, [article.id, article.readMinutes, userId]);
+
+  useEffect(() => {
+    if (!timerReady || !timerSettings.enabled || remainingSeconds <= 0) {
+      timerDeadlineRef.current = null;
+      return;
+    }
+    if (timeUpVisible) {
+      timerDeadlineRef.current = null;
+      return;
+    }
+    if (!timerDeadlineRef.current) {
+      timerDeadlineRef.current = Date.now() + remainingSeconds * 1000;
+    }
+
+    const tick = () => {
+      const deadline = timerDeadlineRef.current;
+      if (!deadline) return;
+      const next = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setRemainingSeconds(next);
+      if (next === 0) {
+        timerDeadlineRef.current = null;
+        setTimeUpVisible(true);
+      }
+    };
+    tick();
+    const interval = setInterval(tick, 250);
+    return () => clearInterval(interval);
+  }, [remainingSeconds <= 0, timeUpVisible, timerReady, timerSettings.enabled]);
+
+  useEffect(() => {
+    let active = true;
     setAnswersRestored(false);
     if (practiceMode) {
       selectedAnswersRef.current = {};
@@ -2793,6 +3138,69 @@ function ReaderScreen({
     setReaderSettings(next);
     void storage.setReaderSettings(next);
     onChangeReaderSettings(next);
+  };
+
+  const saveTimerSettings = (next: ArticleTimerSettings) => {
+    setTimerSettings(next);
+    void storage.setArticleTimerSettings(userId, article.id, next);
+  };
+
+  const setTimerDuration = (value: number) => {
+    const durationMinutes = clampTimerMinutes(value);
+    const next = { ...timerSettings, durationMinutes };
+    const seconds = durationMinutes * 60;
+    saveTimerSettings(next);
+    setTimerMinutesInput(String(durationMinutes));
+    setRemainingSeconds(seconds);
+    timerDeadlineRef.current = next.enabled ? Date.now() + seconds * 1000 : null;
+    setTimeUpVisible(false);
+  };
+
+  const commitTimerInput = () => {
+    const parsed = Number.parseInt(timerMinutesInput, 10);
+    setTimerDuration(Number.isFinite(parsed) ? parsed : timerSettings.durationMinutes);
+  };
+
+  const toggleArticleTimer = (enabled: boolean) => {
+    const next = { ...timerSettings, enabled };
+    saveTimerSettings(next);
+    if (!enabled) {
+      timerDeadlineRef.current = null;
+      return;
+    }
+    const seconds =
+      remainingSeconds > 0
+        ? remainingSeconds
+        : timerSettings.durationMinutes * 60;
+    setRemainingSeconds(seconds);
+    timerDeadlineRef.current = Date.now() + seconds * 1000;
+  };
+
+  const resetArticleTimer = () => {
+    const seconds = timerSettings.durationMinutes * 60;
+    setRemainingSeconds(seconds);
+    timerDeadlineRef.current = timerSettings.enabled
+      ? Date.now() + seconds * 1000
+      : null;
+    setTimeUpVisible(false);
+  };
+
+  const selectReminderStyle = (reminderStyle: ReminderStyle) => {
+    saveTimerSettings({ ...timerSettings, reminderStyle });
+  };
+
+  const previewTimeUpReminder = () => {
+    setSettingsVisible(false);
+    requestAnimationFrame(() => setTimeUpVisible(true));
+  };
+
+  const addOneMinute = () => {
+    const seconds = Math.max(60, remainingSeconds + 60);
+    setRemainingSeconds(seconds);
+    timerDeadlineRef.current = timerSettings.enabled
+      ? Date.now() + seconds * 1000
+      : null;
+    setTimeUpVisible(false);
   };
 
   const dismissReaderHint = () => {
@@ -3108,6 +3516,62 @@ function ReaderScreen({
           ]}
         />
       </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`本篇限时${timerSettings.enabled ? `，剩余 ${formatCountdown(remainingSeconds)}` : "，已暂停"}`}
+        accessibilityHint="打开限时与提醒风格设置"
+        onPress={() => setSettingsVisible(true)}
+        style={({ pressed }) => [
+          styles.articleTimerBar,
+          timerSettings.enabled &&
+            remainingSeconds > 0 &&
+            remainingSeconds <= 60 &&
+            styles.articleTimerBarUrgent,
+          remainingSeconds === 0 && styles.articleTimerBarExpired,
+          pressed && styles.pressed,
+        ]}
+      >
+        <View style={styles.articleTimerIcon}>
+          <Clock3
+            size={16}
+            color={remainingSeconds <= 60 ? "#D8F7FF" : colors.primary}
+          />
+        </View>
+        <View style={styles.articleTimerCopy}>
+          <Text
+            style={[
+              styles.articleTimerLabel,
+              remainingSeconds <= 60 && styles.articleTimerTextUrgent,
+            ]}
+          >
+            本篇限时 · {timerSettings.durationMinutes} 分钟
+          </Text>
+          <Text
+            style={[
+              styles.articleTimerHint,
+              remainingSeconds <= 60 && styles.articleTimerTextUrgent,
+            ]}
+          >
+            {timerSettings.enabled ? "机甲提醒已待命" : "倒计时已暂停"}
+          </Text>
+        </View>
+        <Text
+          style={[
+            styles.articleTimerValue,
+            remainingSeconds <= 60 && styles.articleTimerTextUrgent,
+          ]}
+        >
+          {timerReady
+            ? timerSettings.enabled
+              ? formatCountdown(remainingSeconds)
+              : "PAUSED"
+            : "--:--"}
+        </Text>
+        <ChevronRight
+          size={16}
+          color={remainingSeconds <= 60 ? "#D8F7FF" : colors.inkMuted}
+        />
+      </Pressable>
       <ScrollView
         ref={scrollRef}
         showsVerticalScrollIndicator={false}
@@ -3763,7 +4227,7 @@ function ReaderScreen({
             <View>
               <Text style={styles.readerSettingsTitle}>阅读设置</Text>
               <Text style={styles.readerSettingsSubtitle}>
-                调整后会自动应用到所有文章
+                排版应用到所有文章，限时仅应用当前文章
               </Text>
             </View>
             <Pressable
@@ -3773,6 +4237,130 @@ function ReaderScreen({
             >
               <X size={20} color={colors.inkMuted} />
             </Pressable>
+          </View>
+
+          <View style={styles.timerSettingCard}>
+            <View style={styles.timerSettingHeader}>
+              <View style={styles.timerSettingHeading}>
+                <View style={styles.timerSettingIcon}>
+                  <Clock3 size={18} color="#9DE8FF" />
+                </View>
+                <View>
+                  <Text style={styles.timerSettingTitle}>本篇限时</Text>
+                  <Text style={styles.timerSettingSubtitle}>
+                    时间到后播放动画与英语语音
+                  </Text>
+                </View>
+              </View>
+              <Switch
+                accessibilityLabel="启用本篇倒计时"
+                value={timerSettings.enabled}
+                onValueChange={toggleArticleTimer}
+                trackColor={{ false: "#394653", true: "#176F89" }}
+                thumbColor={timerSettings.enabled ? "#B9F2FF" : "#AAB2B8"}
+              />
+            </View>
+
+            <View style={styles.timerDurationRow}>
+              <View style={styles.timerInputWrap}>
+                <TextInput
+                  accessibilityLabel="本篇阅读限时分钟数"
+                  value={timerMinutesInput}
+                  onChangeText={(value) =>
+                    setTimerMinutesInput(value.replace(/[^0-9]/g, ""))
+                  }
+                  onBlur={commitTimerInput}
+                  onSubmitEditing={commitTimerInput}
+                  keyboardType="number-pad"
+                  maxLength={3}
+                  selectTextOnFocus
+                  style={styles.timerMinutesInput}
+                />
+                <Text style={styles.timerMinutesUnit}>分钟</Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="重新开始本篇倒计时"
+                onPress={resetArticleTimer}
+                style={({ pressed }) => [
+                  styles.timerResetButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <RotateCcw size={16} color="#BDEEFF" />
+                <Text style={styles.timerResetText}>重新计时</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.timerPresetRow}>
+              {[5, 10, 15, 20].map((minutes) => (
+                <Pressable
+                  key={minutes}
+                  accessibilityRole="radio"
+                  accessibilityState={{
+                    checked: timerSettings.durationMinutes === minutes,
+                  }}
+                  onPress={() => setTimerDuration(minutes)}
+                  style={[
+                    styles.timerPreset,
+                    timerSettings.durationMinutes === minutes &&
+                      styles.timerPresetActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.timerPresetText,
+                      timerSettings.durationMinutes === minutes &&
+                        styles.timerPresetTextActive,
+                    ]}
+                  >
+                    {minutes} min
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={styles.timerStyleLabel}>提醒风格</Text>
+            <Pressable
+              accessibilityRole="radio"
+              accessibilityState={{
+                checked: timerSettings.reminderStyle === "mecha-blade",
+              }}
+              onPress={() => selectReminderStyle("mecha-blade")}
+              style={[
+                styles.timerStyleChoice,
+                timerSettings.reminderStyle === "mecha-blade" &&
+                  styles.timerStyleChoiceActive,
+              ]}
+            >
+              <View style={styles.timerStylePreview}>
+                <View style={styles.timerStyleVisor} />
+                <View style={styles.timerStyleBlade} />
+              </View>
+              <View style={styles.timerStyleCopy}>
+                <Text style={styles.timerStyleTitle}>机甲拔刀</Text>
+                <Text style={styles.timerStyleDescription}>
+                  全屏警报 · 光剑斩击 · 低沉英语语音
+                </Text>
+              </View>
+              <View style={styles.timerStyleSelected}>
+                <Check size={14} color="#071119" />
+              </View>
+            </Pressable>
+            <View style={styles.timerPreviewRow}>
+              <Text style={styles.timerFutureStyles}>更多提醒风格即将加入</Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={previewTimeUpReminder}
+                style={({ pressed }) => [
+                  styles.timerPreviewButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Play size={14} color="#071119" fill="#071119" />
+                <Text style={styles.timerPreviewText}>预览提醒</Text>
+              </Pressable>
+            </View>
           </View>
 
           <View style={styles.readerSettingGroup}>
@@ -3979,6 +4567,12 @@ function ReaderScreen({
           </View>
         </ScrollView>
       </Modal>
+      <TimeLimitReminder
+        visible={timeUpVisible}
+        reminderStyle={timerSettings.reminderStyle}
+        onAddMinute={addOneMinute}
+        onDismiss={() => setTimeUpVisible(false)}
+      />
       <NativeNoticeModal
         notice={readerNotice}
         primaryLabel={
@@ -7137,6 +7731,44 @@ const styles = StyleSheet.create({
     height: "100%",
     backgroundColor: colors.primary,
   },
+  articleTimerBar: {
+    minHeight: 52,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#EEF7F4",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#D6E9E3",
+  },
+  articleTimerBarUrgent: {
+    backgroundColor: "#102B38",
+    borderBottomColor: "#1D5268",
+  },
+  articleTimerBarExpired: {
+    backgroundColor: "#3A1720",
+    borderBottomColor: "#702A38",
+  },
+  articleTimerIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(30,98,88,0.1)",
+  },
+  articleTimerCopy: { flex: 1 },
+  articleTimerLabel: { color: colors.ink, fontSize: 11, fontWeight: "800" },
+  articleTimerHint: { color: colors.inkMuted, fontSize: 9, marginTop: 2 },
+  articleTimerValue: {
+    color: colors.primaryDark,
+    fontSize: 17,
+    fontWeight: "900",
+    letterSpacing: 1.3,
+    fontVariant: ["tabular-nums"],
+  },
+  articleTimerTextUrgent: { color: "#D8F7FF" },
   readerSequenceBar: {
     position: "absolute",
     bottom: 8,
@@ -7795,6 +8427,166 @@ const styles = StyleSheet.create({
   },
   readerSettingsTitle: { color: colors.ink, fontSize: 22, fontWeight: "800" },
   readerSettingsSubtitle: { color: colors.inkMuted, fontSize: 12, marginTop: 5 },
+  timerSettingCard: {
+    borderRadius: radius.lg,
+    padding: 16,
+    backgroundColor: "#0B1822",
+    borderWidth: 1,
+    borderColor: "#1A4D61",
+    overflow: "hidden",
+  },
+  timerSettingHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  timerSettingHeading: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  timerSettingIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#123040",
+    borderWidth: 1,
+    borderColor: "#245C72",
+  },
+  timerSettingTitle: { color: "#F2FCFF", fontSize: 15, fontWeight: "900" },
+  timerSettingSubtitle: { color: "#7DA7B6", fontSize: 10, marginTop: 3 },
+  timerDurationRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 16,
+  },
+  timerInputWrap: {
+    flex: 1,
+    height: 48,
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: radius.sm,
+    paddingHorizontal: 13,
+    backgroundColor: "#081018",
+    borderWidth: 1,
+    borderColor: "#285166",
+  },
+  timerMinutesInput: {
+    flex: 1,
+    color: "#BDEEFF",
+    fontSize: 21,
+    fontWeight: "900",
+    paddingVertical: 0,
+  },
+  timerMinutesUnit: { color: "#6F9AAA", fontSize: 11, fontWeight: "700" },
+  timerResetButton: {
+    height: 48,
+    paddingHorizontal: 13,
+    borderRadius: radius.sm,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: "#123040",
+    borderWidth: 1,
+    borderColor: "#285166",
+  },
+  timerResetText: { color: "#BDEEFF", fontSize: 11, fontWeight: "800" },
+  timerPresetRow: { flexDirection: "row", gap: 7, marginTop: 9 },
+  timerPreset: {
+    flex: 1,
+    height: 34,
+    borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#111F29",
+    borderWidth: 1,
+    borderColor: "#263946",
+  },
+  timerPresetActive: { backgroundColor: "#B9F2FF", borderColor: "#B9F2FF" },
+  timerPresetText: { color: "#82A3B0", fontSize: 10, fontWeight: "800" },
+  timerPresetTextActive: { color: "#071119" },
+  timerStyleLabel: {
+    color: "#7DA7B6",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 1.1,
+    marginTop: 18,
+    marginBottom: 8,
+  },
+  timerStyleChoice: {
+    minHeight: 72,
+    borderRadius: radius.md,
+    padding: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+    backgroundColor: "#0D202B",
+    borderWidth: 1,
+    borderColor: "#264453",
+  },
+  timerStyleChoiceActive: { borderColor: "#74DDF5" },
+  timerStylePreview: {
+    width: 54,
+    height: 50,
+    borderRadius: 12,
+    backgroundColor: "#061019",
+    borderWidth: 1,
+    borderColor: "#28566A",
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  timerStyleVisor: {
+    width: 24,
+    height: 9,
+    borderRadius: 3,
+    backgroundColor: "#FF445D",
+    borderWidth: 2,
+    borderColor: "#DCEEF2",
+  },
+  timerStyleBlade: {
+    position: "absolute",
+    width: 62,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: "#9DE8FF",
+    transform: [{ rotate: "-28deg" }, { translateX: 12 }],
+  },
+  timerStyleCopy: { flex: 1 },
+  timerStyleTitle: { color: "#F2FCFF", fontSize: 13, fontWeight: "900" },
+  timerStyleDescription: { color: "#7293A0", fontSize: 9, marginTop: 4 },
+  timerStyleSelected: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#B9F2FF",
+  },
+  timerPreviewRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginTop: 10,
+  },
+  timerFutureStyles: { color: "#587886", fontSize: 9 },
+  timerPreviewButton: {
+    height: 34,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#B9F2FF",
+  },
+  timerPreviewText: { color: "#071119", fontSize: 10, fontWeight: "900" },
   readerSettingGroup: { marginTop: 18 },
   readerSettingGroupCompact: { flex: 1, minWidth: 220 },
   readerSettingsGrid: {
@@ -7898,6 +8690,286 @@ const styles = StyleSheet.create({
     backgroundColor: "#F4F7F5",
   },
   readerSettingTipText: { color: colors.inkMuted, fontSize: 11, lineHeight: 18 },
+  timeUpRoot: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 28,
+    backgroundColor: "rgba(2,7,12,0.98)",
+    overflow: "hidden",
+  },
+  timeUpFlash: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#B9F2FF",
+  },
+  timeUpGrid: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: "hidden",
+  },
+  timeUpScanLine: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: "rgba(99,218,246,0.08)",
+  },
+  timeUpContent: {
+    width: "100%",
+    maxWidth: 560,
+    alignItems: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+    borderRadius: 28,
+    backgroundColor: "rgba(7,17,25,0.94)",
+    borderWidth: 1,
+    borderColor: "#27657A",
+  },
+  timeUpCodeRow: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+  timeUpCodeDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: "#FF3755",
+  },
+  timeUpCode: {
+    color: "#FF7387",
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 1.5,
+  },
+  timeUpStyleTag: {
+    marginLeft: "auto",
+    color: "#72DDF5",
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 1.4,
+  },
+  mechaStage: {
+    width: "100%",
+    height: 238,
+    marginTop: 6,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  mechaBackGlow: {
+    position: "absolute",
+    width: 190,
+    height: 190,
+    borderRadius: 95,
+    backgroundColor: "rgba(36,148,177,0.2)",
+    borderWidth: 1,
+    borderColor: "rgba(91,218,246,0.32)",
+  },
+  mechaUnit: {
+    position: "absolute",
+    top: 42,
+    left: "50%",
+    width: 150,
+    height: 174,
+    marginLeft: -75,
+    alignItems: "center",
+  },
+  mechaFinLeft: {
+    position: "absolute",
+    top: -22,
+    left: 46,
+    width: 8,
+    height: 58,
+    borderRadius: 2,
+    backgroundColor: "#F6D548",
+    transform: [{ rotate: "-42deg" }],
+  },
+  mechaFinRight: {
+    position: "absolute",
+    top: -22,
+    right: 46,
+    width: 8,
+    height: 58,
+    borderRadius: 2,
+    backgroundColor: "#F6D548",
+    transform: [{ rotate: "42deg" }],
+  },
+  mechaHead: {
+    width: 58,
+    height: 54,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#DDE8EC",
+    borderWidth: 4,
+    borderColor: "#718895",
+    zIndex: 3,
+  },
+  mechaFace: {
+    position: "absolute",
+    bottom: -5,
+    width: 26,
+    height: 22,
+    borderRadius: 4,
+    backgroundColor: "#AABCC4",
+    borderWidth: 2,
+    borderColor: "#E7F0F2",
+  },
+  mechaVisor: {
+    width: 38,
+    height: 11,
+    borderRadius: 3,
+    backgroundColor: "#FF3755",
+    borderWidth: 2,
+    borderColor: "#263944",
+  },
+  mechaNeck: {
+    width: 28,
+    height: 16,
+    marginTop: -2,
+    backgroundColor: "#546B77",
+  },
+  mechaTorso: {
+    width: 108,
+    height: 88,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "center",
+    paddingTop: 10,
+    borderRadius: 14,
+    backgroundColor: "#D9E6EA",
+    borderWidth: 4,
+    borderColor: "#607782",
+    overflow: "hidden",
+  },
+  mechaChestLeft: {
+    width: 40,
+    height: 52,
+    backgroundColor: "#235E9C",
+    transform: [{ skewY: "8deg" }],
+  },
+  mechaChestCore: {
+    width: 20,
+    height: 62,
+    backgroundColor: "#D44652",
+    borderLeftWidth: 4,
+    borderRightWidth: 4,
+    borderColor: "#F1D351",
+  },
+  mechaChestRight: {
+    width: 40,
+    height: 52,
+    backgroundColor: "#235E9C",
+    transform: [{ skewY: "-8deg" }],
+  },
+  mechaShoulder: {
+    position: "absolute",
+    top: 66,
+    width: 44,
+    height: 54,
+    borderRadius: 10,
+    backgroundColor: "#D9E6EA",
+    borderWidth: 4,
+    borderColor: "#607782",
+  },
+  mechaShoulderLeft: { left: -15, transform: [{ rotate: "8deg" }] },
+  mechaShoulderRight: { right: -15, transform: [{ rotate: "-8deg" }] },
+  mechaSword: {
+    position: "absolute",
+    top: 112,
+    left: "50%",
+    width: 250,
+    height: 28,
+    flexDirection: "row",
+    alignItems: "center",
+    zIndex: 8,
+  },
+  mechaSwordBlade: {
+    width: 190,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#B9F2FF",
+    borderWidth: 2,
+    borderColor: "#F4FDFF",
+  },
+  mechaSwordGuard: {
+    width: 14,
+    height: 25,
+    borderRadius: 4,
+    backgroundColor: "#F1D351",
+  },
+  mechaSwordHandle: {
+    width: 42,
+    height: 11,
+    borderRadius: 4,
+    backgroundColor: "#536876",
+    borderWidth: 2,
+    borderColor: "#A8BAC2",
+  },
+  mechaSlash: {
+    position: "absolute",
+    top: 110,
+    left: "50%",
+    width: 620,
+    height: 5,
+    marginLeft: -310,
+    borderRadius: 4,
+    backgroundColor: "#D6FAFF",
+    zIndex: 12,
+  },
+  timeUpKicker: {
+    color: "#FF536D",
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 2.8,
+  },
+  timeUpTitle: {
+    color: "#F1FCFF",
+    fontSize: 28,
+    lineHeight: 35,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+    textAlign: "center",
+    marginTop: 8,
+  },
+  timeUpSubtitle: {
+    color: "#7FA5B3",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 6,
+  },
+  timeUpActions: {
+    width: "100%",
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 22,
+  },
+  timeUpSecondaryButton: {
+    flex: 1,
+    minHeight: 50,
+    borderRadius: 15,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderColor: "#31687D",
+    backgroundColor: "#102C39",
+  },
+  timeUpSecondaryText: { color: "#BDEEFF", fontSize: 12, fontWeight: "900" },
+  timeUpPrimaryButton: {
+    flex: 1,
+    minHeight: 50,
+    borderRadius: 15,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: "#B9F2FF",
+  },
+  timeUpPrimaryText: { color: "#071119", fontSize: 12, fontWeight: "900" },
   confirmModalRoot: {
     flex: 1,
     alignItems: "center",
