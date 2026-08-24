@@ -176,7 +176,7 @@ npm run translate:articles -- \
   --model your-custom-model --limit 10
 ```
 
-翻译段缓存保存在 `translation_segments`，组装后的文章译文保存在 `article_translations`。模型接口返回 `usage` 时，脚本会输出真实输入、输出和总 Token；否则输出待翻译英文字符数及输入 Token 估算。执行 `npm run translate:articles -- --help` 可以查看全部参数。
+翻译段缓存保存在 `translation_segments`，组装后的文章译文保存在 `article_translations`。客户端通过受登录保护的 `GET /api/v1/articles/:id/translation?language=zh-CN` 获取已推送文章的整篇译文；没有生成译文时接口返回 `data: null`。模型接口返回 `usage` 时，脚本会输出真实输入、输出和总 Token；否则输出待翻译英文字符数及输入 Token 估算。执行 `npm run translate:articles -- --help` 可以查看全部参数。
 
 运营后台的手动推送支持按考试分类、文章主题类型及关键词筛选题库；切换筛选会清除不再可见的文章选择，避免误推。
 

@@ -393,6 +393,43 @@ test("daily delivery is idempotent and never repeats across dates", async () => 
   assert.equal(new Set(allIds).size, 6);
 });
 
+test("translated article content is returned when materialized", async () => {
+  const missing = await request(
+    `/api/v1/articles/${firstArticleId}/translation`,
+  );
+  assert.equal(missing.status, 200);
+  assert.equal((await missing.json()).data, null);
+
+  db.prepare(
+    `INSERT INTO article_translations(
+      article_id, target_language, source_hash, translated_title,
+      translated_paragraphs_json, provider, model
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    firstArticleId,
+    "zh-CN",
+    "test-source-hash",
+    "测试中文标题",
+    JSON.stringify(["第一段中文译文。", "第二段中文译文。"]),
+    "http://translation.test/v1",
+    "test-translator",
+  );
+
+  const response = await request(
+    `/api/v1/articles/${firstArticleId}/translation`,
+  );
+  assert.equal(response.status, 200);
+  const translation = (await response.json()).data;
+  assert.equal(translation.articleId, firstArticleId);
+  assert.equal(translation.targetLanguage, "zh-CN");
+  assert.equal(translation.title, "测试中文标题");
+  assert.deepEqual(translation.paragraphs, [
+    "第一段中文译文。",
+    "第二段中文译文。",
+  ]);
+  assert.equal(translation.model, "test-translator");
+});
+
 test("custom daily goal immediately replenishes today's target articles", async () => {
   await request("/api/v1/users/me/exam", {
     method: "PATCH",

@@ -62,6 +62,16 @@ export type Article = {
   questions: Question[];
 };
 
+export type ArticleTranslation = {
+  articleId: string;
+  targetLanguage: string;
+  title: string;
+  paragraphs: string[];
+  provider: string;
+  model: string;
+  translatedAt: string;
+};
+
 export type WordInfo = {
   word: string;
   phonetic: string;

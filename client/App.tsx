@@ -33,6 +33,7 @@ import {
   History as HistoryIcon,
   Home,
   Library,
+  Languages,
   Menu,
   Minus,
   Pause,
@@ -87,6 +88,7 @@ import {
   AnswerResult,
   Article,
   ArticleAnswerState,
+  ArticleTranslation,
   ArticleTimerSettings,
   ExamId,
   HistoryRecord,
@@ -2687,7 +2689,10 @@ function ReaderScreen({
   const sequenceBarVisibleRef = useRef(false);
   const closingWordRef = useRef(false);
   const timerDeadlineRef = useRef<number | null>(null);
-  const [readerTab, setReaderTab] = useState<"article" | "answer">("article");
+  const translationRequestRef = useRef(0);
+  const [readerTab, setReaderTab] = useState<
+    "article" | "translation" | "answer"
+  >("article");
   const [selectedWord, setSelectedWord] = useState<WordInfo | null>(null);
   const [wordAnchor, setWordAnchor] = useState<{
     x: number;
@@ -2729,6 +2734,11 @@ function ReaderScreen({
     clampTimerMinutes(article.readMinutes) * 60,
   );
   const [timeUpVisible, setTimeUpVisible] = useState(false);
+  const [articleTranslation, setArticleTranslation] = useState<
+    ArticleTranslation | null | undefined
+  >(undefined);
+  const [translationLoading, setTranslationLoading] = useState(false);
+  const [translationError, setTranslationError] = useState<string | null>(null);
   const isSaved = (word: string) =>
     savedWords.some(
       (item) =>
@@ -2898,7 +2908,8 @@ function ReaderScreen({
   }, [reducedMotion, sequenceBarTransition, sequenceBarVisible]);
 
   useEffect(() => {
-    const target = readerTab === "article" ? 0 : 1;
+    const target =
+      readerTab === "article" ? 0 : readerTab === "translation" ? 1 : 2;
     if (reducedMotion) {
       tabIndicator.setValue(target);
       tabContentTransition.setValue(1);
@@ -3333,6 +3344,63 @@ function ReaderScreen({
     }).start(finish);
   };
 
+  const loadArticleTranslation = async (force = false) => {
+    if (!force && (translationLoading || articleTranslation !== undefined)) {
+      return;
+    }
+    const requestId = ++translationRequestRef.current;
+    setTranslationLoading(true);
+    setTranslationError(null);
+    try {
+      const translation = await api.getArticleTranslation(article.id);
+      if (requestId === translationRequestRef.current) {
+        setArticleTranslation(translation);
+      }
+    } catch (error) {
+      if (requestId === translationRequestRef.current) {
+        setArticleTranslation(null);
+        setTranslationError(
+          error instanceof Error ? error.message : "译文加载失败，请稍后重试",
+        );
+      }
+    } finally {
+      if (requestId === translationRequestRef.current) {
+        setTranslationLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    translationRequestRef.current += 1;
+    setArticleTranslation(undefined);
+    setTranslationLoading(false);
+    setTranslationError(null);
+    setReaderTab((current) =>
+      current === "translation" ? "article" : current,
+    );
+  }, [article.id]);
+
+  const openTranslation = () => {
+    if (readerTab === "article") {
+      persistReadingState(scrollOffsetRef.current, scrollProgressRef.current);
+    }
+    setReaderTab("translation");
+    void loadArticleTranslation();
+    requestAnimationFrame(() =>
+      scrollRef.current?.scrollTo({ y: 0, animated: true }),
+    );
+  };
+
+  const openOriginalArticle = () => {
+    setReaderTab("article");
+    requestAnimationFrame(() =>
+      scrollRef.current?.scrollTo({
+        y: scrollOffsetRef.current,
+        animated: true,
+      }),
+    );
+  };
+
   const openAnswers = async () => {
     if (submitted) {
       setReaderTab("answer");
@@ -3452,8 +3520,8 @@ function ReaderScreen({
                 transform: [
                   {
                     translateX: tabIndicator.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0, 76],
+                      inputRange: [0, 1, 2],
+                      outputRange: [0, 68, 136],
                     }),
                   },
                 ],
@@ -3464,7 +3532,7 @@ function ReaderScreen({
             accessibilityRole="tab"
             accessibilityState={{ selected: readerTab === "article" }}
             aria-selected={readerTab === "article"}
-            onPress={() => setReaderTab("article")}
+            onPress={openOriginalArticle}
             style={({ pressed }) => [
               styles.readerTab,
               pressed && styles.readerTabPressed,
@@ -3476,7 +3544,26 @@ function ReaderScreen({
                 readerTab === "article" && styles.readerTabTextActive,
               ]}
             >
-              文章
+              原文
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="tab"
+            accessibilityState={{ selected: readerTab === "translation" }}
+            aria-selected={readerTab === "translation"}
+            onPress={openTranslation}
+            style={({ pressed }) => [
+              styles.readerTab,
+              pressed && styles.readerTabPressed,
+            ]}
+          >
+            <Text
+              style={[
+                styles.readerTabText,
+                readerTab === "translation" && styles.readerTabTextActive,
+              ]}
+            >
+              中文译文
             </Text>
           </Pressable>
           <Pressable
@@ -3495,7 +3582,7 @@ function ReaderScreen({
                 readerTab === "answer" && styles.readerTabTextActive,
               ]}
             >
-              答案解析
+              解析
             </Text>
           </Pressable>
         </View>
@@ -3604,6 +3691,7 @@ function ReaderScreen({
             sequenceBarVisibleRef.current = shouldShowSequenceBar;
             setSequenceBarVisible(shouldShowSequenceBar);
           }
+          if (readerTab !== "article") return;
           const ratio = Math.max(0, Math.min(1, offsetY / maxOffset));
           scrollOffsetRef.current = offsetY;
           scrollProgressRef.current = ratio;
@@ -3628,14 +3716,18 @@ function ReaderScreen({
         >
           <View style={styles.readerHeading}>
             <Text style={styles.readerEyebrow}>
-              {article.contentKind === "interest"
-                ? `${getInterestCategory(article.interestId)?.emoji ?? "✨"} ${getInterestCategory(article.interestId)?.name ?? "兴趣阅读"}${article.seriesTitle ? ` · 第 ${article.episodeNumber} 章` : ""}`
-                : `${article.eyebrow} · ${article.year}`}
+              {readerTab === "translation"
+                ? "中文译文 · FULL TRANSLATION"
+                : article.contentKind === "interest"
+                  ? `${getInterestCategory(article.interestId)?.emoji ?? "✨"} ${getInterestCategory(article.interestId)?.name ?? "兴趣阅读"}${article.seriesTitle ? ` · 第 ${article.episodeNumber} 章` : ""}`
+                  : `${article.eyebrow} · ${article.year}`}
             </Text>
             <Text
               style={[styles.readerTitle, width < 480 && styles.readerTitleMobile]}
             >
-              {article.title.split(/(\s+)/).map((token, index) => {
+              {readerTab === "translation" && articleTranslation ? (
+                articleTranslation.title
+              ) : article.title.split(/(\s+)/).map((token, index) => {
                 if (/^\s+$/.test(token)) return token;
                 const clean = token.toLowerCase().replace(/[^a-z'-]/g, "");
                 const marked = clean && isSaved(clean);
@@ -3667,16 +3759,22 @@ function ReaderScreen({
             </Text>
             <View style={styles.readerMeta}>
               <Text style={styles.readerMetaText}>
-                {article.contentKind === "interest"
-                  ? "兴趣分级阅读"
-                  : getExam(article.examId).name}
+                {readerTab === "translation"
+                  ? "整篇中文译文"
+                  : article.contentKind === "interest"
+                    ? "兴趣分级阅读"
+                    : getExam(article.examId).name}
               </Text>
               <View style={styles.metaDivider} />
               <Text style={styles.readerMetaText}>
-                约 {article.readMinutes} 分钟
+                {readerTab === "translation" && articleTranslation
+                  ? `共 ${articleTranslation.paragraphs.length} 段`
+                  : `约 ${article.readMinutes} 分钟`}
               </Text>
             </View>
-            <ArticleNarrationPlayer key={article.id} article={article} />
+            {readerTab !== "translation" && (
+              <ArticleNarrationPlayer key={article.id} article={article} />
+            )}
           </View>
 
           <Animated.View
@@ -3892,6 +3990,111 @@ function ReaderScreen({
                 </Text>
                 <ChevronRight color="#fff" size={19} />
               </Pressable>
+              </View>
+            ) : readerTab === "translation" ? (
+              <View style={styles.articleTranslationView}>
+                {translationLoading || articleTranslation === undefined ? (
+                  <View style={styles.translationStateCard}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                    <Text style={styles.translationStateTitle}>
+                      正在读取整篇译文
+                    </Text>
+                    <Text style={styles.translationStateText}>
+                      正在从文章翻译数据库加载中文内容…
+                    </Text>
+                  </View>
+                ) : translationError ? (
+                  <View style={styles.translationStateCard}>
+                    <View style={styles.translationStateIconError}>
+                      <X size={20} color={colors.danger} />
+                    </View>
+                    <Text style={styles.translationStateTitle}>译文加载失败</Text>
+                    <Text style={styles.translationStateText}>
+                      {translationError}
+                    </Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => void loadArticleTranslation(true)}
+                      style={styles.translationRetryButton}
+                    >
+                      <RotateCcw size={15} color="#fff" />
+                      <Text style={styles.translationRetryText}>重新加载</Text>
+                    </Pressable>
+                  </View>
+                ) : articleTranslation === null ? (
+                  <View style={styles.translationStateCard}>
+                    <View style={styles.translationStateIcon}>
+                      <Languages size={22} color={colors.primary} />
+                    </View>
+                    <Text style={styles.translationStateTitle}>
+                      这篇文章暂无中文译文
+                    </Text>
+                    <Text style={styles.translationStateText}>
+                      数据库中还没有这篇文章的完整译文。运行文章翻译脚本后，点击下方按钮即可查看。
+                    </Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => void loadArticleTranslation(true)}
+                      style={styles.translationRetryButton}
+                    >
+                      <RotateCcw size={15} color="#fff" />
+                      <Text style={styles.translationRetryText}>重新检查译文</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <>
+                    <View style={styles.translationNoticeCard}>
+                      <View style={styles.translationNoticeIcon}>
+                        <Languages size={18} color={colors.primary} />
+                      </View>
+                      <View style={styles.flexOne}>
+                        <Text style={styles.translationNoticeTitle}>整篇中文译文</Text>
+                        <Text style={styles.translationNoticeText}>
+                          译文已按原文段落排列，建议先读英文，再用中文核对理解。
+                        </Text>
+                      </View>
+                    </View>
+                    {articleTranslation.paragraphs.map((paragraph, index) => (
+                      <View
+                        key={`${article.id}-translation-${index}`}
+                        style={styles.translatedParagraphBlock}
+                      >
+                        <Text style={styles.translatedParagraphNumber}>
+                          {String(index + 1).padStart(2, "0")}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.translatedParagraph,
+                            {
+                              fontSize: 17 * readerSettings.fontScale,
+                              lineHeight:
+                                30 *
+                                readerSettings.fontScale *
+                                lineSpacingMultiplier,
+                            },
+                          ]}
+                        >
+                          {paragraph}
+                        </Text>
+                      </View>
+                    ))}
+                    <View style={styles.translationFooter}>
+                      <Text style={styles.translationFooterText}>
+                        机器翻译内容仅供英语学习参考。如有歧义，请以英文原文为准。
+                      </Text>
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={openOriginalArticle}
+                        style={styles.translationOriginalButton}
+                      >
+                        <BookOpen size={15} color={colors.primary} />
+                        <Text style={styles.translationOriginalButtonText}>
+                          返回英文原文
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </>
+                )}
               </View>
             ) : (
               <View style={styles.questions}>
@@ -7696,13 +7899,13 @@ const styles = StyleSheet.create({
     left: 3,
     top: 3,
     bottom: 3,
-    width: 76,
+    width: 68,
     borderRadius: 9,
     backgroundColor: colors.surface,
     ...shadows.card,
   },
   readerTab: {
-    width: 76,
+    width: 68,
     height: 44,
     alignItems: "center",
     justifyContent: "center",
@@ -8037,6 +8240,146 @@ const styles = StyleSheet.create({
       android: "serif",
       default: "Georgia",
     }),
+  },
+  articleTranslationView: { paddingTop: 2 },
+  translationStateCard: {
+    minHeight: 250,
+    marginTop: 20,
+    padding: 24,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: "#D9E8E3",
+    backgroundColor: "#F4F8F6",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  translationStateIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: colors.primarySoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  translationStateIconError: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: "#FFF0ED",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  translationStateTitle: {
+    marginTop: 14,
+    color: colors.ink,
+    fontSize: 18,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  translationStateText: {
+    maxWidth: 360,
+    marginTop: 8,
+    color: colors.inkMuted,
+    fontSize: 12,
+    lineHeight: 20,
+    textAlign: "center",
+  },
+  translationRetryButton: {
+    minHeight: 42,
+    marginTop: 18,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+  },
+  translationRetryText: { color: "#fff", fontSize: 12, fontWeight: "800" },
+  translationNoticeCard: {
+    marginTop: 20,
+    padding: 14,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: "#D2E5DF",
+    backgroundColor: "#EAF4F1",
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 11,
+  },
+  translationNoticeIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: colors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  translationNoticeTitle: {
+    color: colors.primaryDark,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  translationNoticeText: {
+    marginTop: 4,
+    color: colors.inkMuted,
+    fontSize: 11,
+    lineHeight: 18,
+  },
+  translatedParagraphBlock: {
+    marginTop: 25,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 14,
+  },
+  translatedParagraphNumber: {
+    width: 26,
+    marginTop: 5,
+    color: colors.primary,
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 1,
+  },
+  translatedParagraph: {
+    flex: 1,
+    color: "#26332F",
+    fontFamily: Platform.select({
+      ios: "PingFang SC",
+      android: "sans-serif",
+      default: "system-ui",
+    }),
+  },
+  translationFooter: {
+    marginTop: 30,
+    marginBottom: 10,
+    paddingTop: 18,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+    alignItems: "center",
+  },
+  translationFooterText: {
+    color: colors.inkMuted,
+    fontSize: 10,
+    lineHeight: 17,
+    textAlign: "center",
+  },
+  translationOriginalButton: {
+    minHeight: 42,
+    marginTop: 14,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#C9DDD7",
+    backgroundColor: colors.surface,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+  },
+  translationOriginalButtonText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: "800",
   },
   interactiveWord: {},
   webInteractiveWord: {

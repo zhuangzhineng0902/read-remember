@@ -5,6 +5,7 @@ import {
   AnswerResult,
   Article,
   ArticleAnswerState,
+  ArticleTranslation,
   ExamId,
   HistoryRecord,
   InterestCategory,
@@ -384,6 +385,11 @@ export const api = {
       await request<ApiArticle>(`/articles/${encodeURIComponent(id)}`),
     );
   },
+
+  getArticleTranslation: (id: string, language = "zh-CN") =>
+    request<ArticleTranslation | null>(
+      `/articles/${encodeURIComponent(id)}/translation?${new URLSearchParams({ language }).toString()}`,
+    ),
 
   getArticleAudioConfig: () =>
     request<ArticleAudioConfig>("/article-audio/config"),

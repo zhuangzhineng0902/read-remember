@@ -21,7 +21,7 @@ npm run dev
 
 单词释义、音标和词性由服务端 ECDICT SQLite 本地查询，不依赖在线翻译服务。词库体积较大，不提交到 Git；首次运行 `npm run setup:ecdict` 即可初始化。
 
-服务端还提供 `npm run translate:articles` 批量翻译脚本，支持自定义 OpenAI 兼容模型、本地或云端 Base URL、模型名称、请求路径与请求头，并通过段落哈希去重和断点续跑减少 Token 消耗。配置及使用方式见服务端 README。
+服务端还提供 `npm run translate:articles` 批量翻译脚本，支持自定义 OpenAI 兼容模型、本地或云端 Base URL、模型名称、请求路径与请求头，并通过段落哈希去重和断点续跑减少 Token 消耗。生成译文后，用户可在阅读页通过“中文译文”标签查看按原文段落排列的整篇翻译。配置及使用方式见服务端 README。
 
 文章页已支持 Kokoro 整篇朗读。首次播放按文章和音色生成音频，服务端把缓存元数据写入 SQLite、音频写入 `server/data/article-audio/`；再次播放直接命中缓存，客户端可在不重复生成音频的情况下切换 0.8x、1x、1.2x。启动 Kokoro-FastAPI 并配置 `KOKORO_BASE_URL` 后即可启用，具体配置见 [server/README.md](./server/README.md#kokoro-整篇朗读与音频缓存)。
 

@@ -16,6 +16,16 @@ export type ArticleRow = {
   questionsJson: string;
 };
 
+export type ArticleTranslationRow = {
+  articleId: string;
+  targetLanguage: string;
+  title: string;
+  paragraphsJson: string;
+  provider: string;
+  model: string;
+  translatedAt: string;
+};
+
 export const articleSelect = `
   a.id,
   a.exam_id AS examId,
@@ -68,5 +78,17 @@ export function serializeArticleSummary(row: ArticleRow) {
     interestId: row.interestId,
     seriesTitle: row.seriesTitle,
     episodeNumber: row.episodeNumber,
+  };
+}
+
+export function serializeArticleTranslation(row: ArticleTranslationRow) {
+  return {
+    articleId: row.articleId,
+    targetLanguage: row.targetLanguage,
+    title: row.title,
+    paragraphs: JSON.parse(row.paragraphsJson) as string[],
+    provider: row.provider,
+    model: row.model,
+    translatedAt: row.translatedAt,
   };
 }

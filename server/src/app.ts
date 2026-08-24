@@ -19,7 +19,9 @@ import {
   articleSelect,
   serializeArticle,
   serializeArticleSummary,
+  serializeArticleTranslation,
   type ArticleRow,
+  type ArticleTranslationRow,
 } from "./serializers";
 import type {
   InterestId,
@@ -975,6 +977,34 @@ export function createApp(
     const row = articleFromId(db, req.params.id);
     if (!row) throw new ApiError(404, "ARTICLE_NOT_FOUND", "文章不存在");
     res.json({ data: serializeArticle(row) });
+  });
+
+  authenticated.get("/articles/:id/translation", (req, res) => {
+    const user = currentUser(res);
+    if (!hasArticleAccess(db, user.id, req.params.id)) {
+      throw new ApiError(403, "ARTICLE_NOT_DELIVERED", "该文章尚未推送给当前用户");
+    }
+    const query = parse(
+      z.object({
+        language: z
+          .string()
+          .trim()
+          .regex(/^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$/)
+          .default("zh-CN"),
+      }),
+      req.query,
+    );
+    const row = db
+      .prepare(
+        `SELECT article_id AS articleId, target_language AS targetLanguage,
+          translated_title AS title,
+          translated_paragraphs_json AS paragraphsJson,
+          provider, model, translated_at AS translatedAt
+         FROM article_translations
+         WHERE article_id = ? AND target_language = ?`,
+      )
+      .get(req.params.id, query.language) as ArticleTranslationRow | undefined;
+    res.json({ data: row ? serializeArticleTranslation(row) : null });
   });
 
   const articleAudioVoiceQuery = z.object({
