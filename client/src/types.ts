@@ -144,7 +144,7 @@ export type ReaderSettings = {
   columnWidth: "narrow" | "standard" | "wide";
 };
 
-export type ReminderStyle = "mecha-blade";
+export type ReminderStyle = "mecha-blade" | "galactica";
 
 export type ArticleTimerSettings = {
   enabled: boolean;

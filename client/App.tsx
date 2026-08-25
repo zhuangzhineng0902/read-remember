@@ -55,6 +55,7 @@ import {
 } from "react-native-safe-area-context";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { createAudioPlayer, type AudioPlayer } from "expo-audio";
+import { useVideoPlayer, VideoView } from "expo-video";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
 import {
@@ -2372,6 +2373,58 @@ function ArticleNarrationPlayer({ article }: { article: Article }) {
   );
 }
 
+function GalacticaReminderStage({
+  active,
+  reducedMotion,
+  height,
+}: {
+  active: boolean;
+  reducedMotion: boolean;
+  height: number;
+}) {
+  const player = useVideoPlayer(
+    require("./assets/reminders/galactica-alert.mp4"),
+    (videoPlayer) => {
+      videoPlayer.loop = false;
+      videoPlayer.muted = false;
+      videoPlayer.volume = 1;
+      videoPlayer.audioMixingMode = "doNotMix";
+    },
+  );
+
+  useEffect(() => {
+    player.pause();
+    player.currentTime = 0;
+    if (active && !reducedMotion) player.play();
+    return () => {
+      player.pause();
+      player.currentTime = 0;
+    };
+  }, [active, player, reducedMotion]);
+
+  return (
+    <View style={[styles.galacticaStage, { height }]}>
+      <VideoView
+        player={player}
+        style={styles.galacticaVideo}
+        contentFit="contain"
+        nativeControls={false}
+        playsInline
+        allowsFullscreen={false}
+      />
+      <View pointerEvents="none" style={styles.galacticaShade} />
+      <View pointerEvents="none" style={styles.galacticaSourceMask}>
+        <View style={styles.galacticaSourceMaskDot} />
+        <Text style={styles.galacticaSourceMaskText}>GALACTICA // LIVE</Text>
+      </View>
+      <View pointerEvents="none" style={styles.galacticaTelemetry}>
+        <Text style={styles.galacticaTelemetryLabel}>SIGNAL LOCKED</Text>
+        <Text style={styles.galacticaTelemetryCode}>05—19S / ORIGINAL AUDIO</Text>
+      </View>
+    </View>
+  );
+}
+
 function TimeLimitReminder({
   visible,
   reminderStyle,
@@ -2383,11 +2436,22 @@ function TimeLimitReminder({
   onAddMinute: () => void;
   onDismiss: () => void;
 }) {
+  const { width, height } = useWindowDimensions();
   const reducedMotion = useReducedMotion();
   const entrance = useRef(new Animated.Value(0)).current;
   const blade = useRef(new Animated.Value(0)).current;
   const slash = useRef(new Animated.Value(0)).current;
   const flash = useRef(new Animated.Value(0)).current;
+  const galacticaOuterWidth = Math.min(1160, Math.max(300, width - 36));
+  const galacticaInnerWidth = galacticaOuterWidth - 20;
+  const galacticaStageHeight = Math.min(
+    galacticaInnerWidth * (9 / 16),
+    Math.max(180, height - 300),
+  );
+  const galacticaContentWidth = Math.min(
+    galacticaOuterWidth,
+    galacticaStageHeight * (16 / 9) + 20,
+  );
 
   useEffect(() => {
     if (!visible) return;
@@ -2396,18 +2460,23 @@ function TimeLimitReminder({
     slash.setValue(reducedMotion ? 1 : 0);
     flash.setValue(0);
 
+    stopActiveArticleNarration?.();
+    stopWordAudio();
     void Haptics.notificationAsync(
       Haptics.NotificationFeedbackType.Warning,
     ).catch(() => undefined);
 
-    let voiceTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-      Speech.stop();
-      Speech.speak("You're out of time.", {
-        language: "en-US",
-        rate: 0.68,
-        pitch: 0.55,
-      });
-    }, reducedMotion ? 80 : 760);
+    let voiceTimer: ReturnType<typeof setTimeout> | null =
+      reminderStyle === "mecha-blade"
+        ? setTimeout(() => {
+            Speech.stop();
+            Speech.speak("You're out of time.", {
+              language: "en-US",
+              rate: 0.68,
+              pitch: 0.55,
+            });
+          }, reducedMotion ? 80 : 760)
+        : null;
     let impactTimer: ReturnType<typeof setTimeout> | null = null;
 
     if (!reducedMotion) {
@@ -2470,7 +2539,7 @@ function TimeLimitReminder({
       flash.stopAnimation();
       Speech.stop();
     };
-  }, [blade, entrance, flash, reducedMotion, slash, visible]);
+  }, [blade, entrance, flash, reducedMotion, reminderStyle, slash, visible]);
 
   const close = (action: () => void) => {
     Speech.stop();
@@ -2506,6 +2575,10 @@ function TimeLimitReminder({
         <Animated.View
           style={[
             styles.timeUpContent,
+            reminderStyle === "galactica" && [
+              styles.timeUpContentGalactica,
+              { width: galacticaContentWidth },
+            ],
             {
               opacity: entrance,
               transform: [
@@ -2529,11 +2602,18 @@ function TimeLimitReminder({
             <View style={styles.timeUpCodeDot} />
             <Text style={styles.timeUpCode}>ALERT // LIMIT-00</Text>
             <Text style={styles.timeUpStyleTag}>
-              {reminderStyle === "mecha-blade" ? "MECHA BLADE" : "ALERT"}
+              {reminderStyle === "mecha-blade" ? "MECHA BLADE" : "GALACTICA"}
             </Text>
           </View>
 
-          <View style={styles.mechaStage}>
+          {reminderStyle === "galactica" ? (
+            <GalacticaReminderStage
+              active={visible}
+              reducedMotion={reducedMotion}
+              height={galacticaStageHeight}
+            />
+          ) : (
+            <View style={styles.mechaStage}>
             <View style={styles.mechaBackGlow} />
             <View style={styles.mechaUnit}>
               <View style={styles.mechaFinLeft} />
@@ -2597,9 +2677,14 @@ function TimeLimitReminder({
                 },
               ]}
             />
-          </View>
+            </View>
+          )}
 
-          <Text style={styles.timeUpKicker}>TIME LIMIT EXCEEDED</Text>
+          <Text style={styles.timeUpKicker}>
+            {reminderStyle === "galactica"
+              ? "GALACTIC TIME ALERT"
+              : "TIME LIMIT EXCEEDED"}
+          </Text>
           <Text style={styles.timeUpTitle}>YOU'RE OUT OF TIME.</Text>
           <Text style={styles.timeUpSubtitle}>本篇阅读时间已用尽</Text>
 
@@ -2990,7 +3075,8 @@ function ReaderScreen({
         enabled: saved?.enabled ?? true,
         durationMinutes,
         reminderStyle:
-          saved?.reminderStyle === "mecha-blade"
+          saved?.reminderStyle === "mecha-blade" ||
+          saved?.reminderStyle === "galactica"
             ? saved.reminderStyle
             : "mecha-blade",
       };
@@ -4546,12 +4632,46 @@ function ReaderScreen({
                   全屏警报 · 光剑斩击 · 低沉英语语音
                 </Text>
               </View>
-              <View style={styles.timerStyleSelected}>
-                <Check size={14} color="#071119" />
+              {timerSettings.reminderStyle === "mecha-blade" && (
+                <View style={styles.timerStyleSelected}>
+                  <Check size={14} color="#071119" />
+                </View>
+              )}
+            </Pressable>
+            <Pressable
+              accessibilityRole="radio"
+              accessibilityState={{
+                checked: timerSettings.reminderStyle === "galactica",
+              }}
+              onPress={() => selectReminderStyle("galactica")}
+              style={[
+                styles.timerStyleChoice,
+                styles.timerStyleChoiceSpaced,
+                timerSettings.reminderStyle === "galactica" &&
+                  styles.timerStyleChoiceActive,
+              ]}
+            >
+              <View
+                style={[styles.timerStylePreview, styles.galacticaStylePreview]}
+              >
+                <View style={styles.galacticaStylePlanet} />
+                <View style={styles.galacticaStyleRing} />
+                <View style={styles.galacticaStyleBeam} />
               </View>
+              <View style={styles.timerStyleCopy}>
+                <Text style={styles.timerStyleTitle}>银河警报</Text>
+                <Text style={styles.timerStyleDescription}>
+                  14 秒星舰转场 · 原视频声音 · 全屏播放
+                </Text>
+              </View>
+              {timerSettings.reminderStyle === "galactica" && (
+                <View style={styles.timerStyleSelected}>
+                  <Check size={14} color="#071119" />
+                </View>
+              )}
             </Pressable>
             <View style={styles.timerPreviewRow}>
-              <Text style={styles.timerFutureStyles}>更多提醒风格即将加入</Text>
+              <Text style={styles.timerFutureStyles}>选择风格后可立即预览</Text>
               <Pressable
                 accessibilityRole="button"
                 onPress={previewTimeUpReminder}
@@ -8874,6 +8994,7 @@ const styles = StyleSheet.create({
     borderColor: "#264453",
   },
   timerStyleChoiceActive: { borderColor: "#74DDF5" },
+  timerStyleChoiceSpaced: { marginTop: 8 },
   timerStylePreview: {
     width: 54,
     height: 50,
@@ -8900,6 +9021,39 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: "#9DE8FF",
     transform: [{ rotate: "-28deg" }, { translateX: 12 }],
+  },
+  galacticaStylePreview: {
+    backgroundColor: "#020714",
+    borderColor: "#334B95",
+  },
+  galacticaStylePlanet: {
+    position: "absolute",
+    left: -9,
+    bottom: -11,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: "#B9C8E8",
+    opacity: 0.72,
+  },
+  galacticaStyleRing: {
+    width: 25,
+    height: 25,
+    borderRadius: 13,
+    borderWidth: 3,
+    borderColor: "#6B8EFF",
+    backgroundColor: "rgba(17,29,77,0.74)",
+    shadowColor: "#547BFF",
+    shadowOpacity: 0.9,
+    shadowRadius: 8,
+  },
+  galacticaStyleBeam: {
+    position: "absolute",
+    width: 58,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: "#8CACFF",
+    transform: [{ rotate: "-35deg" }, { translateX: 13 }],
   },
   timerStyleCopy: { flex: 1 },
   timerStyleTitle: { color: "#F2FCFF", fontSize: 13, fontWeight: "900" },
@@ -9068,6 +9222,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#27657A",
   },
+  timeUpContentGalactica: {
+    maxWidth: 1160,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
   timeUpCodeRow: {
     width: "100%",
     flexDirection: "row",
@@ -9092,6 +9251,82 @@ const styles = StyleSheet.create({
     fontSize: 8,
     fontWeight: "900",
     letterSpacing: 1.4,
+  },
+  galacticaStage: {
+    width: "100%",
+    marginTop: 10,
+    marginBottom: 8,
+    borderRadius: 20,
+    overflow: "hidden",
+    backgroundColor: "#01040B",
+    borderWidth: 1,
+    borderColor: "#2C4E92",
+  },
+  galacticaVideo: {
+    ...StyleSheet.absoluteFillObject,
+    width: "100%",
+    height: "100%",
+  },
+  galacticaShade: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(2,5,16,0.14)",
+    borderWidth: 8,
+    borderColor: "rgba(4,10,28,0.38)",
+  },
+  galacticaSourceMask: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    width: "36%",
+    minHeight: 38,
+    paddingHorizontal: 11,
+    borderWidth: 1,
+    borderColor: "rgba(91,126,229,0.72)",
+    borderRadius: 4,
+    backgroundColor: "#010511",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 7,
+  },
+  galacticaSourceMaskDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#7696FF",
+  },
+  galacticaSourceMaskText: {
+    color: "#DDE5FF",
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 1.2,
+  },
+  galacticaTelemetry: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    bottom: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderLeftWidth: 2,
+    borderLeftColor: "#7898FF",
+    backgroundColor: "rgba(1,5,16,0.72)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  galacticaTelemetryLabel: {
+    color: "#E8EDFF",
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 1.4,
+  },
+  galacticaTelemetryCode: {
+    color: "#7898FF",
+    fontSize: 7,
+    fontWeight: "800",
+    letterSpacing: 0.8,
   },
   mechaStage: {
     width: "100%",

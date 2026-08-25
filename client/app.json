@@ -39,7 +39,8 @@
         }
       ],
       "expo-asset",
-      "expo-notifications"
+      "expo-notifications",
+      "expo-video"
     ]
   }
 }
