@@ -79,7 +79,11 @@ import {
 import { storage } from "./src/storage";
 import { syncDailyReminder } from "./src/notifications";
 import { colors, radius, shadows, spacing } from "./src/theme";
-import { LongPressWord } from "./src/components/LongPressWord";
+import {
+  LongPressWord,
+  type LongPressWordHandle,
+  type WordAnchor,
+} from "./src/components/LongPressWord";
 import {
   isReviewDue,
   reviewIntervalLabel,
@@ -2070,6 +2074,21 @@ function Difficulty({ value }: { value: number }) {
   );
 }
 
+type ReaderTextSelection = {
+  scope: string;
+  tokens: string[];
+  context: string;
+  startIndex: number;
+  endIndex: number;
+  dragging: boolean;
+};
+
+type SelectedPhrase = {
+  text: string;
+  translation: string;
+  context: string;
+};
+
 type NarrationState = "idle" | "loading" | "playing" | "paused" | "error";
 
 function playbackTime(value: number) {
@@ -2813,12 +2832,22 @@ function ReaderScreen({
   const sequenceBarTransition = useRef(new Animated.Value(0)).current;
   const sequenceBarVisibleRef = useRef(false);
   const closingWordRef = useRef(false);
+  const phraseRequestRef = useRef(0);
+  const textSelectionRef = useRef<ReaderTextSelection | null>(null);
+  const wordHandlesRef = useRef(new Map<string, LongPressWordHandle>());
+  const selectionAnchorsRef = useRef(new Map<number, WordAnchor>());
+  const lastSelectionPointRef = useRef<{ x: number; y: number } | null>(null);
   const timerDeadlineRef = useRef<number | null>(null);
   const translationRequestRef = useRef(0);
   const [readerTab, setReaderTab] = useState<
     "article" | "translation" | "answer"
   >("article");
   const [selectedWord, setSelectedWord] = useState<WordInfo | null>(null);
+  const [selectedPhrase, setSelectedPhrase] = useState<SelectedPhrase | null>(
+    null,
+  );
+  const [textSelection, setTextSelection] =
+    useState<ReaderTextSelection | null>(null);
   const [wordAnchor, setWordAnchor] = useState<{
     x: number;
     y: number;
@@ -2870,6 +2899,8 @@ function ReaderScreen({
         item.examId === article.examId &&
         item.word === word.toLowerCase().replace(/[^a-z'-]/g, ""),
     );
+  const wordCardVisible = Boolean(selectedWord || selectedPhrase);
+  const titleTokens = article.title.split(/(\s+)/);
   const maxColumnWidth =
     readerSettings.columnWidth === "narrow"
       ? 660
@@ -3059,7 +3090,7 @@ function ReaderScreen({
   }, [readerTab, reducedMotion, tabContentTransition, tabIndicator]);
 
   useEffect(() => {
-    if (!selectedWord) return;
+    if (!selectedWord && !selectedPhrase) return;
     closingWordRef.current = false;
     if (reducedMotion) {
       wordCardTransition.setValue(1);
@@ -3073,10 +3104,16 @@ function ReaderScreen({
       mass: 0.78,
       useNativeDriver: USE_NATIVE_DRIVER,
     }).start();
-  }, [reducedMotion, selectedWord?.word, wordCardTransition]);
+  }, [reducedMotion, selectedPhrase?.text, selectedWord?.word, wordCardTransition]);
 
   useEffect(() => {
     let active = true;
+    phraseRequestRef.current += 1;
+    textSelectionRef.current = null;
+    selectionAnchorsRef.current.clear();
+    setTextSelection(null);
+    setSelectedPhrase(null);
+    setSelectedWord(null);
     Promise.all([
       storage.getReadingProgress(userId, article.id),
       api.getReadingProgress(article.id).catch(() => null),
@@ -3406,6 +3443,182 @@ function ReaderScreen({
     return () => clearTimeout(timer);
   }, [article.id, article.paragraphs, pronunciationAccent]);
 
+  const wordHandleKey = (scope: string, tokenIndex: number) =>
+    `${scope}:${tokenIndex}`;
+
+  const registerWordHandle = (
+    scope: string,
+    tokenIndex: number,
+    handle: LongPressWordHandle | null,
+  ) => {
+    const key = wordHandleKey(scope, tokenIndex);
+    if (handle) wordHandlesRef.current.set(key, handle);
+    else wordHandlesRef.current.delete(key);
+  };
+
+  const selectionContains = (scope: string, tokenIndex: number) => {
+    if (textSelection?.scope !== scope) return false;
+    const start = Math.min(textSelection.startIndex, textSelection.endIndex);
+    const end = Math.max(textSelection.startIndex, textSelection.endIndex);
+    return tokenIndex >= start && tokenIndex <= end;
+  };
+
+  const updateTextSelectionAtPoint = (point: { x: number; y: number }) => {
+    lastSelectionPointRef.current = point;
+    const current = textSelectionRef.current;
+    if (!current || !selectionAnchorsRef.current.size) return;
+    let targetIndex = current.endIndex;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (const [tokenIndex, anchor] of selectionAnchorsRef.current) {
+      const inside =
+        point.x >= anchor.x - 7 &&
+        point.x <= anchor.x + anchor.width + 7 &&
+        point.y >= anchor.y - 9 &&
+        point.y <= anchor.y + anchor.height + 9;
+      const centerX = anchor.x + anchor.width / 2;
+      const centerY = anchor.y + anchor.height / 2;
+      const distance = inside
+        ? 0
+        : Math.abs(point.x - centerX) + Math.abs(point.y - centerY) * 2.4;
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        targetIndex = tokenIndex;
+      }
+      if (inside) break;
+    }
+    if (targetIndex === current.endIndex) return;
+    const start = Math.min(current.startIndex, targetIndex);
+    const end = Math.max(current.startIndex, targetIndex);
+    const candidate = current.tokens.slice(start, end + 1).join("").trim();
+    if (candidate.length > 300) return;
+    const next = { ...current, endIndex: targetIndex };
+    textSelectionRef.current = next;
+    setTextSelection(next);
+    void Haptics.selectionAsync().catch(() => undefined);
+  };
+
+  const beginTextSelection = (
+    scope: string,
+    tokens: string[],
+    tokenIndex: number,
+    context: string,
+  ) => {
+    phraseRequestRef.current += 1;
+    setSelectedWord(null);
+    setSelectedPhrase(null);
+    setPressedWord(null);
+    selectionAnchorsRef.current.clear();
+    lastSelectionPointRef.current = null;
+    const next: ReaderTextSelection = {
+      scope,
+      tokens,
+      context,
+      startIndex: tokenIndex,
+      endIndex: tokenIndex,
+      dragging: true,
+    };
+    textSelectionRef.current = next;
+    setTextSelection(next);
+    const measurements = tokens.map(async (token, index) => {
+      if (/^\s+$/.test(token)) return null;
+      const anchor = await wordHandlesRef.current
+        .get(wordHandleKey(scope, index))
+        ?.measure();
+      return anchor ? ([index, anchor] as const) : null;
+    });
+    void Promise.all(measurements).then((values) => {
+      const current = textSelectionRef.current;
+      if (!current || current.scope !== scope || current.startIndex !== tokenIndex) {
+        return;
+      }
+      selectionAnchorsRef.current = new Map(
+        values.filter((value): value is readonly [number, WordAnchor] => Boolean(value)),
+      );
+      if (lastSelectionPointRef.current) {
+        updateTextSelectionAtPoint(lastSelectionPointRef.current);
+      }
+    });
+  };
+
+  const selectedRangeAnchor = (selection: ReaderTextSelection) => {
+    const start = Math.min(selection.startIndex, selection.endIndex);
+    const end = Math.max(selection.startIndex, selection.endIndex);
+    const anchors = [...selectionAnchorsRef.current.entries()]
+      .filter(([index]) => index >= start && index <= end)
+      .map(([, anchor]) => anchor);
+    if (!anchors.length) return undefined;
+    const left = Math.min(...anchors.map((anchor) => anchor.x));
+    const top = Math.min(...anchors.map((anchor) => anchor.y));
+    const right = Math.max(...anchors.map((anchor) => anchor.x + anchor.width));
+    const bottom = Math.max(...anchors.map((anchor) => anchor.y + anchor.height));
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  };
+
+  const finishTextSelection = () => {
+    const current = textSelectionRef.current;
+    if (!current) return;
+    textSelectionRef.current = null;
+    const committed = { ...current, dragging: false };
+    setTextSelection(committed);
+    const start = Math.min(current.startIndex, current.endIndex);
+    const end = Math.max(current.startIndex, current.endIndex);
+    const phrase = current.tokens.slice(start, end + 1).join("").trim();
+    const lexicalWords = phrase.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) ?? [];
+    const anchor = selectedRangeAnchor(current);
+    if (lexicalWords.length <= 1) {
+      openWord(phrase, current.context, anchor);
+    } else {
+      openPhrase(phrase, current.context, anchor);
+    }
+  };
+
+  const openPhrase = (
+    phrase: string,
+    context: string,
+    anchor?: WordAnchor,
+  ) => {
+    const normalizedPhrase = phrase.trim().replace(/\s+/g, " ");
+    if (!normalizedPhrase) return;
+    const requestId = phraseRequestRef.current + 1;
+    phraseRequestRef.current = requestId;
+    setWordCardHeight(0);
+    setSelectedWord(null);
+    setSelectedPhrase({
+      text: normalizedPhrase,
+      translation: "正在翻译所选短语…",
+      context,
+    });
+    setWordAnchor(anchor ?? null);
+    setWordLoading(true);
+    api
+      .translatePhrase(normalizedPhrase, context, article.id)
+      .then((translated) => {
+        if (phraseRequestRef.current !== requestId) return;
+        setSelectedPhrase((current) =>
+          current?.text === normalizedPhrase
+            ? { ...current, translation: translated.translation }
+            : current,
+        );
+      })
+      .catch((error) => {
+        if (phraseRequestRef.current !== requestId) return;
+        setSelectedPhrase((current) =>
+          current?.text === normalizedPhrase
+            ? {
+                ...current,
+                translation:
+                  error instanceof Error
+                    ? error.message
+                    : "短语翻译暂时不可用，请稍后重试",
+              }
+            : current,
+        );
+      })
+      .finally(() => {
+        if (phraseRequestRef.current === requestId) setWordLoading(false);
+      });
+  };
+
   const openWord = (
     token: string,
     paragraph: string,
@@ -3417,7 +3630,9 @@ function ReaderScreen({
     );
     const localWord: WordInfo = savedWord ?? lookupWord(token);
     if (!localWord.word) return;
+    phraseRequestRef.current += 1;
     setWordCardHeight(0);
+    setSelectedPhrase(null);
     setSelectedWord(localWord);
     setWordAnchor(anchor ?? null);
     setPressedWord(localWord.word);
@@ -3460,13 +3675,18 @@ function ReaderScreen({
 
   const closeWord = () => {
     stopWordAudio();
+    phraseRequestRef.current += 1;
     const finish = () => {
       closingWordRef.current = false;
       setSelectedWord(null);
+      setSelectedPhrase(null);
+      setTextSelection(null);
+      textSelectionRef.current = null;
+      selectionAnchorsRef.current.clear();
       setWordAnchor(null);
       setWordCardHeight(0);
     };
-    if (reducedMotion || !selectedWord) {
+    if (reducedMotion || !wordCardVisible) {
       finish();
       return;
     }
@@ -3797,6 +4017,7 @@ function ReaderScreen({
       </Pressable>
       <ScrollView
         ref={scrollRef}
+        scrollEnabled={!textSelection?.dragging}
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={100}
         onContentSizeChange={() => {
@@ -3863,17 +4084,44 @@ function ReaderScreen({
             >
               {readerTab === "translation" && articleTranslation ? (
                 articleTranslation.title
-              ) : article.title.split(/(\s+)/).map((token, index) => {
-                if (/^\s+$/.test(token)) return token;
+              ) : titleTokens.map((token, index) => {
+                if (/^\s+$/.test(token)) {
+                  return (
+                    <Text
+                      key={`title-space-${index}`}
+                      style={
+                        selectionContains("title", index)
+                          ? styles.rangeSelectedWord
+                          : undefined
+                      }
+                    >
+                      {token}
+                    </Text>
+                  );
+                }
                 const clean = token.toLowerCase().replace(/[^a-z'-]/g, "");
                 const marked = clean && isSaved(clean);
                 return (
                   <LongPressWord
                     key={`title-${index}`}
-                    accessibilityHint="长按查看标题单词的中文释义和例句"
+                    ref={(handle) => {
+                      registerWordHandle("title", index, handle);
+                    }}
+                    accessibilityHint="长按后滑动可选择多个标题单词并翻译"
                     onLongPress={(anchor) =>
                       clean && openWord(token, article.title, anchor)
                     }
+                    onSelectionStart={() =>
+                      clean &&
+                      beginTextSelection(
+                        "title",
+                        titleTokens,
+                        index,
+                        article.title,
+                      )
+                    }
+                    onSelectionMove={updateTextSelectionAtPoint}
+                    onSelectionEnd={finishTextSelection}
                     onPressIn={() => clean && setPressedWord(clean)}
                     onPressOut={() =>
                       setPressedWord((current) =>
@@ -3885,6 +4133,8 @@ function ReaderScreen({
                       Platform.OS === "web" && styles.webInteractiveWord,
                       marked && styles.markedWord,
                       pressedWord === clean && styles.pressedWord,
+                      selectionContains("title", index) &&
+                        styles.rangeSelectedWord,
                       selectedWord?.word === clean && styles.selectedInlineWord,
                     ]}
                   >
@@ -3938,8 +4188,8 @@ function ReaderScreen({
                   </View>
                   <Text style={styles.longPressHintText}>
                     {Platform.OS === "web" && width >= 768
-                      ? "鼠标按住单词，查看翻译、音标和例句"
-                      : "长按单词，查看翻译、音标和例句"}
+                      ? "鼠标长按后滑动选择多个词，松开即可翻译"
+                      : "长按后滑动选择多个词，松手即可翻译"}
                   </Text>
                   <Pressable
                     accessibilityLabel="关闭阅读提示"
@@ -3951,41 +4201,71 @@ function ReaderScreen({
                   </Pressable>
                 </View>
               )}
-              {article.paragraphs.map((paragraph, pIndex) => (
-                <Text
-                  key={pIndex}
-                  style={[
-                    styles.paragraph,
-                    {
-                      fontSize: 18 * readerSettings.fontScale,
-                      lineHeight:
-                        32 * readerSettings.fontScale * lineSpacingMultiplier,
-                      fontFamily:
-                        readerSettings.fontFamily === "serif"
-                          ? Platform.select({
-                              ios: "Georgia",
-                              android: "serif",
-                              default: "Georgia",
-                            })
-                          : Platform.select({
-                              ios: "System",
-                              android: "sans-serif",
-                              default: "system-ui",
-                            }),
-                    },
-                  ]}
-                >
-                  {paragraph.split(/(\s+)/).map((token, index) => {
-                    if (/^\s+$/.test(token)) return token;
+              {article.paragraphs.map((paragraph, pIndex) => {
+                const paragraphTokens = paragraph.split(/(\s+)/);
+                const scope = `paragraph-${pIndex}`;
+                return (
+                  <Text
+                    key={pIndex}
+                    style={[
+                      styles.paragraph,
+                      {
+                        fontSize: 18 * readerSettings.fontScale,
+                        lineHeight:
+                          32 * readerSettings.fontScale * lineSpacingMultiplier,
+                        fontFamily:
+                          readerSettings.fontFamily === "serif"
+                            ? Platform.select({
+                                ios: "Georgia",
+                                android: "serif",
+                                default: "Georgia",
+                              })
+                            : Platform.select({
+                                ios: "System",
+                                android: "sans-serif",
+                                default: "system-ui",
+                              }),
+                      },
+                    ]}
+                  >
+                  {paragraphTokens.map((token, index) => {
+                    if (/^\s+$/.test(token)) {
+                      return (
+                        <Text
+                          key={`${pIndex}-space-${index}`}
+                          style={
+                            selectionContains(scope, index)
+                              ? styles.rangeSelectedWord
+                              : undefined
+                          }
+                        >
+                          {token}
+                        </Text>
+                      );
+                    }
                     const clean = token.toLowerCase().replace(/[^a-z'-]/g, "");
                     const marked = clean && isSaved(clean);
                     return (
                       <LongPressWord
                         key={`${pIndex}-${index}`}
-                        accessibilityHint="长按查看中文释义和例句"
+                        ref={(handle) => {
+                          registerWordHandle(scope, index, handle);
+                        }}
+                        accessibilityHint="长按后滑动可选择多个单词并翻译"
                         onLongPress={(anchor) =>
                           clean && openWord(token, paragraph, anchor)
                         }
+                        onSelectionStart={() =>
+                          clean &&
+                          beginTextSelection(
+                            scope,
+                            paragraphTokens,
+                            index,
+                            paragraph,
+                          )
+                        }
+                        onSelectionMove={updateTextSelectionAtPoint}
+                        onSelectionEnd={finishTextSelection}
                         onPressIn={() => clean && setPressedWord(clean)}
                         onPressOut={() =>
                           setPressedWord((current) =>
@@ -3997,6 +4277,8 @@ function ReaderScreen({
                           Platform.OS === "web" && styles.webInteractiveWord,
                           marked && styles.markedWord,
                           pressedWord === clean && styles.pressedWord,
+                          selectionContains(scope, index) &&
+                            styles.rangeSelectedWord,
                           selectedWord?.word === clean && styles.selectedInlineWord,
                         ]}
                       >
@@ -4004,8 +4286,9 @@ function ReaderScreen({
                       </LongPressWord>
                     );
                   })}
-                </Text>
-              ))}
+                  </Text>
+                );
+              })}
 
               {article.contentKind === "interest" && (
                 <View style={styles.interestActivityCard}>
@@ -4400,7 +4683,7 @@ function ReaderScreen({
       )}
 
       <Modal
-        visible={!!selectedWord}
+        visible={wordCardVisible}
         transparent
         animationType="fade"
         onRequestClose={closeWord}
@@ -4412,7 +4695,7 @@ function ReaderScreen({
           ]}
           onPress={closeWord}
         />
-        {selectedWord && (
+        {(selectedWord || selectedPhrase) && (
           <Animated.View
             onLayout={({ nativeEvent }) => {
               if (!showAnchoredWordCard) return;
@@ -4455,19 +4738,30 @@ function ReaderScreen({
           >
             {!showAnchoredWordCard && <View style={styles.sheetHandle} />}
             <View style={styles.wordTop}>
-              <View>
-                <Text style={styles.wordTitle}>{selectedWord.word}</Text>
+              <View style={styles.wordHeadingCopy}>
+                <Text
+                  style={[
+                    styles.wordTitle,
+                    selectedPhrase && styles.phraseTitle,
+                  ]}
+                >
+                  {selectedPhrase?.text ?? selectedWord?.word}
+                </Text>
                 <Text style={styles.phonetic}>
-                  {selectedWord.phonetic || "音标查询中"}
+                  {selectedPhrase
+                    ? `已选择 ${selectedPhrase.text.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g)?.length ?? 0} 个词`
+                    : selectedWord?.phonetic || "音标查询中"}
                 </Text>
               </View>
               <View style={styles.wordActions}>
-                <WordAudioButton
-                  pronunciationAccent={pronunciationAccent}
-                  word={selectedWord.word}
-                />
+                {selectedWord && (
+                  <WordAudioButton
+                    pronunciationAccent={pronunciationAccent}
+                    word={selectedWord.word}
+                  />
+                )}
                 <Pressable
-                  accessibilityLabel="关闭"
+                  accessibilityLabel="关闭翻译"
                   onPress={closeWord}
                   style={styles.roundButton}
                 >
@@ -4483,23 +4777,27 @@ function ReaderScreen({
               style={styles.wordDetailsScroll}
             >
               <View style={styles.translationRow}>
-                <Text style={styles.translationLabel}>释义</Text>
+                <Text style={styles.translationLabel}>
+                  {selectedPhrase ? "短语释义" : "释义"}
+                </Text>
                 <View style={styles.translationContent}>
                   {wordLoading ? (
                     <ActivityIndicator size="small" color={colors.primary} />
                   ) : null}
-                  <Text style={styles.translation}>{selectedWord.translation}</Text>
-                  {!!selectedWord.partOfSpeech && (
+                  <Text style={styles.translation}>
+                    {selectedPhrase?.translation ?? selectedWord?.translation}
+                  </Text>
+                  {!!selectedWord?.partOfSpeech && (
                     <Text style={styles.partOfSpeech}>{selectedWord.partOfSpeech}</Text>
                   )}
-                  {!!selectedWord.definition && (
+                  {!!selectedWord?.definition && (
                     <Text style={styles.englishDefinition}>
                       {selectedWord.definition}
                     </Text>
                   )}
                 </View>
               </View>
-              {!!selectedWord.example && (
+              {!!selectedWord?.example && (
                 <View style={styles.exampleCard}>
                   <Text style={styles.exampleLabel}>例句</Text>
                   <Text style={styles.exampleEnglish}>{selectedWord.example}</Text>
@@ -4511,35 +4809,37 @@ function ReaderScreen({
                 </View>
               )}
             </ScrollView>
-            <Pressable
-              accessibilityLabel={
-                isSaved(selectedWord.word) ? "移出生词库" : "标记为生词"
-              }
-              accessibilityRole="button"
-              hitSlop={6}
-              onPress={() => {
-                onToggleWord(selectedWord, article);
-                closeWord();
-              }}
-              style={[
-                styles.saveWordButton,
-                isSaved(selectedWord.word) && styles.removeWordButton,
-              ]}
-            >
-              {isSaved(selectedWord.word) ? (
-                <X size={19} color={colors.danger} />
-              ) : (
-                <BookMarked size={19} color="#fff" />
-              )}
-              <Text
+            {selectedWord && (
+              <Pressable
+                accessibilityLabel={
+                  isSaved(selectedWord.word) ? "移出生词库" : "标记为生词"
+                }
+                accessibilityRole="button"
+                hitSlop={6}
+                onPress={() => {
+                  onToggleWord(selectedWord, article);
+                  closeWord();
+                }}
                 style={[
-                  styles.saveWordText,
-                  isSaved(selectedWord.word) && styles.removeWordText,
+                  styles.saveWordButton,
+                  isSaved(selectedWord.word) && styles.removeWordButton,
                 ]}
               >
-                {isSaved(selectedWord.word) ? "移出生词库" : "标记为生词"}
-              </Text>
-            </Pressable>
+                {isSaved(selectedWord.word) ? (
+                  <X size={19} color={colors.danger} />
+                ) : (
+                  <BookMarked size={19} color="#fff" />
+                )}
+                <Text
+                  style={[
+                    styles.saveWordText,
+                    isSaved(selectedWord.word) && styles.removeWordText,
+                  ]}
+                >
+                  {isSaved(selectedWord.word) ? "移出生词库" : "标记为生词"}
+                </Text>
+              </Pressable>
+            )}
           </Animated.View>
         )}
       </Modal>
@@ -8565,6 +8865,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#C7E4DC",
     color: colors.primary,
   },
+  rangeSelectedWord: {
+    backgroundColor: "#BFE4DA",
+    color: colors.primaryDark,
+  },
   interestActivityCard: {
     marginTop: 28,
     padding: 15,
@@ -8783,7 +9087,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "flex-start",
   },
+  wordHeadingCopy: { flex: 1, paddingRight: 12 },
   wordTitle: { color: colors.ink, fontSize: 30, fontWeight: "800" },
+  phraseTitle: { fontSize: 22, lineHeight: 29 },
   phonetic: { color: colors.primary, fontSize: 14, marginTop: 4 },
   wordActions: { flexDirection: "row", gap: 8 },
   wordDetailsScroll: {

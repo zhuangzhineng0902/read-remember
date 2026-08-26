@@ -8,6 +8,10 @@ import { createDatabase } from "./database";
 import { startDailyPushScheduler } from "./daily-push";
 import { openEcdict } from "./ecdict";
 import { ArticleAudioService } from "./article-audio";
+import {
+  loadPhraseTranslationConfig,
+  PhraseTranslationService,
+} from "./phrase-translation";
 
 const localEnvFile = path.resolve(process.cwd(), ".env");
 if (existsSync(localEnvFile)) loadEnvFile(localEnvFile);
@@ -27,7 +31,17 @@ const articleAudio = new ArticleAudioService(db, {
   defaultVoice: config.kokoroDefaultVoice,
   voices: config.kokoroVoices,
 });
-const app = createApp(db, config, dictionary, articleAudio);
+const phraseTranslation = new PhraseTranslationService(
+  db,
+  loadPhraseTranslationConfig(),
+);
+const app = createApp(
+  db,
+  config,
+  dictionary,
+  articleAudio,
+  phraseTranslation,
+);
 const server = createServer(app);
 const dailyPushScheduler = startDailyPushScheduler(db, {
   enabled: config.dailyPushEnabled,
@@ -49,6 +63,11 @@ server.listen(config.port, config.host, () => {
     dictionary
       ? `ECDICT: ${config.ecdictPath}`
       : `ECDICT unavailable: ${config.ecdictPath} (run npm run setup:ecdict)`,
+  );
+  console.log(
+    phraseTranslation.enabled
+      ? "Phrase translation: ready"
+      : "Phrase translation unavailable: configure translation.json",
   );
 });
 

@@ -41,6 +41,7 @@ import { ensureDailyPushForUser, localDateParts } from "./daily-push";
 import type { EcdictDictionary } from "./ecdict";
 import { scheduleMemoryReview } from "../../client/src/memory";
 import type { ArticleAudioService } from "./article-audio";
+import type { PhraseTranslationProvider } from "./phrase-translation";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -334,6 +335,7 @@ export function createApp(
     >,
   dictionary: EcdictDictionary | null = null,
   articleAudio: ArticleAudioService | null = null,
+  phraseTranslation: PhraseTranslationProvider | null = null,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -586,6 +588,47 @@ export function createApp(
         playbackSpeeds: [0.8, 1, 1.2],
       },
     });
+  });
+
+  authenticated.post("/phrases/translate", async (req, res, next) => {
+    try {
+      const user = currentUser(res);
+      const body = parse(
+        z.object({
+          text: z.string().trim().min(2).max(300),
+          context: z.string().trim().max(1200).default(""),
+          targetLanguage: z
+            .string()
+            .trim()
+            .regex(/^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$/)
+            .default("zh-CN"),
+          articleId: z.string().trim().min(1).max(160).optional(),
+        }),
+        req.body,
+      );
+      if (body.articleId && !hasArticleAccess(db, user.id, body.articleId)) {
+        throw new ApiError(
+          403,
+          "ARTICLE_NOT_DELIVERED",
+          "该文章尚未推送给当前用户",
+        );
+      }
+      if (!phraseTranslation?.enabled) {
+        throw new ApiError(
+          503,
+          "PHRASE_TRANSLATION_UNAVAILABLE",
+          "短语翻译服务尚未配置",
+        );
+      }
+      const translated = await phraseTranslation.translate(
+        body.text,
+        body.context,
+        body.targetLanguage,
+      );
+      res.json({ data: translated });
+    } catch (error) {
+      next(error);
+    }
   });
 
   authenticated.get("/users/me/preferences", (_req, res) => {

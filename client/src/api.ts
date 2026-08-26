@@ -87,6 +87,13 @@ export type ArticleAudio = {
   cached: boolean;
 };
 
+export type PhraseTranslation = {
+  text: string;
+  translation: string;
+  targetLanguage: string;
+  cached: boolean;
+};
+
 type PronunciationCacheEntry = {
   cachedAt: number;
   value: Pronunciation;
@@ -437,6 +444,12 @@ export const api = {
     request<ArticleTranslation | null>(
       `/articles/${encodeURIComponent(id)}/translation?${new URLSearchParams({ language }).toString()}`,
     ),
+
+  translatePhrase: (text: string, context: string, articleId: string) =>
+    request<PhraseTranslation>("/phrases/translate", {
+      method: "POST",
+      body: JSON.stringify({ text, context, articleId, targetLanguage: "zh-CN" }),
+    }),
 
   getArticleAudioConfig: () =>
     request<ArticleAudioConfig>("/article-audio/config"),

@@ -1,62 +1,112 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import { StyleSheet } from "react-native";
-import type { LongPressWordProps } from "./LongPressWord";
+import type {
+  LongPressWordHandle,
+  LongPressWordProps,
+} from "./LongPressWord";
 
 const LONG_PRESS_DELAY_MS = 380;
 
-export function LongPressWord({
+export const LongPressWord = forwardRef<LongPressWordHandle, LongPressWordProps>(function LongPressWord({
   children,
   accessibilityHint,
   onLongPress,
   onPressIn,
   onPressOut,
+  onSelectionStart,
+  onSelectionMove,
+  onSelectionEnd,
   style,
-}: LongPressWordProps) {
+}, forwardedRef) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const elementRef = useRef<HTMLSpanElement>(null);
+  const selectingRef = useRef(false);
   const [hovered, setHovered] = useState(false);
 
-  const cancel = () => {
+  useImperativeHandle(forwardedRef, () => ({
+    measure: async () => {
+      const rect = elementRef.current?.getBoundingClientRect();
+      return rect
+        ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
+        : null;
+    },
+  }));
+
+  const clearTimer = () => {
     if (timer.current) {
       clearTimeout(timer.current);
       timer.current = null;
     }
+  };
+
+  const finish = () => {
+    clearTimer();
+    if (selectingRef.current) {
+      selectingRef.current = false;
+      onSelectionEnd?.();
+    }
     onPressOut?.();
   };
 
-  const start = (event: React.MouseEvent<HTMLSpanElement>) => {
+  const start = (event: React.PointerEvent<HTMLSpanElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
     const element = event.currentTarget;
-    cancel();
+    clearTimer();
+    selectingRef.current = false;
+    try {
+      element.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic browser tests and older WebViews may not expose capture for
+      // the active pointer; movement still works while events target the word.
+    }
     onPressIn?.();
     timer.current = setTimeout(() => {
       timer.current = null;
-      onPressOut?.();
       const rect = element.getBoundingClientRect();
-      onLongPress({
+      const anchor = {
         x: rect.left,
         y: rect.top,
         width: rect.width,
         height: rect.height,
-      });
+      };
+      if (onSelectionStart) {
+        selectingRef.current = true;
+        onSelectionStart(anchor);
+      } else {
+        onLongPress(anchor);
+      }
     }, LONG_PRESS_DELAY_MS);
   };
 
   useEffect(
     () => () => {
-      if (timer.current) clearTimeout(timer.current);
+      clearTimer();
     },
     [],
   );
 
   return (
     <span
+      ref={elementRef}
       aria-description={accessibilityHint}
-      onMouseDown={start}
-      onMouseUp={cancel}
-      onMouseLeave={cancel}
+      onPointerDown={start}
+      onPointerMove={(event) => {
+        if (!selectingRef.current) return;
+        event.preventDefault();
+        onSelectionMove?.({ x: event.clientX, y: event.clientY });
+      }}
+      onPointerUp={finish}
+      onPointerCancel={finish}
       onMouseEnter={() => setHovered(true)}
       onMouseOut={() => setHovered(false)}
+      onContextMenu={(event) => event.preventDefault()}
       onDragStart={(event) => event.preventDefault()}
       style={{
         ...(StyleSheet.flatten(style) as React.CSSProperties),
@@ -75,4 +125,4 @@ export function LongPressWord({
       {children}
     </span>
   );
-}
+});

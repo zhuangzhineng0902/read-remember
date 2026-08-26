@@ -13,13 +13,31 @@ const { DatabaseSync } = createRequire(import.meta.url)(
 ) as typeof import("node:sqlite");
 
 const db = createDatabase(":memory:");
+let phraseTranslationCalls = 0;
 const server = createServer(
-  createApp(db, {
-    corsOrigin: "*",
-    adminApiKey: "test-admin-key",
-    syncAllowedHosts: [],
-    dailyPushEnabled: false,
-  }),
+  createApp(
+    db,
+    {
+      corsOrigin: "*",
+      adminApiKey: "test-admin-key",
+      syncAllowedHosts: [],
+      dailyPushEnabled: false,
+    },
+    null,
+    null,
+    {
+      enabled: true,
+      async translate(text, context, targetLanguage = "zh-CN") {
+        phraseTranslationCalls += 1;
+        return {
+          text,
+          translation: context.includes("clock") ? "墙上的大钟" : "测试短语",
+          targetLanguage,
+          cached: false,
+        };
+      },
+    },
+  ),
 );
 let baseUrl = "";
 let token = "";
@@ -391,6 +409,24 @@ test("daily delivery is idempotent and never repeats across dates", async () => 
     (item: { id: string }) => item.id,
   );
   assert.equal(new Set(allIds).size, 6);
+});
+
+test("a delivered article supports context-aware multi-word translation", async () => {
+  assert.ok(firstArticleId);
+  const translated = await request("/api/v1/phrases/translate", {
+    method: "POST",
+    body: JSON.stringify({
+      articleId: firstArticleId,
+      text: "the big clock",
+      context: "Dan put the big clock on the wall.",
+      targetLanguage: "zh-CN",
+    }),
+  });
+  assert.equal(translated.status, 200);
+  const value = (await translated.json()).data;
+  assert.equal(value.translation, "墙上的大钟");
+  assert.equal(value.text, "the big clock");
+  assert.equal(phraseTranslationCalls, 1);
 });
 
 test("translated article content is returned when materialized", async () => {

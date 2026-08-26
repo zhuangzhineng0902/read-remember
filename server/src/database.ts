@@ -201,6 +201,19 @@ export function createDatabase(filename: string): AppDatabase {
       PRIMARY KEY(article_id, target_language)
     );
 
+    CREATE TABLE IF NOT EXISTS phrase_translation_cache (
+      source_hash TEXT NOT NULL,
+      context_hash TEXT NOT NULL,
+      target_language TEXT NOT NULL,
+      source_text TEXT NOT NULL,
+      context_text TEXT NOT NULL,
+      translated_text TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      translated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(source_hash, context_hash, target_language)
+    );
+
     CREATE TABLE IF NOT EXISTS article_audio_cache (
       article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
       voice TEXT NOT NULL,
@@ -276,6 +289,7 @@ export function createDatabase(filename: string): AppDatabase {
     CREATE INDEX IF NOT EXISTS idx_article_sources_content_hash ON article_sources(content_hash);
     CREATE INDEX IF NOT EXISTS idx_translation_segments_language ON translation_segments(target_language, translated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_article_translations_language ON article_translations(target_language, translated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_phrase_translation_source ON phrase_translation_cache(source_hash, translated_at DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_article_audio_public_token ON article_audio_cache(public_token);
     CREATE INDEX IF NOT EXISTS idx_progress_completed ON article_progress(completed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_answer_states_updated ON article_answer_states(updated_at DESC);
