@@ -14,7 +14,7 @@ const { DatabaseSync } = createRequire(import.meta.url)(
   "node:sqlite",
 ) as typeof import("node:sqlite");
 
-test("article translation supports custom models, deduplication and resumable runs", async () => {
+test("article translation supports context, review, protected text and resumable runs", async () => {
   const temporaryDirectory = mkdtempSync(path.join(tmpdir(), "read-remember-translation-"));
   const databasePath = path.join(temporaryDirectory, "translation.sqlite");
   const db = new DatabaseSync(databasePath);
@@ -33,7 +33,7 @@ test("article translation supports custom models, deduplication and resumable ru
   );
   insert.run(
     "article-1",
-    "First Flight",
+    "[RACE-M] First Flight",
     JSON.stringify(["A shared paragraph.", "The first ending."]),
   );
   insert.run(
@@ -55,10 +55,15 @@ test("article translation supports custom models, deduplication and resumable ru
       model: string;
       messages: Array<{ content: string }>;
     };
-    assert.equal(body.model, "custom-translation-model");
+    const isReview = body.messages[0].content.includes("bilingual editor");
+    assert.equal(
+      body.model,
+      isReview ? "custom-review-model" : "custom-translation-model",
+    );
     const input = JSON.parse(body.messages[1].content) as {
-      items: Array<{ id: string; text: string }>;
+      items: Array<{ id: string; text?: string; draft?: string }>;
     };
+    assert.equal(input.items.length, 3);
     response.setHeader("content-type", "application/json");
     response.end(
       JSON.stringify({
@@ -68,7 +73,7 @@ test("article translation supports custom models, deduplication and resumable ru
               content: JSON.stringify({
                 translations: input.items.map((item) => ({
                   id: item.id,
-                  translation: `中文：${item.text}`,
+                  translation: item.draft ?? `中文：${item.text}`,
                 })),
               }),
             },
@@ -95,8 +100,12 @@ test("article translation supports custom models, deduplication and resumable ru
       timeoutMs: 5_000,
       maxRetries: 0,
       temperature: 0.1,
+      reviewEnabled: true,
+      reviewModel: "custom-review-model",
+      reviewTemperature: 0,
       jsonMode: false,
       headers: { "X-Project": "read-remember-test" },
+      glossary: {},
       force: false,
       dryRun: false,
       log: () => undefined,
@@ -104,17 +113,18 @@ test("article translation supports custom models, deduplication and resumable ru
 
     const first = await runArticleTranslation(options);
     assert.equal(first.articles, 2);
-    assert.equal(first.uniqueSegments, 5);
-    assert.equal(first.translatedSegments, 5);
+    assert.equal(first.uniqueSegments, 6);
+    assert.equal(first.translatedSegments, 6);
     assert.equal(first.materializedArticles, 2);
-    assert.equal(first.usage.totalTokens, 300);
-    assert.equal(calls, 2);
+    assert.equal(first.reviewedArticles, 2);
+    assert.equal(first.usage.totalTokens, 600);
+    assert.equal(calls, 4);
 
     const second = await runArticleTranslation(options);
-    assert.equal(second.cachedSegments, 5);
+    assert.equal(second.cachedSegments, 6);
     assert.equal(second.translatedSegments, 0);
     assert.equal(second.materializedArticles, 2);
-    assert.equal(calls, 2);
+    assert.equal(calls, 4);
 
     const verification = new DatabaseSync(databasePath, { readOnly: true });
     const segmentCount = verification
@@ -123,18 +133,26 @@ test("article translation supports custom models, deduplication and resumable ru
     const translations = verification
       .prepare(
         `SELECT article_id AS articleId, translated_title AS title,
-          translated_paragraphs_json AS paragraphsJson
+          translated_paragraphs_json AS paragraphsJson,
+          translation_policy AS translationPolicy, quality_score AS qualityScore,
+          reviewed
          FROM article_translations ORDER BY article_id`,
       )
       .all() as Array<{
       articleId: string;
       title: string;
       paragraphsJson: string;
+      translationPolicy: string;
+      qualityScore: number;
+      reviewed: number;
     }>;
     verification.close();
-    assert.equal(segmentCount.count, 5);
+    assert.equal(segmentCount.count, 6);
     assert.equal(translations.length, 2);
-    assert.equal(translations[0].title, "中文：First Flight");
+    assert.equal(translations[0].title, "中文：[RACE-M] First Flight");
+    assert.match(translations[0].translationPolicy, /^article-context-v2:/);
+    assert.equal(translations[0].reviewed, 1);
+    assert.ok(translations[0].qualityScore > 0);
     assert.deepEqual(JSON.parse(translations[1].paragraphsJson), [
       "中文：A shared paragraph.",
       "中文：The second ending.",

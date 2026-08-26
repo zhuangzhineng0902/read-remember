@@ -24,8 +24,12 @@ type TranslationConfigFile = Partial<{
   timeoutMs: number;
   maxRetries: number;
   temperature: number;
+  reviewEnabled: boolean;
+  reviewModel: string;
+  reviewTemperature: number;
   jsonMode: boolean;
   headers: Record<string, string>;
+  glossary: Record<string, string>;
 }>;
 
 export type TranslationRunOptions = {
@@ -40,8 +44,12 @@ export type TranslationRunOptions = {
   timeoutMs: number;
   maxRetries: number;
   temperature: number;
+  reviewEnabled: boolean;
+  reviewModel: string;
+  reviewTemperature: number;
   jsonMode: boolean;
   headers: Record<string, string>;
+  glossary: Record<string, string>;
   examId?: string;
   contentKind?: ContentKind;
   limit?: number;
@@ -52,6 +60,8 @@ export type TranslationRunOptions = {
 
 type ArticleRow = {
   id: string;
+  examId: string;
+  contentKind: ContentKind;
   title: string;
   paragraphsJson: string;
 };
@@ -66,13 +76,29 @@ type CachedSegment = Segment & {
   translation: string;
   provider: string;
   model: string;
+  translationPolicy: string;
 };
 
 type ArticlePlan = {
   id: string;
+  examId: string;
+  contentKind: ContentKind;
   sourceHash: string;
+  segments: Segment[];
   titleSegmentId: string;
   paragraphSegmentIds: string[];
+};
+
+type QualityIssue = {
+  code: string;
+  message: string;
+  severity: "error" | "warning";
+};
+
+type ArticleQuality = {
+  score: number;
+  reviewed: boolean;
+  issues: QualityIssue[];
 };
 
 type TokenUsage = {
@@ -88,6 +114,8 @@ export type TranslationRunResult = {
   translatedSegments: number;
   failedSegments: number;
   materializedArticles: number;
+  reviewedArticles: number;
+  qualityWarnings: number;
   pendingCharacters: number;
   estimatedSourceTokens: number;
   usage: TokenUsage;
@@ -107,8 +135,12 @@ const defaultConfig: Omit<
   timeoutMs: 120_000,
   maxRetries: 3,
   temperature: 0.1,
+  reviewEnabled: true,
+  reviewModel: "",
+  reviewTemperature: 0,
   jsonMode: false,
   headers: {},
+  glossary: {},
   force: false,
   dryRun: false,
 };
@@ -127,7 +159,7 @@ const helpText = `
   --api-key <key>          API 密钥，本地模型可留空
   --model <name>           自定义模型名称
   --target <language>      默认 zh-CN
-  --batch-size <n>         每次请求的标题/段落数，默认 8
+  --batch-size <n>         保留用于兼容旧配置；新版固定按整篇文章请求
   --concurrency <n>        并发请求数，默认 2
   --exam <id>              仅处理 toefl/ielts/toeic/middle/high
   --kind <exam|interest>   仅处理考试文章或兴趣文章
@@ -136,15 +168,28 @@ const helpText = `
   --dry-run                只统计，不调用模型、不写译文
   --json-mode              请求 response_format=json_object
   --no-json-mode           不发送 response_format（默认）
+  --review                 启用第二遍译文审校（默认）
+  --no-review              关闭第二遍译文审校
+  --review-model <name>    审校模型；默认与翻译模型相同
   --help                   显示帮助
 
 配置优先级：命令行 > 环境变量 > JSON 配置 > 默认值。
 环境变量前缀为 TRANSLATION_，详见 config/translation.example.json。
 `.trim();
 
-function hashText(kind: SegmentKind, source: string) {
+const TRANSLATION_POLICY_VERSION = "article-context-v2";
+
+function translationPolicy(options: TranslationRunOptions) {
+  return [
+    TRANSLATION_POLICY_VERSION,
+    options.model,
+    options.reviewEnabled ? options.reviewModel || options.model : "no-review",
+  ].join(":");
+}
+
+function hashText(context: string, kind: SegmentKind, index: number, source: string) {
   return createHash("sha256")
-    .update(`${kind}\0${source.trim()}`)
+    .update(`${TRANSLATION_POLICY_VERSION}\0${context}\0${kind}\0${index}\0${source.trim()}`)
     .digest("hex");
 }
 
@@ -164,6 +209,7 @@ function ensureTranslationSchema(db: DatabaseSyncType) {
       translated_text TEXT NOT NULL,
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
+      translation_policy TEXT NOT NULL DEFAULT 'legacy',
       translated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY(source_hash, target_language)
     );
@@ -175,6 +221,10 @@ function ensureTranslationSchema(db: DatabaseSyncType) {
       translated_paragraphs_json TEXT NOT NULL,
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
+      translation_policy TEXT NOT NULL DEFAULT 'legacy',
+      quality_score REAL NOT NULL DEFAULT 0,
+      reviewed INTEGER NOT NULL DEFAULT 0,
+      quality_issues_json TEXT NOT NULL DEFAULT '[]',
       translated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY(article_id, target_language)
     );
@@ -183,6 +233,39 @@ function ensureTranslationSchema(db: DatabaseSyncType) {
     CREATE INDEX IF NOT EXISTS idx_article_translations_language
       ON article_translations(target_language, translated_at DESC);
   `);
+  const ensureColumn = (table: string, name: string, definition: string) => {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((column) => column.name === name)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+    }
+  };
+  ensureColumn(
+    "translation_segments",
+    "translation_policy",
+    "translation_policy TEXT NOT NULL DEFAULT 'legacy'",
+  );
+  ensureColumn(
+    "article_translations",
+    "translation_policy",
+    "translation_policy TEXT NOT NULL DEFAULT 'legacy'",
+  );
+  ensureColumn(
+    "article_translations",
+    "quality_score",
+    "quality_score REAL NOT NULL DEFAULT 0",
+  );
+  ensureColumn(
+    "article_translations",
+    "reviewed",
+    "reviewed INTEGER NOT NULL DEFAULT 0",
+  );
+  ensureColumn(
+    "article_translations",
+    "quality_issues_json",
+    "quality_issues_json TEXT NOT NULL DEFAULT '[]'",
+  );
 }
 
 function endpointUrl(baseUrl: string, apiPath: string) {
@@ -284,62 +367,296 @@ function wait(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function translateBatch(
+type ProtectedSegment = Segment & {
+  protectedSource: string;
+  protectedValues: Map<string, string>;
+};
+
+const protectedContentPattern =
+  /(?:https?:\/\/|www\.)[^\s<>"']+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|_{1,}(?:\s*\[[^\]\n]+\]\s*_{1,})?|<[^>\n]+>|\[[^\]\n]{1,40}\]|(?:[$£€¥]\s*)?\b\d[\d,.]*(?::\d{2})?\s*(?:%|km|cm|mm|kg|g|miles?|hours?|minutes?|seconds?|a\.m\.|p\.m\.)?\b/gi;
+
+function protectSegment(segment: Segment): ProtectedSegment {
+  const protectedValues = new Map<string, string>();
+  let index = 0;
+  const protectedSource = segment.source.replace(protectedContentPattern, (value) => {
+    const token = `RRKEEP${String(index).padStart(4, "0")}TOKEN`;
+    index += 1;
+    protectedValues.set(token, value);
+    return token;
+  });
+  return { ...segment, protectedSource, protectedValues };
+}
+
+function restoreProtectedText(segment: ProtectedSegment, translated: string) {
+  let restored = translated;
+  for (const [token, value] of segment.protectedValues) {
+    const occurrences = restored.split(token).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `${segment.kind} ${segment.id.slice(0, 8)} 的保护标记 ${token} 出现 ${occurrences} 次`,
+      );
+    }
+    restored = restored.replace(token, value);
+  }
+  if (/RRKEEP\d{4}TOKEN/.test(restored)) {
+    throw new Error(`${segment.kind} ${segment.id.slice(0, 8)} 含未知保护标记`);
+  }
+  return restored.trim();
+}
+
+function chineseStyleGuidance(examId: string, contentKind: ContentKind) {
+  const stage =
+    examId === "middle"
+      ? "Use clear, natural Chinese understandable to a junior-middle-school student. Prefer common textbook wording and short sentences."
+      : examId === "high"
+        ? "Use fluent high-school-level Chinese while preserving the source's logical and rhetorical structure."
+        : examId === "toeic"
+          ? "Use precise, natural business Chinese for emails, notices, advertisements, logistics, HR and finance. Keep document tone and terminology consistent."
+          : examId === "toefl" || examId === "ielts"
+            ? "Use accurate academic Chinese. Preserve qualifications, causal relations, technical terms and the author's degree of certainty."
+            : "Use accurate, idiomatic Simplified Chinese appropriate for an English learner.";
+  const content =
+    contentKind === "exam"
+      ? "This is exam material: preserve ambiguity, blanks, clues and difficulty. Never infer or insert an answer."
+      : "This is interest reading: keep the Chinese lively and readable without rewriting facts, plot, tone or character relationships.";
+  return `${stage} ${content}`;
+}
+
+function glossaryPrompt(glossary: Record<string, string>) {
+  const entries = Object.entries(glossary);
+  if (!entries.length) return "";
+  return ` Use this mandatory terminology consistently: ${entries
+    .map(([source, target]) => `${source} => ${target}`)
+    .join("; ")}.`;
+}
+
+function translationSystemPrompt(
+  plan: ArticlePlan,
+  options: TranslationRunOptions,
+) {
+  return (
+    `You are a senior English-to-Simplified-Chinese translator for a reading-learning app. ` +
+    `Translate the complete article faithfully and idiomatically into ${options.targetLanguage}. ` +
+    `${chineseStyleGuidance(plan.examId, plan.contentKind)} ` +
+    `Read the title and all paragraphs as one coherent article before translating. Resolve pronouns and terminology from context. ` +
+    `Do not omit, summarize, explain, embellish, soften, answer questions or fill blanks. ` +
+    `Every uppercase token shaped like RRKEEP0000TOKEN is immutable: copy it exactly once in the corresponding translation. ` +
+    `Preserve JSON ids and return one translation for every item. Titles should be concise and natural.` +
+    glossaryPrompt(options.glossary) +
+    ` Return JSON only: {"translations":[{"id":"...","translation":"..."}]}.`
+  );
+}
+
+function qualityIssues(source: string, translation: string): QualityIssue[] {
+  const issues: QualityIssue[] = [];
+  const englishWords = source.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) ?? [];
+  const chineseCharacters = translation.match(/[\u3400-\u9fff]/g) ?? [];
+  if (!translation.trim()) {
+    issues.push({ code: "empty", message: "译文为空", severity: "error" });
+    return issues;
+  }
+  if (source.trim() === translation.trim() && englishWords.length >= 5) {
+    issues.push({
+      code: "untranslated",
+      message: "译文与英文原文完全相同",
+      severity: "error",
+    });
+  }
+  if (
+    englishWords.length >= 12 &&
+    chineseCharacters.length < Math.max(4, Math.floor(englishWords.length * 0.22))
+  ) {
+    issues.push({
+      code: "too-short",
+      message: "中文长度异常，可能存在漏译",
+      severity: "warning",
+    });
+  }
+  const sourceHasNegation =
+    /\b(?:no|not|never|neither|nor|without|cannot|can't|won't|isn't|aren't|don't|doesn't|didn't)\b/i.test(
+      source,
+    );
+  if (
+    sourceHasNegation &&
+    !/[不无未没非勿否禁]|不能|不会|并非|从不|没有/.test(translation)
+  ) {
+    issues.push({
+      code: "negation",
+      message: "原文含否定表达，译文可能遗漏否定关系",
+      severity: "warning",
+    });
+  }
+  const remainingEnglish = translation
+    .replace(/(?:https?:\/\/|www\.)\S+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "")
+    .match(/[A-Za-z]{4,}/g);
+  if ((remainingEnglish?.length ?? 0) > Math.max(5, englishWords.length * 0.35)) {
+    issues.push({
+      code: "english-remains",
+      message: "译文中残留较多英文，请检查是否漏译",
+      severity: "warning",
+    });
+  }
+  return issues;
+}
+
+function articleQuality(
   segments: Segment[],
+  translations: Map<string, string>,
+  reviewed: boolean,
+): ArticleQuality {
+  const issues = segments.flatMap((segment) =>
+    qualityIssues(segment.source, translations.get(segment.id) ?? ""),
+  );
+  const score = Math.max(
+    0,
+    100 -
+      issues.filter((item) => item.severity === "error").length * 30 -
+      issues.filter((item) => item.severity === "warning").length * 8,
+  );
+  return { score, reviewed, issues };
+}
+
+async function callChatModel(
+  system: string,
+  user: unknown,
+  model: string,
+  temperature: number,
   options: TranslationRunOptions,
 ) {
   const url = endpointUrl(options.baseUrl, options.apiPath);
+  const headers = new Headers(options.headers);
+  headers.set("content-type", "application/json");
+  headers.set("accept", "application/json");
+  if (options.apiKey) headers.set("authorization", `Bearer ${options.apiKey}`);
+  const body: Record<string, unknown> = {
+    model,
+    temperature,
+    stream: false,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: JSON.stringify(user) },
+    ],
+  };
+  if (options.jsonMode) body.response_format = { type: "json_object" };
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(options.timeoutMs),
+  });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 800);
+    throw new Error(`模型接口 ${response.status}: ${detail}`);
+  }
+  const responsePayload = (await response.json()) as unknown;
+  return {
+    content: parseJsonContent(contentString(responsePayload)),
+    usage: usageFrom(responsePayload),
+  };
+}
+
+function addUsage(target: TokenUsage, value: TokenUsage) {
+  target.promptTokens += value.promptTokens;
+  target.completionTokens += value.completionTokens;
+  target.totalTokens += value.totalTokens;
+}
+
+async function translateArticle(
+  plan: ArticlePlan,
+  options: TranslationRunOptions,
+) {
   let lastError: unknown;
   for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
     try {
-      const headers = new Headers(options.headers);
-      headers.set("content-type", "application/json");
-      headers.set("accept", "application/json");
-      if (options.apiKey) headers.set("authorization", `Bearer ${options.apiKey}`);
-      const body: Record<string, unknown> = {
-        model: options.model,
-        temperature: options.temperature,
-        stream: false,
-        messages: [
+      const protectedSegments = plan.segments.map(protectSegment);
+      const requestItems = protectedSegments.map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        text: item.protectedSource,
+      }));
+      const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      const translatedResponse = await callChatModel(
+        translationSystemPrompt(plan, options),
+        {
+          articleId: plan.id,
+          examId: plan.examId,
+          contentKind: plan.contentKind,
+          targetLanguage: options.targetLanguage,
+          items: requestItems,
+        },
+        options.model,
+        options.temperature,
+        options,
+      );
+      addUsage(usage, translatedResponse.usage);
+      let protectedTranslations = validateTranslations(
+        translatedResponse.content,
+        protectedSegments.map((item) => ({
+          id: item.id,
+          kind: item.kind,
+          source: item.protectedSource,
+        })),
+      );
+      let restored = new Map(
+        protectedSegments.map((segment) => [
+          segment.id,
+          restoreProtectedText(segment, protectedTranslations.get(segment.id)!),
+        ]),
+      );
+      const initialQuality = articleQuality(plan.segments, restored, false);
+      let reviewed = false;
+      if (options.reviewEnabled) {
+        const reviewerModel = options.reviewModel || options.model;
+        const reviewResponse = await callChatModel(
+          `You are a meticulous senior bilingual editor. Compare every English source item with its draft Chinese translation in the context of one complete article. ` +
+            `Correct mistranslation, omission, addition, awkward literal Chinese, inconsistent terminology, pronoun reference and tone. ` +
+            `Preserve exam ambiguity and never solve blanks. Every RRKEEP token is immutable and must appear exactly once in its corresponding item. ` +
+            `Return all items, including unchanged ones, as JSON only: {"translations":[{"id":"...","translation":"..."}]}.`,
           {
-            role: "system",
-            content:
-              `You are a professional English-to-Simplified-Chinese translator for a reading-learning app. ` +
-              `Translate faithfully into ${options.targetLanguage}. Preserve names, numbers, paragraph meaning, ` +
-              `exam terminology and JSON ids. Titles should be concise. Do not explain or answer the article. ` +
-              `Return JSON only: {"translations":[{"id":"...","translation":"..."}]}.`,
+            articleId: plan.id,
+            examId: plan.examId,
+            contentKind: plan.contentKind,
+            targetLanguage: options.targetLanguage,
+            detectedIssues: initialQuality.issues,
+            items: protectedSegments.map((segment) => ({
+              id: segment.id,
+              kind: segment.kind,
+              source: segment.protectedSource,
+              draft: protectedTranslations.get(segment.id),
+            })),
           },
-          {
-            role: "user",
-            content: JSON.stringify({
-              targetLanguage: options.targetLanguage,
-              items: segments.map((item) => ({
-                id: item.id,
-                kind: item.kind,
-                text: item.source,
-              })),
-            }),
-          },
-        ],
-      };
-      if (options.jsonMode) body.response_format = { type: "json_object" };
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(options.timeoutMs),
-      });
-      if (!response.ok) {
-        const detail = (await response.text()).slice(0, 800);
-        throw new Error(`模型接口 ${response.status}: ${detail}`);
+          reviewerModel,
+          options.reviewTemperature,
+          options,
+        );
+        addUsage(usage, reviewResponse.usage);
+        protectedTranslations = validateTranslations(
+          reviewResponse.content,
+          protectedSegments.map((item) => ({
+            id: item.id,
+            kind: item.kind,
+            source: item.protectedSource,
+          })),
+        );
+        restored = new Map(
+          protectedSegments.map((segment) => [
+            segment.id,
+            restoreProtectedText(segment, protectedTranslations.get(segment.id)!),
+          ]),
+        );
+        reviewed = true;
       }
-      const responsePayload = (await response.json()) as unknown;
+      const quality = articleQuality(plan.segments, restored, reviewed);
+      const hardIssues = quality.issues.filter((item) => item.severity === "error");
+      if (hardIssues.length) {
+        throw new Error(
+          `质量检查失败：${hardIssues.map((item) => item.message).join("；")}`,
+        );
+      }
       return {
-        translations: validateTranslations(
-          parseJsonContent(contentString(responsePayload)),
-          segments,
-        ),
-        usage: usageFrom(responsePayload),
+        translations: restored,
+        usage,
+        quality,
       };
     } catch (error) {
       lastError = error;
@@ -367,7 +684,8 @@ function selectedArticles(db: DatabaseSyncType, options: TranslationRunOptions) 
   if (options.limit) params.push(options.limit);
   return db
     .prepare(
-      `SELECT id, title, paragraphs_json AS paragraphsJson
+      `SELECT id, exam_id AS examId, content_kind AS contentKind,
+        title, paragraphs_json AS paragraphsJson
        FROM articles ${where} ORDER BY id ${limit}`,
     )
     .all(...params) as unknown as ArticleRow[];
@@ -376,21 +694,37 @@ function selectedArticles(db: DatabaseSyncType, options: TranslationRunOptions) 
 function buildPlans(rows: ArticleRow[]) {
   const segments = new Map<string, Segment>();
   const plans: ArticlePlan[] = [];
-  const addSegment = (kind: SegmentKind, sourceValue: string) => {
-    const source = sourceValue.trim();
-    const id = hashText(kind, source);
-    if (!segments.has(id)) segments.set(id, { id, kind, source });
-    return id;
-  };
   for (const row of rows) {
     const paragraphs = (JSON.parse(row.paragraphsJson) as string[]).map((item) =>
       item.trim(),
     );
+    const sourceHash = articleSourceHash(row.title, paragraphs);
+    const context = `${row.id}\0${row.examId}\0${row.contentKind}\0${sourceHash}`;
+    const articleSegments: Segment[] = [];
+    const addSegment = (
+      kind: SegmentKind,
+      index: number,
+      sourceValue: string,
+    ) => {
+      const source = sourceValue.trim();
+      const id = hashText(context, kind, index, source);
+      const segment = { id, kind, source } satisfies Segment;
+      segments.set(id, segment);
+      articleSegments.push(segment);
+      return id;
+    };
+    const titleSegmentId = addSegment("title", 0, row.title);
+    const paragraphSegmentIds = paragraphs.map((item, index) =>
+      addSegment("paragraph", index, item),
+    );
     plans.push({
       id: row.id,
-      sourceHash: articleSourceHash(row.title, paragraphs),
-      titleSegmentId: addSegment("title", row.title),
-      paragraphSegmentIds: paragraphs.map((item) => addSegment("paragraph", item)),
+      examId: row.examId,
+      contentKind: row.contentKind,
+      sourceHash,
+      segments: articleSegments,
+      titleSegmentId,
+      paragraphSegmentIds,
     });
   }
   return { segments, plans };
@@ -400,41 +734,54 @@ function cachedTranslations(
   db: DatabaseSyncType,
   segments: Map<string, Segment>,
   targetLanguage: string,
+  policy: string,
   force: boolean,
 ) {
   const values = new Map<string, CachedSegment>();
   if (force) return values;
   const find = db.prepare(
-    `SELECT translated_text AS translation, provider, model
-     FROM translation_segments WHERE source_hash = ? AND target_language = ?`,
+    `SELECT translated_text AS translation, provider, model,
+       translation_policy AS translationPolicy
+     FROM translation_segments
+     WHERE source_hash = ? AND target_language = ? AND translation_policy = ?`,
   );
   for (const segment of segments.values()) {
-    const row = find.get(segment.id, targetLanguage) as
-      | { translation: string; provider: string; model: string }
+    const row = find.get(segment.id, targetLanguage, policy) as
+      | {
+          translation: string;
+          provider: string;
+          model: string;
+          translationPolicy: string;
+        }
       | undefined;
     if (row?.translation.trim()) values.set(segment.id, { ...segment, ...row });
   }
   return values;
 }
 
-function saveBatch(
+function saveArticleTranslationSegments(
   db: DatabaseSyncType,
   segments: Segment[],
   translations: Map<string, string>,
   options: TranslationRunOptions,
   resolved: Map<string, CachedSegment>,
 ) {
+  const policy = translationPolicy(options);
+  const model = options.reviewEnabled
+    ? `${options.model}+review:${options.reviewModel || options.model}`
+    : options.model;
   const upsert = db.prepare(
     `INSERT INTO translation_segments(
        source_hash, target_language, segment_kind, source_text,
-       translated_text, provider, model, translated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       translated_text, provider, model, translation_policy, translated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(source_hash, target_language) DO UPDATE SET
        segment_kind = excluded.segment_kind,
        source_text = excluded.source_text,
        translated_text = excluded.translated_text,
        provider = excluded.provider,
        model = excluded.model,
+       translation_policy = excluded.translation_policy,
        translated_at = CURRENT_TIMESTAMP`,
   );
   db.exec("BEGIN IMMEDIATE");
@@ -448,13 +795,15 @@ function saveBatch(
         segment.source,
         translation,
         options.baseUrl,
-        options.model,
+        model,
+        policy,
       );
       resolved.set(segment.id, {
         ...segment,
         translation,
         provider: options.baseUrl,
-        model: options.model,
+        model,
+        translationPolicy: policy,
       });
     }
     db.exec("COMMIT");
@@ -468,19 +817,31 @@ function materializeArticles(
   db: DatabaseSyncType,
   plans: ArticlePlan[],
   resolved: Map<string, CachedSegment>,
-  targetLanguage: string,
+  options: TranslationRunOptions,
+  qualityByArticle: Map<string, ArticleQuality>,
 ) {
+  const policy = translationPolicy(options);
+  const existingMetadata = db.prepare(
+    `SELECT quality_score AS score, reviewed, quality_issues_json AS issuesJson
+     FROM article_translations
+     WHERE article_id = ? AND target_language = ? AND translation_policy = ?`,
+  );
   const upsert = db.prepare(
     `INSERT INTO article_translations(
        article_id, target_language, source_hash, translated_title,
-       translated_paragraphs_json, provider, model, translated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       translated_paragraphs_json, provider, model, translation_policy,
+       quality_score, reviewed, quality_issues_json, translated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(article_id, target_language) DO UPDATE SET
        source_hash = excluded.source_hash,
        translated_title = excluded.translated_title,
        translated_paragraphs_json = excluded.translated_paragraphs_json,
        provider = excluded.provider,
        model = excluded.model,
+       translation_policy = excluded.translation_policy,
+       quality_score = excluded.quality_score,
+       reviewed = excluded.reviewed,
+       quality_issues_json = excluded.quality_issues_json,
        translated_at = CURRENT_TIMESTAMP`,
   );
   let completed = 0;
@@ -493,14 +854,36 @@ function materializeArticles(
       const values = [title, ...(paragraphs as CachedSegment[])];
       const providers = [...new Set(values.map((item) => item.provider))].sort();
       const models = [...new Set(values.map((item) => item.model))].sort();
+      const existing = existingMetadata.get(
+        plan.id,
+        options.targetLanguage,
+        policy,
+      ) as { score: number; reviewed: number; issuesJson: string } | undefined;
+      const quality =
+        qualityByArticle.get(plan.id) ??
+        (existing
+          ? {
+              score: existing.score,
+              reviewed: Boolean(existing.reviewed),
+              issues: JSON.parse(existing.issuesJson) as QualityIssue[],
+            }
+          : articleQuality(
+              plan.segments,
+              new Map(values.map((item) => [item.id, item.translation])),
+              options.reviewEnabled,
+            ));
       upsert.run(
         plan.id,
-        targetLanguage,
+        options.targetLanguage,
         plan.sourceHash,
         title.translation,
         JSON.stringify(paragraphs.map((item) => item!.translation)),
         providers.join(","),
         models.join(","),
+        policy,
+        quality.score,
+        quality.reviewed ? 1 : 0,
+        JSON.stringify(quality.issues),
       );
       completed += 1;
     }
@@ -525,14 +908,23 @@ export async function runArticleTranslation(
     ensureTranslationSchema(db);
     const articles = selectedArticles(db, options);
     const { segments, plans } = buildPlans(articles);
+    const policy = translationPolicy(options);
     const resolved = cachedTranslations(
       db,
       segments,
       options.targetLanguage,
+      policy,
       options.force,
     );
-    const pending = [...segments.values()].filter((item) => !resolved.has(item.id));
-    const pendingCharacters = pending.reduce((sum, item) => sum + item.source.length, 0);
+    const pendingPlans = plans.filter(
+      (plan) =>
+        options.force || plan.segments.some((segment) => !resolved.has(segment.id)),
+    );
+    const pendingSegments = pendingPlans.flatMap((plan) => plan.segments);
+    const pendingCharacters = pendingSegments.reduce(
+      (sum, item) => sum + item.source.length,
+      0,
+    );
     const result: TranslationRunResult = {
       articles: articles.length,
       uniqueSegments: segments.size,
@@ -540,12 +932,14 @@ export async function runArticleTranslation(
       translatedSegments: 0,
       failedSegments: 0,
       materializedArticles: 0,
+      reviewedArticles: 0,
+      qualityWarnings: 0,
       pendingCharacters,
       estimatedSourceTokens: Math.ceil(pendingCharacters / 4),
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     };
     log(
-      `文章 ${articles.length} 篇；唯一标题/段落 ${segments.size} 个；缓存命中 ${resolved.size} 个；待翻译 ${pending.length} 个。`,
+      `文章 ${articles.length} 篇；上下文标题/段落 ${segments.size} 个；缓存命中 ${resolved.size} 个；待整篇翻译 ${pendingPlans.length} 篇（${pendingSegments.length} 段）。`,
     );
     log(
       `待翻译英文约 ${pendingCharacters.toLocaleString()} 字符，正文输入约 ${result.estimatedSourceTokens.toLocaleString()} Token（不含提示词）。`,
@@ -554,37 +948,48 @@ export async function runArticleTranslation(
       log("Dry run 完成：没有调用模型，也没有写入译文。");
       return result;
     }
-    if (pending.length && (!options.baseUrl || !options.model)) {
+    if (pendingPlans.length && (!options.baseUrl || !options.model)) {
       throw new Error("待翻译内容不为空，请配置 baseUrl 和 model");
-    }
-    const batches: Segment[][] = [];
-    for (let index = 0; index < pending.length; index += options.batchSize) {
-      batches.push(pending.slice(index, index + options.batchSize));
     }
     let cursor = 0;
     const errors: string[] = [];
+    const qualityByArticle = new Map<string, ArticleQuality>();
     const workers = Array.from(
-      { length: Math.min(options.concurrency, Math.max(1, batches.length)) },
+      {
+        length: Math.min(
+          options.concurrency,
+          Math.max(1, pendingPlans.length),
+        ),
+      },
       async () => {
-        while (cursor < batches.length) {
-          const batchIndex = cursor;
+        while (cursor < pendingPlans.length) {
+          const planIndex = cursor;
           cursor += 1;
-          const batch = batches[batchIndex];
+          const plan = pendingPlans[planIndex];
           try {
-            const translated = await translateBatch(batch, options);
-            saveBatch(db, batch, translated.translations, options, resolved);
-            result.translatedSegments += batch.length;
-            result.usage.promptTokens += translated.usage.promptTokens;
-            result.usage.completionTokens += translated.usage.completionTokens;
-            result.usage.totalTokens += translated.usage.totalTokens;
+            const translated = await translateArticle(plan, options);
+            saveArticleTranslationSegments(
+              db,
+              plan.segments,
+              translated.translations,
+              options,
+              resolved,
+            );
+            qualityByArticle.set(plan.id, translated.quality);
+            result.translatedSegments += plan.segments.length;
+            if (translated.quality.reviewed) result.reviewedArticles += 1;
+            result.qualityWarnings += translated.quality.issues.filter(
+              (item) => item.severity === "warning",
+            ).length;
+            addUsage(result.usage, translated.usage);
             log(
-              `[${batchIndex + 1}/${batches.length}] 已翻译 ${batch.length} 项，累计 ${result.translatedSegments}/${pending.length}`,
+              `[${planIndex + 1}/${pendingPlans.length}] ${plan.id} 已完成整篇翻译${translated.quality.reviewed ? "与审校" : ""}，质量 ${translated.quality.score}，累计 ${result.translatedSegments}/${pendingSegments.length} 段`,
             );
           } catch (error) {
-            result.failedSegments += batch.length;
+            result.failedSegments += plan.segments.length;
             const message = error instanceof Error ? error.message : String(error);
-            errors.push(`批次 ${batchIndex + 1}: ${message}`);
-            log(`[${batchIndex + 1}/${batches.length}] 失败：${message}`);
+            errors.push(`文章 ${plan.id}: ${message}`);
+            log(`[${planIndex + 1}/${pendingPlans.length}] ${plan.id} 失败：${message}`);
           }
         }
       },
@@ -594,10 +999,11 @@ export async function runArticleTranslation(
       db,
       plans,
       resolved,
-      options.targetLanguage,
+      options,
+      qualityByArticle,
     );
     log(
-      `完成：新增/更新译文段 ${result.translatedSegments} 个，已组装文章译文 ${result.materializedArticles}/${articles.length} 篇。`,
+      `完成：新增/更新译文段 ${result.translatedSegments} 个，审校文章 ${result.reviewedArticles} 篇，质量警告 ${result.qualityWarnings} 个，已组装文章译文 ${result.materializedArticles}/${articles.length} 篇。`,
     );
     if (result.usage.totalTokens) {
       log(
@@ -606,7 +1012,7 @@ export async function runArticleTranslation(
     }
     if (errors.length) {
       throw new Error(
-        `${errors.length} 个批次失败；已成功结果已经保存，可直接重跑续传。\n${errors
+        `${errors.length} 篇文章失败；已成功结果已经保存，可直接重跑续传。\n${errors
           .slice(0, 5)
           .join("\n")}`,
       );
@@ -666,6 +1072,17 @@ function jsonHeaders(value: string | undefined) {
   );
 }
 
+function jsonStringMap(value: string | undefined, name: string) {
+  if (!value) return {};
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${name} 必须是 JSON 对象`);
+  }
+  return Object.fromEntries(
+    Object.entries(parsed).map(([key, mapValue]) => [key, String(mapValue)]),
+  );
+}
+
 export function translationOptionsFromCli(argv: string[]): TranslationRunOptions {
   const { values, flags } = parsedCli(argv);
   if (flags.has("help")) {
@@ -696,6 +1113,15 @@ export function translationOptionsFromCli(argv: string[]): TranslationRunOptions
     : flags.has("no-json-mode")
       ? false
       : undefined;
+  const cliReviewEnabled = flags.has("review")
+    ? true
+    : flags.has("no-review")
+      ? false
+      : undefined;
+  const environmentGlossary = jsonStringMap(
+    process.env.TRANSLATION_GLOSSARY_JSON,
+    "TRANSLATION_GLOSSARY_JSON",
+  );
   return {
     ...defaultConfig,
     databasePath,
@@ -748,6 +1174,25 @@ export function translationOptionsFromCli(argv: string[]): TranslationRunOptions
       "temperature",
       0,
     ),
+    reviewEnabled:
+      cliReviewEnabled ??
+      boolValue(
+        process.env.TRANSLATION_REVIEW_ENABLED ?? fileConfig.reviewEnabled,
+        defaultConfig.reviewEnabled,
+      ),
+    reviewModel: String(
+      from("review-model", "TRANSLATION_REVIEW_MODEL", "reviewModel") ?? "",
+    ),
+    reviewTemperature: numberValue(
+      from(
+        "review-temperature",
+        "TRANSLATION_REVIEW_TEMPERATURE",
+        "reviewTemperature",
+      ),
+      defaultConfig.reviewTemperature,
+      "reviewTemperature",
+      0,
+    ),
     jsonMode:
       cliJsonMode ??
       boolValue(
@@ -755,6 +1200,7 @@ export function translationOptionsFromCli(argv: string[]): TranslationRunOptions
         defaultConfig.jsonMode,
       ),
     headers: { ...configHeaders, ...environmentHeaders },
+    glossary: { ...(fileConfig.glossary ?? {}), ...environmentGlossary },
     examId: values.get("exam") ?? process.env.TRANSLATION_EXAM_ID,
     contentKind,
     limit: values.has("limit")

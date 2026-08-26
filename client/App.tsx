@@ -2092,14 +2092,25 @@ function ArticleNarrationPlayer({ article }: { article: Article }) {
   const releasePlayer = () => {
     subscriptionRef.current?.remove();
     subscriptionRef.current = null;
+    const player = playerRef.current;
+    playerRef.current = null;
     try {
-      playerRef.current?.pause();
-      playerRef.current?.clearLockScreenControls();
-      playerRef.current?.release();
+      player?.pause();
+    } catch {
+      // The native player may already be paused or released.
+    }
+    try {
+      if (player && typeof player.clearLockScreenControls === "function") {
+        player.clearLockScreenControls();
+      }
+    } catch {
+      // Expo Go versions without lock-screen integration still support audio.
+    }
+    try {
+      player?.release();
     } catch {
       // The native player may already have been released after an interruption.
     }
-    playerRef.current = null;
   };
 
   useEffect(() => {
@@ -2194,13 +2205,19 @@ function ArticleNarrationPlayer({ article }: { article: Article }) {
     try {
       const audio = await api.ensureArticleAudio(article.id, voice);
       if (requestGeneration !== requestGenerationRef.current) return;
-      const player = createAudioPlayer(audio.audioUrl, {
+      const player = createAudioPlayer({ uri: audio.audioUrl }, {
         updateInterval: 250,
-        downloadFirst: Platform.OS !== "web",
+        // The server already caches generated audio. Streaming the cached file
+        // lets native players queue playback immediately; `downloadFirst`
+        // replaces the source asynchronously and can race with play() on iPad.
+        downloadFirst: false,
       });
       playerRef.current = player;
       player.setPlaybackRate(speed, "high");
-      if (Platform.OS !== "web") {
+      if (
+        Platform.OS !== "web" &&
+        typeof player.setActiveForLockScreen === "function"
+      ) {
         player.setActiveForLockScreen(true, {
           title: article.title,
           artist: "拾词 · 整篇朗读",
@@ -2209,6 +2226,15 @@ function ArticleNarrationPlayer({ article }: { article: Article }) {
       subscriptionRef.current = player.addListener(
         "playbackStatusUpdate",
         (status) => {
+          if (status.playbackState === "failed") {
+            setState("error");
+            setMessage(
+              status.reasonForWaitingToPlay
+                ? `音频播放失败：${status.reasonForWaitingToPlay}`
+                : "音频播放失败，请检查设备网络后重试",
+            );
+            return;
+          }
           setPosition(status.currentTime || 0);
           if (status.duration) setDuration(status.duration);
           if (status.playing) {
@@ -2393,12 +2419,22 @@ function GalacticaReminderStage({
   );
 
   useEffect(() => {
-    player.pause();
-    player.currentTime = 0;
-    if (active && !reducedMotion) player.play();
-    return () => {
+    try {
       player.pause();
-      player.currentTime = 0;
+      if (active && !reducedMotion) {
+        player.currentTime = 0;
+        player.play();
+      }
+    } catch {
+      // The native video object can already be releasing while the modal
+      // closes. The reminder must never block returning to the article.
+    }
+    return () => {
+      try {
+        player.pause();
+      } catch {
+        // The managed player may already have been released by expo-video.
+      }
     };
   }, [active, player, reducedMotion]);
 
@@ -2542,7 +2578,11 @@ function TimeLimitReminder({
   }, [blade, entrance, flash, reducedMotion, reminderStyle, slash, visible]);
 
   const close = (action: () => void) => {
-    Speech.stop();
+    try {
+      Speech.stop();
+    } catch {
+      // Closing the reminder should still work if native speech is releasing.
+    }
     action();
   };
 
@@ -3297,6 +3337,16 @@ function ReaderScreen({
     timerDeadlineRef.current = timerSettings.enabled
       ? Date.now() + seconds * 1000
       : null;
+    setTimeUpVisible(false);
+  };
+
+  const continueAfterTimeUp = () => {
+    // A real timeout should become a clean paused state. Previewing the alert
+    // keeps the existing countdown because remainingSeconds is still positive.
+    if (remainingSeconds <= 0) {
+      timerDeadlineRef.current = null;
+      saveTimerSettings({ ...timerSettings, enabled: false });
+    }
     setTimeUpVisible(false);
   };
 
@@ -4894,7 +4944,7 @@ function ReaderScreen({
         visible={timeUpVisible}
         reminderStyle={timerSettings.reminderStyle}
         onAddMinute={addOneMinute}
-        onDismiss={() => setTimeUpVisible(false)}
+        onDismiss={continueAfterTimeUp}
       />
       <NativeNoticeModal
         notice={readerNotice}

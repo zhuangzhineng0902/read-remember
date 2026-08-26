@@ -180,6 +180,7 @@ export function createDatabase(filename: string): AppDatabase {
       translated_text TEXT NOT NULL,
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
+      translation_policy TEXT NOT NULL DEFAULT 'legacy',
       translated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY(source_hash, target_language)
     );
@@ -192,6 +193,10 @@ export function createDatabase(filename: string): AppDatabase {
       translated_paragraphs_json TEXT NOT NULL,
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
+      translation_policy TEXT NOT NULL DEFAULT 'legacy',
+      quality_score REAL NOT NULL DEFAULT 0,
+      reviewed INTEGER NOT NULL DEFAULT 0,
+      quality_issues_json TEXT NOT NULL DEFAULT '[]',
       translated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY(article_id, target_language)
     );
@@ -315,6 +320,31 @@ export function createDatabase(filename: string): AppDatabase {
   ensureColumn("articles", "interest_id", "interest_id TEXT");
   ensureColumn("articles", "series_title", "series_title TEXT");
   ensureColumn("articles", "episode_number", "episode_number INTEGER");
+  ensureColumn(
+    "translation_segments",
+    "translation_policy",
+    "translation_policy TEXT NOT NULL DEFAULT 'legacy'",
+  );
+  ensureColumn(
+    "article_translations",
+    "translation_policy",
+    "translation_policy TEXT NOT NULL DEFAULT 'legacy'",
+  );
+  ensureColumn(
+    "article_translations",
+    "quality_score",
+    "quality_score REAL NOT NULL DEFAULT 0",
+  );
+  ensureColumn(
+    "article_translations",
+    "reviewed",
+    "reviewed INTEGER NOT NULL DEFAULT 0",
+  );
+  ensureColumn(
+    "article_translations",
+    "quality_issues_json",
+    "quality_issues_json TEXT NOT NULL DEFAULT '[]'",
+  );
   ensureColumn("user_preferences", "interests_json", "interests_json TEXT NOT NULL DEFAULT '[]'");
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_articles_interest

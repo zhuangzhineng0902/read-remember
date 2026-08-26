@@ -136,11 +136,42 @@ function developmentHost() {
   return Platform.OS === "android" ? "10.0.2.2" : "127.0.0.1";
 }
 
-export const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL ??
-  (Platform.OS === "web"
-    ? "/api/v1"
-    : `http://${developmentHost()}:4000/api/v1`);
+function normalizedApiBaseUrl(value: string) {
+  let normalized = value.trim().replace(/\/+$/, "");
+  if (/^[\w.-]+:\d+(?:\/|$)/.test(normalized)) {
+    normalized = `http://${normalized}`;
+  }
+  if (normalized === "" || normalized === "/") return "/api/v1";
+  if (/^https?:\/\//i.test(normalized)) {
+    const url = new URL(normalized);
+    if (url.pathname === "/" || url.pathname === "") {
+      url.pathname = "/api/v1";
+    }
+    return url.toString().replace(/\/+$/, "");
+  }
+  return normalized;
+}
+
+function webApiBaseUrl() {
+  if (typeof window === "undefined") return "/api/v1";
+  const { hostname, port, protocol } = window.location;
+  // Expo's Metro server serves the app shell for unknown paths. During web
+  // development, point API requests at the standalone server instead of
+  // letting `/api/v1` fall through to Metro and return index.html.
+  if (port === "8081" || port === "19006") {
+    return `${protocol}//${hostname}:4000/api/v1`;
+  }
+  return "/api/v1";
+}
+
+const defaultApiBaseUrl =
+  Platform.OS === "web"
+    ? webApiBaseUrl()
+    : `http://${developmentHost()}:4000/api/v1`;
+
+export const API_BASE_URL = normalizedApiBaseUrl(
+  process.env.EXPO_PUBLIC_API_URL ?? defaultApiBaseUrl,
+);
 
 let authToken: string | null = null;
 // v2 invalidates metadata cached before the server switched to ECDICT SQLite.
@@ -160,14 +191,30 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers,
   });
+  if (response.status === 204) return undefined as T;
+  const responseText = await response.text();
+  let payload: ApiEnvelope<T> & {
+    error?: { message?: string };
+  };
+  try {
+    payload = JSON.parse(responseText) as typeof payload;
+  } catch {
+    const returnedHtml = /^\s*</.test(responseText);
+    throw new Error(
+      returnedHtml
+        ? `API 地址配置错误：服务端返回了网页内容（当前地址 ${API_BASE_URL}）`
+        : `服务端返回了无法识别的数据 (${response.status})`,
+    );
+  }
   if (!response.ok) {
-    const payload = await response.json().catch(() => null);
     throw new Error(
       payload?.error?.message ?? `API 请求失败 (${response.status})`,
     );
   }
-  if (response.status === 204) return undefined as T;
-  return ((await response.json()) as ApiEnvelope<T>).data;
+  if (!payload || typeof payload !== "object" || !("data" in payload)) {
+    throw new Error("服务端响应缺少 data 字段");
+  }
+  return payload.data;
 }
 
 const pronunciationCacheKey = (word: string, accent: "us" | "uk") =>

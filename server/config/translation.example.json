@@ -10,6 +10,13 @@
   "timeoutMs": 120000,
   "maxRetries": 3,
   "temperature": 0.1,
+  "reviewEnabled": true,
+  "reviewModel": "",
+  "reviewTemperature": 0,
   "jsonMode": false,
-  "headers": {}
+  "headers": {},
+  "glossary": {
+    "account manager": "客户经理",
+    "carrier": "承运商"
+  }
 }

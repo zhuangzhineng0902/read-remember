@@ -113,7 +113,7 @@ npm run generate:article-audio -- --voices all
 
 ## 批量生成文章译文
 
-服务端提供可恢复的文章翻译脚本，支持任意 OpenAI Chat Completions 兼容接口，包括本地 Ollama、自建推理服务和云模型。译文按标题/段落内容哈希缓存，重复段落只调用一次；中途中断后重新运行会从已有缓存继续。
+服务端提供可恢复的文章翻译脚本，支持任意 OpenAI Chat Completions 兼容接口，包括本地 Ollama、自建推理服务和云模型。新版按完整文章提供上下文，先保护题库标签、填空、网址、邮箱、数字等不可改写内容，再执行翻译、自动质量检查和可选的第二遍审校。缓存包含翻译策略版本和文章上下文，中途中断后可从新版合格缓存继续。
 
 先复制并修改配置：
 
@@ -132,9 +132,17 @@ cp config/translation.example.json config/translation.json
   "targetLanguage": "zh-CN",
   "batchSize": 8,
   "concurrency": 2,
+  "reviewEnabled": true,
+  "reviewModel": "",
+  "reviewTemperature": 0,
+  "glossary": {
+    "account manager": "客户经理"
+  },
   "jsonMode": false
 }
 ```
+
+`reviewEnabled` 默认开启。`reviewModel` 留空时使用翻译模型进行第二遍审校，也可以指定同一接口下更强的审校模型。`glossary` 用于固定考试、商务、科普或故事人物的译法。第二遍审校会增加模型消耗；临时关闭可使用 `--no-review`。
 
 `config/translation.json` 已加入 Git 忽略规则，API Key 不会被提交。特殊供应商可以通过 `headers` 添加自定义请求头；不支持 `response_format` 的本地模型应保持 `jsonMode: false`。
 
@@ -166,6 +174,10 @@ npm run translate:articles -- \
 # 更换模型后强制重新翻译选定内容
 npm run translate:articles -- \
   --config config/translation.json --exam middle --force
+
+# 小批量比较关闭审校后的成本和质量
+npm run translate:articles -- \
+  --config config/translation.json --exam middle --limit 10 --force --no-review
 ```
 
 命令行参数优先于环境变量和 JSON 配置，因此也可以临时指定模型：
@@ -176,7 +188,7 @@ npm run translate:articles -- \
   --model your-custom-model --limit 10
 ```
 
-翻译段缓存保存在 `translation_segments`，组装后的文章译文保存在 `article_translations`。客户端通过受登录保护的 `GET /api/v1/articles/:id/translation?language=zh-CN` 获取已推送文章的整篇译文；没有生成译文时接口返回 `data: null`。模型接口返回 `usage` 时，脚本会输出真实输入、输出和总 Token；否则输出待翻译英文字符数及输入 Token 估算。执行 `npm run translate:articles -- --help` 可以查看全部参数。
+翻译段缓存保存在 `translation_segments`，组装后的文章译文保存在 `article_translations`，并记录 `translation_policy`、`quality_score`、`reviewed` 与质量问题列表。自动检查覆盖空译、明显漏译、否定关系和英文残留；任何保护标记丢失都会使该文章失败并自动重试，避免模型填写考试空白或修改题库编号。客户端通过受登录保护的 `GET /api/v1/articles/:id/translation?language=zh-CN` 获取已推送文章的整篇译文；没有生成译文时接口返回 `data: null`。模型接口返回 `usage` 时，脚本会汇总翻译与审校的真实 Token。执行 `npm run translate:articles -- --help` 可以查看全部参数。
 
 运营后台的手动推送支持按考试分类、文章主题类型及关键词筛选题库；切换筛选会清除不再可见的文章选择，避免误推。
 
