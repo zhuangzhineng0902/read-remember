@@ -43,6 +43,7 @@ export const LongPressWord = forwardRef<LongPressWordHandle, LongPressWordProps>
 }, forwardedRef) {
   const textRef = useRef<Text>(null);
   const selectingRef = useRef(false);
+  const responderMoveSeenRef = useRef(false);
 
   useImperativeHandle(forwardedRef, () => ({
     measure: () =>
@@ -61,14 +62,23 @@ export const LongPressWord = forwardRef<LongPressWordHandle, LongPressWordProps>
   const finishSelection = () => {
     if (!selectingRef.current) return;
     selectingRef.current = false;
+    responderMoveSeenRef.current = false;
     onSelectionEnd?.();
   };
 
-  const moveSelection = (event: GestureResponderEvent) => {
+  const moveSelection = (
+    event: GestureResponderEvent,
+    source: "responder" | "touch",
+  ) => {
     if (!selectingRef.current) return;
+    if (source === "touch" && responderMoveSeenRef.current) return;
+    if (source === "responder") responderMoveSeenRef.current = true;
+    const x = event.nativeEvent.pageX;
+    const y = event.nativeEvent.pageY;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     onSelectionMove?.({
-      x: event.nativeEvent.pageX,
-      y: event.nativeEvent.pageY,
+      x,
+      y,
     });
   };
 
@@ -87,6 +97,7 @@ export const LongPressWord = forwardRef<LongPressWordHandle, LongPressWordProps>
         };
         if (onSelectionStart) {
           selectingRef.current = true;
+          responderMoveSeenRef.current = false;
           onSelectionStart(anchor);
         } else {
           onLongPress(anchor);
@@ -97,10 +108,12 @@ export const LongPressWord = forwardRef<LongPressWordHandle, LongPressWordProps>
         onPressOut?.();
       }}
       {...({
-        onResponderMove: moveSelection,
+        onResponderMove: (event: GestureResponderEvent) =>
+          moveSelection(event, "responder"),
         onResponderRelease: finishSelection,
         onResponderTerminate: finishSelection,
-        onTouchMove: moveSelection,
+        onTouchMove: (event: GestureResponderEvent) =>
+          moveSelection(event, "touch"),
         onTouchEnd: finishSelection,
         onTouchCancel: finishSelection,
       } as any)}

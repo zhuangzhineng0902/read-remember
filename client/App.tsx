@@ -2837,6 +2837,7 @@ function ReaderScreen({
   const wordHandlesRef = useRef(new Map<string, LongPressWordHandle>());
   const selectionAnchorsRef = useRef(new Map<number, WordAnchor>());
   const lastSelectionPointRef = useRef<{ x: number; y: number } | null>(null);
+  const selectionOriginRef = useRef<{ x: number; y: number } | null>(null);
   const timerDeadlineRef = useRef<number | null>(null);
   const translationRequestRef = useRef(0);
   const [readerTab, setReaderTab] = useState<
@@ -3111,6 +3112,8 @@ function ReaderScreen({
     phraseRequestRef.current += 1;
     textSelectionRef.current = null;
     selectionAnchorsRef.current.clear();
+    selectionOriginRef.current = null;
+    lastSelectionPointRef.current = null;
     setTextSelection(null);
     setSelectedPhrase(null);
     setSelectedWord(null);
@@ -3466,10 +3469,50 @@ function ReaderScreen({
   const updateTextSelectionAtPoint = (point: { x: number; y: number }) => {
     lastSelectionPointRef.current = point;
     const current = textSelectionRef.current;
-    if (!current || !selectionAnchorsRef.current.size) return;
-    let targetIndex = current.endIndex;
+    const origin = selectionOriginRef.current;
+    if (!current || !origin) return;
+    const dx = point.x - origin.x;
+    const dy = point.y - origin.y;
+    const measuredStart = selectionAnchorsRef.current.get(current.startIndex);
+    const lineHeight = Math.max(22, measuredStart?.height ?? 28);
+    const verticalMove = Math.abs(dy) > lineHeight * 0.68;
+    const direction = verticalMove
+      ? Math.sign(dy)
+      : Math.abs(dx) >= 8
+        ? Math.sign(dx)
+        : 0;
+    if (!direction) return;
+
+    const lexicalIndices = current.tokens
+      .map((token, index) =>
+        /[A-Za-z]+(?:['’-][A-Za-z]+)*/.test(token) ? index : -1,
+      )
+      .filter((index) =>
+        index >= 0 &&
+        (direction > 0
+          ? index >= current.startIndex
+          : index <= current.startIndex),
+      )
+      .sort((left, right) =>
+        direction > 0 ? left - right : right - left,
+      );
+    if (!lexicalIndices.length) return;
+
+    const measuredCandidates = lexicalIndices.flatMap((tokenIndex) => {
+      const anchor = selectionAnchorsRef.current.get(tokenIndex);
+      return anchor ? [{ tokenIndex, anchor }] : [];
+    });
+    const hasReliableGeometry = measuredCandidates.some(({ anchor }) => {
+      if (!measuredStart) return true;
+      return (
+        Math.abs(anchor.x - measuredStart.x) > 3 ||
+        Math.abs(anchor.y - measuredStart.y) > 3
+      );
+    });
+
+    let targetIndex = current.startIndex;
     let nearestDistance = Number.POSITIVE_INFINITY;
-    for (const [tokenIndex, anchor] of selectionAnchorsRef.current) {
+    for (const { tokenIndex, anchor } of measuredCandidates) {
       const inside =
         point.x >= anchor.x - 7 &&
         point.x <= anchor.x + anchor.width + 7 &&
@@ -3485,6 +3528,24 @@ function ReaderScreen({
         targetIndex = tokenIndex;
       }
       if (inside) break;
+    }
+    const movedDistance = Math.abs(dx) + Math.abs(dy) * 2.2;
+    if (
+      !hasReliableGeometry ||
+      (targetIndex === current.startIndex && movedDistance > 12)
+    ) {
+      const selectable = lexicalIndices.filter(
+        (index) => index !== current.startIndex,
+      );
+      if (selectable.length) {
+        const estimatedWordSteps = Math.max(
+          1,
+          Math.floor(Math.max(0, movedDistance - 10) / 44) + 1,
+        );
+        targetIndex = selectable[
+          Math.min(selectable.length - 1, estimatedWordSteps - 1)
+        ];
+      }
     }
     if (targetIndex === current.endIndex) return;
     const start = Math.min(current.startIndex, targetIndex);
@@ -3502,6 +3563,7 @@ function ReaderScreen({
     tokens: string[],
     tokenIndex: number,
     context: string,
+    origin?: WordAnchor,
   ) => {
     phraseRequestRef.current += 1;
     setSelectedWord(null);
@@ -3509,6 +3571,9 @@ function ReaderScreen({
     setPressedWord(null);
     selectionAnchorsRef.current.clear();
     lastSelectionPointRef.current = null;
+    selectionOriginRef.current = origin
+      ? { x: origin.x, y: origin.y }
+      : null;
     const next: ReaderTextSelection = {
       scope,
       tokens,
@@ -3683,6 +3748,7 @@ function ReaderScreen({
       setTextSelection(null);
       textSelectionRef.current = null;
       selectionAnchorsRef.current.clear();
+      selectionOriginRef.current = null;
       setWordAnchor(null);
       setWordCardHeight(0);
     };
@@ -4111,13 +4177,14 @@ function ReaderScreen({
                     onLongPress={(anchor) =>
                       clean && openWord(token, article.title, anchor)
                     }
-                    onSelectionStart={() =>
+                    onSelectionStart={(anchor) =>
                       clean &&
                       beginTextSelection(
                         "title",
                         titleTokens,
                         index,
                         article.title,
+                        anchor,
                       )
                     }
                     onSelectionMove={updateTextSelectionAtPoint}
@@ -4255,13 +4322,14 @@ function ReaderScreen({
                         onLongPress={(anchor) =>
                           clean && openWord(token, paragraph, anchor)
                         }
-                        onSelectionStart={() =>
+                        onSelectionStart={(anchor) =>
                           clean &&
                           beginTextSelection(
                             scope,
                             paragraphTokens,
                             index,
                             paragraph,
+                            anchor,
                           )
                         }
                         onSelectionMove={updateTextSelectionAtPoint}
