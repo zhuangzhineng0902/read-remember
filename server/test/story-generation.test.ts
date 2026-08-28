@@ -99,6 +99,23 @@ test("custom interests contribute their own story direction", () => {
   assert.match(prompt, /恐龙、化石和野外考察/);
 });
 
+test("user story prompt preserves submitted ideas inside the quality pipeline", () => {
+  const prompt = buildSeriesPlanPrompt({
+    interest: "custom-story",
+    examId: "middle",
+    episodes: 3,
+    sourceMode: "favorite",
+    classicId: "",
+    sourceTitle: "会移动的图书馆与失踪的星图",
+    sourceNotes: "角色：Mia 和 Ben；关键词：星图、机关、橘猫",
+    readerStage: "stage1",
+  });
+  assert.match(prompt, /用户定制原创连续故事/);
+  assert.match(prompt, /会移动的图书馆与失踪的星图/);
+  assert.match(prompt, /星图、机关、橘猫/);
+  assert.match(prompt, /故事圣经/);
+});
+
 const validPlan: SeriesPlan = {
   seriesTitle: "The Clockwork Harbor",
   premise: "三个伙伴必须在潮水到来前查清港口时钟失灵的原因，并学会在意见不同的时候共享证据。",

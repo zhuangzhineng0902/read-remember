@@ -16,6 +16,7 @@ const storyInterestIds = [
   "cultivation",
   "tiger",
   "cat",
+  "custom-story",
 ] as const;
 type StoryInterestId = string;
 
@@ -181,6 +182,12 @@ const storyGuides: Record<
     cast: "细心的猫成成、忠诚又好笑的狗伙伴、一位小向导，以及并非纯粹坏人的谜题制造者",
     humor: "侦探仪式感、饼干、聪明计划中的小意外",
   },
+  "custom-story": {
+    label: "用户定制原创连续故事",
+    promise: "忠实吸收用户给出的主题、角色、关键词和期待情节，同时保持适龄、原创、幽默、伙伴合作、谜题公平和连续追读感",
+    cast: "优先使用用户指定的角色；缺少必要能力时，可以补充一到两位性格互补的原创伙伴",
+    humor: "来自用户角色的性格差异、计划偏差和伙伴间温暖的吐槽，不使用容易过时的网络梗",
+  },
 };
 
 function storyGuideFor(
@@ -316,6 +323,7 @@ export type StoryRunOptions = {
   sourceNotes: string;
   readerStage: ReaderStageId;
   episodes: number;
+  importNamespace: string;
   planCandidates: number;
   minLexicalCoverage: number;
   temperature: number;
@@ -384,6 +392,7 @@ const defaultOptions: Omit<StoryRunOptions, "log"> = {
   sourceNotes: "",
   readerStage: "auto",
   episodes: 6,
+  importNamespace: "",
   planCandidates: 3,
   minLexicalCoverage: 0.95,
   temperature: 0.82,
@@ -415,6 +424,7 @@ const helpText = `
   --source-notes <text>   喜欢的元素，例如魔法学校、伙伴闯关、幽默宠物
   --reader-stage <auto|starter|stage1|stage2|stage3|stage4|stage5|stage6>
   --episodes <2-30>
+  --import-namespace <id> 导入 ID 命名空间，供后台定制任务隔离同名系列
   --database <path>
   --ecdict <path>         ECDICT SQLite，用于实测正文高频词覆盖率
   --plan-candidates <2-4> 候选季纲数量，默认 3
@@ -899,7 +909,7 @@ function slug(value: string) {
 export async function runStoryGeneration(options: StoryRunOptions) {
   if (options.dryRun) {
     options.log(buildSeriesPlanPrompt(options));
-    return { generated: 0, imported: 0, seriesTitle: "", qualities: [] as StoryQuality[] };
+    return { generated: 0, imported: 0, articleIds: [] as string[], seriesTitle: "", qualities: [] as StoryQuality[] };
   }
   if (!options.baseUrl || !options.model) throw new Error("需要配置 baseUrl 和 model");
   const engagementBrief = loadStoryEngagementBrief(options.databasePath, options.interest, options.examId);
@@ -988,7 +998,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       licenseNote,
       rightsConfirmed: true,
       articles: generated.map((episode, index) => ({
-        externalId: `${options.interest}-${seriesSlug}-${index + 1}`,
+        externalId: `${options.importNamespace ? `${slug(options.importNamespace)}-` : ""}${options.interest}-${seriesSlug}-${index + 1}`,
         year: new Date().getFullYear(),
         title: episode.title,
         eyebrow: classicSource ? "GRADED CLASSIC ADVENTURE" : "ORIGINAL SERIAL ADVENTURE",
@@ -1002,7 +1012,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
         questions: episode.questions as Question[],
       })),
     });
-    return { generated: generated.length, imported: ids.length, seriesTitle: plan.seriesTitle, qualities };
+    return { generated: generated.length, imported: ids.length, articleIds: ids, seriesTitle: plan.seriesTitle, qualities };
   } finally {
     db.close();
   }
@@ -1023,7 +1033,7 @@ function flagMap(argv: string[]) {
   return flags;
 }
 
-function loadOptions(argv = process.argv.slice(2)): StoryRunOptions {
+export function storyOptionsFromCli(argv = process.argv.slice(2)): StoryRunOptions {
   const flags = flagMap(argv);
   if (flags.has("help")) {
     console.log(helpText);
@@ -1102,6 +1112,7 @@ function loadOptions(argv = process.argv.slice(2)): StoryRunOptions {
     sourceNotes,
     readerStage: readerStage as ReaderStageId,
     episodes,
+    importNamespace: String(from("import-namespace", "STORY_IMPORT_NAMESPACE", "importNamespace") ?? defaultOptions.importNamespace),
     planCandidates,
     minLexicalCoverage,
     dryRun: flags.has("dry-run") || fileConfig.dryRun === true,
@@ -1110,8 +1121,8 @@ function loadOptions(argv = process.argv.slice(2)): StoryRunOptions {
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  runStoryGeneration(loadOptions())
+if (/generate-story-series\.(?:ts|js)$/.test(process.argv[1] ?? "")) {
+  runStoryGeneration(storyOptionsFromCli())
     .then((result) => console.log(`完成：${result.seriesTitle || "dry-run"}，生成 ${result.generated} 集，导入 ${result.imported} 集。`))
     .catch((error) => {
       console.error(error instanceof Error ? error.message : error);

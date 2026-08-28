@@ -97,6 +97,10 @@ import {
   ArticleAnswerState,
   ArticleTranslation,
   ArticleTimerSettings,
+  CustomStory,
+  CustomStoryInput,
+  CustomStoryReaderStage,
+  CustomStoryTone,
   ExamId,
   HistoryRecord,
   InterestCategory,
@@ -112,10 +116,11 @@ import {
   WordInfo,
 } from "./src/types";
 
-type TabId = "today" | "history" | "words" | "profile";
+type TabId = "today" | "create" | "history" | "words" | "profile";
 
 const navItems: { id: TabId; label: string; icon: typeof Home }[] = [
   { id: "today", label: "今日阅读", icon: Home },
+  { id: "create", label: "编故事", icon: Sparkles },
   { id: "history", label: "阅读历史", icon: HistoryIcon },
   { id: "words", label: "生词库", icon: BookMarked },
   { id: "profile", label: "我的", icon: Settings },
@@ -1651,6 +1656,240 @@ function Header({
       </View>
       {right}
     </View>
+  );
+}
+
+const customStoryTones: Array<{ id: CustomStoryTone; label: string; emoji: string }> = [
+  { id: "adventure", label: "热血冒险", emoji: "🧭" },
+  { id: "funny", label: "轻松幽默", emoji: "😄" },
+  { id: "mystery", label: "悬疑解谜", emoji: "🔎" },
+  { id: "friendship", label: "伙伴友情", emoji: "🤝" },
+  { id: "fantasy", label: "奇幻世界", emoji: "✨" },
+];
+
+const customStoryStages: Array<{ id: CustomStoryReaderStage; label: string }> = [
+  { id: "auto", label: "跟随考试等级" },
+  { id: "starter", label: "入门 · 少量查词" },
+  { id: "stage1", label: "初级 · 约 400 词" },
+  { id: "stage2", label: "进阶 · 约 700 词" },
+  { id: "stage3", label: "挑战 · 约 1000 词" },
+  { id: "stage4", label: "高阶 · 约 1400 词" },
+];
+
+function CreateStoryScreen({
+  stories,
+  onCreate,
+  onOpen,
+}: {
+  stories: CustomStory[];
+  onCreate: (input: CustomStoryInput) => Promise<void>;
+  onOpen: (story: CustomStory, article: CustomStory["articles"][number]) => void;
+}) {
+  const [idea, setIdea] = useState("");
+  const [characters, setCharacters] = useState("");
+  const [keywords, setKeywords] = useState("");
+  const [plotNotes, setPlotNotes] = useState("");
+  const [tone, setTone] = useState<CustomStoryTone>("adventure");
+  const [episodeCount, setEpisodeCount] = useState(3);
+  const [readerStage, setReaderStage] = useState<CustomStoryReaderStage>("auto");
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async () => {
+    if (idea.trim().length < 10 || submitting) return;
+    setSubmitting(true);
+    try {
+      await onCreate({
+        idea: idea.trim(),
+        characters: characters.trim(),
+        keywords: keywords
+          .split(/[，,、\n]+/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .slice(0, 12),
+        plotNotes: plotNotes.trim(),
+        tone,
+        episodeCount,
+        readerStage,
+      });
+      setIdea("");
+      setCharacters("");
+      setKeywords("");
+      setPlotNotes("");
+    } catch {
+      // The parent surfaces a native notice and keeps this draft for retry.
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.screenContent}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+    >
+      <Header
+        title="我要编故事"
+        subtitle="你提供灵感，AI 把它写成专属英语连续剧"
+      />
+      <View style={styles.storyMakerHero}>
+        <View style={styles.storyMakerOrb}><Text style={styles.storyMakerOrbText}>✦</Text></View>
+        <Text style={styles.storyMakerEyebrow}>YOUR IDEA · YOUR ADVENTURE</Text>
+        <Text style={styles.storyMakerTitle}>把脑海里的世界，变成下一篇想读的故事</Text>
+        <Text style={styles.storyMakerCopy}>
+          系统会自动控制英语难度，设计伙伴、线索、笑点和悬念，并在生成后放进你的个人书架。
+        </Text>
+      </View>
+
+      <View style={styles.storyMakerForm}>
+        <Text style={styles.storyFieldLabel}>你想看一个怎样的故事？ *</Text>
+        <TextInput
+          multiline
+          value={idea}
+          onChangeText={setIdea}
+          maxLength={600}
+          placeholder="例如：三个孩子误入会移动的图书馆，必须在天亮前找回一张会发光的星图……"
+          placeholderTextColor={colors.inkMuted}
+          style={[styles.storyInput, styles.storyInputLarge]}
+        />
+
+        <Text style={styles.storyFieldLabel}>想出现哪些角色？</Text>
+        <TextInput
+          value={characters}
+          onChangeText={setCharacters}
+          maxLength={400}
+          placeholder="角色名字、性格、能力；留空也可以"
+          placeholderTextColor={colors.inkMuted}
+          style={styles.storyInput}
+        />
+
+        <Text style={styles.storyFieldLabel}>关键词</Text>
+        <TextInput
+          value={keywords}
+          onChangeText={setKeywords}
+          placeholder="机甲、月球、橘猫、密码（用逗号分隔）"
+          placeholderTextColor={colors.inkMuted}
+          style={styles.storyInput}
+        />
+
+        <Text style={styles.storyFieldLabel}>特别想发生的情节</Text>
+        <TextInput
+          multiline
+          value={plotNotes}
+          onChangeText={setPlotNotes}
+          maxLength={600}
+          placeholder="例如：中途误会队友，最后发现真正的线索一直藏在笑话里"
+          placeholderTextColor={colors.inkMuted}
+          style={[styles.storyInput, styles.storyInputMedium]}
+        />
+
+        <Text style={styles.storyFieldLabel}>故事风格</Text>
+        <View style={styles.storyChoiceWrap}>
+          {customStoryTones.map((item) => (
+            <Pressable
+              key={item.id}
+              onPress={() => setTone(item.id)}
+              style={[styles.storyChoice, tone === item.id && styles.storyChoiceActive]}
+            >
+              <Text>{item.emoji}</Text>
+              <Text style={[styles.storyChoiceText, tone === item.id && styles.storyChoiceTextActive]}>{item.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Text style={styles.storyFieldLabel}>先生成几章？</Text>
+        <View style={styles.storyChoiceWrap}>
+          {[2, 3, 4, 5, 6].map((count) => (
+            <Pressable
+              key={count}
+              onPress={() => setEpisodeCount(count)}
+              style={[styles.storyCountChoice, episodeCount === count && styles.storyChoiceActive]}
+            >
+              <Text style={[styles.storyChoiceText, episodeCount === count && styles.storyChoiceTextActive]}>{count} 章</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Text style={styles.storyFieldLabel}>英语难度</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyStageRow}>
+          {customStoryStages.map((item) => (
+            <Pressable
+              key={item.id}
+              onPress={() => setReaderStage(item.id)}
+              style={[styles.storyStageChoice, readerStage === item.id && styles.storyChoiceActive]}
+            >
+              <Text style={[styles.storyChoiceText, readerStage === item.id && styles.storyChoiceTextActive]}>{item.label}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="开始创作我的故事"
+          disabled={idea.trim().length < 10 || submitting}
+          onPress={() => void submit()}
+          style={({ pressed }) => [
+            styles.storySubmit,
+            (idea.trim().length < 10 || submitting) && styles.storySubmitDisabled,
+            pressed && styles.primaryButtonPressed,
+          ]}
+        >
+          {submitting ? <ActivityIndicator color="#FFFFFF" /> : <Sparkles size={19} color="#FFFFFF" />}
+          <Text style={styles.storySubmitText}>{submitting ? "正在提交灵感…" : "开始创作我的故事"}</Text>
+        </Pressable>
+        <Text style={styles.storySubmitHint}>高质量连续故事需要一些时间，离开本页也会继续创作。</Text>
+      </View>
+
+      <View style={styles.sectionHeading}>
+        <View>
+          <Text style={styles.sectionTitle}>我的故事书架</Text>
+          <Text style={styles.sectionSubtitle}>完成一章，点亮下一章</Text>
+        </View>
+        <View style={styles.countPill}><Text style={styles.countPillText}>{stories.length} 个系列</Text></View>
+      </View>
+      {stories.length === 0 ? (
+        <View style={styles.storyEmpty}>
+          <Text style={styles.storyEmptyEmoji}>📖</Text>
+          <Text style={styles.storyEmptyTitle}>第一本故事，等你的灵感</Text>
+          <Text style={styles.storyEmptyCopy}>写下一个大概想法就够了，角色和情节可以让系统帮你补全。</Text>
+        </View>
+      ) : stories.map((story) => (
+        <View key={story.id} style={styles.storyShelfCard}>
+          <View style={styles.storyShelfTop}>
+            <View style={styles.storyShelfIcon}><Text style={styles.storyShelfIconText}>✦</Text></View>
+            <View style={styles.flexOne}>
+              <Text style={styles.storyShelfTitle}>{story.seriesTitle || story.idea}</Text>
+              <Text numberOfLines={2} style={styles.storyShelfIdea}>{story.idea}</Text>
+            </View>
+            <View style={[styles.storyStatus, story.status === "failed" && styles.storyStatusFailed, story.status === "completed" && styles.storyStatusDone]}>
+              {(story.status === "queued" || story.status === "generating") && <ActivityIndicator size="small" color={colors.primary} />}
+              <Text style={styles.storyStatusText}>{story.status === "queued" ? "排队中" : story.status === "generating" ? "创作中" : story.status === "completed" ? "已完成" : "失败"}</Text>
+            </View>
+          </View>
+          {story.status === "failed" && <Text style={styles.storyError}>{story.errorMessage || "生成失败，请稍后重新提交。"}</Text>}
+          {story.articles.length > 0 && (
+            <View style={styles.storyEpisodeList}>
+              {story.articles.map((article) => (
+                <Pressable
+                  key={article.id}
+                  disabled={!article.unlocked}
+                  onPress={() => onOpen(story, article)}
+                  style={({ pressed }) => [styles.storyEpisode, !article.unlocked && styles.storyEpisodeLocked, pressed && styles.pressed]}
+                >
+                  <Text style={styles.storyEpisodeNumber}>{article.unlocked ? `0${article.episodeNumber}`.slice(-2) : "🔒"}</Text>
+                  <View style={styles.flexOne}>
+                    <Text style={styles.storyEpisodeTitle}>{article.title}</Text>
+                    <Text style={styles.storyEpisodeMeta}>{article.unlocked ? `约 ${article.readMinutes} 分钟 · 可以阅读` : "完成上一章后解锁"}</Text>
+                  </View>
+                  {article.unlocked && <ChevronRight size={18} color={colors.primary} />}
+                </Pressable>
+              ))}
+            </View>
+          )}
+        </View>
+      ))}
+    </ScrollView>
   );
 }
 
@@ -6392,6 +6631,7 @@ function Navigation({
   const reducedMotion = useReducedMotion();
   const indicatorAnimations = useRef<Record<TabId, Animated.Value>>({
     today: new Animated.Value(active === "today" ? 1 : 0),
+    create: new Animated.Value(active === "create" ? 1 : 0),
     history: new Animated.Value(active === "history" ? 1 : 0),
     words: new Animated.Value(active === "words" ? 1 : 0),
     profile: new Animated.Value(active === "profile" ? 1 : 0),
@@ -6696,6 +6936,7 @@ function AppContent() {
     string | null
   >(null);
   const [interestFeed, setInterestFeed] = useState<Article[]>([]);
+  const [customStories, setCustomStories] = useState<CustomStory[]>([]);
   const [unlockedEpisode, setUnlockedEpisode] =
     useState<ArticleSummary | null>(null);
   const [selectedInterests, setSelectedInterests] = useState<InterestId[]>(
@@ -6812,6 +7053,7 @@ function AppContent() {
             stats,
             remoteMistakes,
             remoteInterestFeed,
+            remoteCustomStories,
           ] =
             await Promise.all([
               api.getDaily(),
@@ -6822,6 +7064,7 @@ function AppContent() {
               api.getLearningStats(),
               api.getMistakes(),
               api.getInterestFeed(),
+              api.getCustomStories(),
             ]);
           const completedIds = [
             ...new Set([
@@ -6844,6 +7087,7 @@ function AppContent() {
           setMistakes(remoteMistakes);
           setSelectedInterests(preferences.interests);
           setInterestFeed(remoteInterestFeed);
+          setCustomStories(remoteCustomStories);
           void syncDailyReminder(preferences.learning).catch(() => undefined);
           await Promise.all([
             storage.setHistory(remoteHistory.records),
@@ -6878,6 +7122,24 @@ function AppContent() {
     const timer = setInterval(refreshPushes, 60_000);
     return () => clearInterval(timer);
   }, [apiOnline, examId]);
+
+  useEffect(() => {
+    if (!apiOnline || !customStories.some((story) => story.status === "queued" || story.status === "generating")) return;
+    let active = true;
+    const refreshStories = async () => {
+      try {
+        const stories = await api.getCustomStories();
+        if (active) setCustomStories(stories);
+      } catch {
+        // Generation continues on the server while this snapshot remains visible.
+      }
+    };
+    const timer = setInterval(() => void refreshStories(), 5_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [apiOnline, customStories]);
 
   useEffect(() => {
     if (!apiOnline) return;
@@ -7073,6 +7335,7 @@ function AppContent() {
       stats,
       remoteMistakes,
       remoteInterestFeed,
+      remoteCustomStories,
     ] = await Promise.all([
       api.getDaily(),
       api.getHistory(),
@@ -7082,6 +7345,7 @@ function AppContent() {
       api.getLearningStats(),
       api.getMistakes(),
       api.getInterestFeed(),
+      api.getCustomStories(),
     ]);
     const completedIds = [
       ...new Set([
@@ -7104,6 +7368,7 @@ function AppContent() {
     setMistakes(remoteMistakes);
     setSelectedInterests(preferences.interests);
     setInterestFeed(remoteInterestFeed);
+    setCustomStories(remoteCustomStories);
     void syncDailyReminder(preferences.learning).catch(() => undefined);
     await Promise.all([
       storage.setHistory(remoteHistory.records),
@@ -7131,6 +7396,7 @@ function AppContent() {
       setLearningSettings(DEFAULT_LEARNING_SETTINGS);
       setSelectedInterests(defaultInterestIds);
       setInterestFeed([]);
+      setCustomStories([]);
       setApiOnline(true);
       setAuthRequired(false);
       return;
@@ -7396,6 +7662,14 @@ function AppContent() {
       ]);
     }
     if (nextEpisode) {
+      setCustomStories((current) =>
+        current.map((story) => ({
+          ...story,
+          articles: story.articles.map((item) =>
+            item.id === nextEpisode.id ? { ...item, unlocked: true } : item,
+          ),
+        })),
+      );
       try {
         const unlocked = apiOnline
           ? await api.getArticle(nextEpisode.id)
@@ -7471,6 +7745,53 @@ function AppContent() {
     setReaderPracticeMode(false);
     setReaderQueue(interestFeed.map((item) => item.id));
     setReader(article);
+  };
+
+  const createCustomStory = async (input: CustomStoryInput) => {
+    if (!apiOnline) {
+      const error = new Error("连接服务器后才能生成定制故事");
+      setAppNotice({ title: "暂时无法开始创作", message: error.message, tone: "error" });
+      throw error;
+    }
+    try {
+      const story = await api.createCustomStory(input);
+      setCustomStories((current) => [
+        story,
+        ...current.filter((item) => item.id !== story.id),
+      ]);
+      setAppNotice({
+        title: "灵感已经送进故事工坊",
+        message: "可以离开本页，故事会在后台继续创作。完成后会自动出现在个人书架。",
+      });
+    } catch (error) {
+      setAppNotice({
+        title: "故事暂时没有开始",
+        message: error instanceof Error ? error.message : "请稍后重试",
+        tone: "error",
+      });
+      throw error;
+    }
+  };
+
+  const openCustomStoryArticle = async (
+    story: CustomStory,
+    article: CustomStory["articles"][number],
+  ) => {
+    if (!article.unlocked) return;
+    try {
+      const loaded = await api.getArticle(article.id);
+      setReaderPracticeMode(false);
+      setReaderQueue(
+        story.articles.filter((item) => item.unlocked).map((item) => item.id),
+      );
+      setReader(loaded);
+    } catch (error) {
+      setAppNotice({
+        title: "故事加载失败",
+        message: error instanceof Error ? error.message : "请稍后重试",
+        tone: "error",
+      });
+    }
   };
 
   const openPushedArticle = async (articleId: string) => {
@@ -7669,6 +7990,12 @@ function AppContent() {
         onOpenPush={openPushedArticle}
         onNavigate={setTab}
       />
+    ) : tab === "create" ? (
+      <CreateStoryScreen
+        stories={customStories}
+        onCreate={createCustomStory}
+        onOpen={openCustomStoryArticle}
+      />
     ) : tab === "history" ? (
       <HistoryScreen
         history={history}
@@ -7812,6 +8139,126 @@ const styles = StyleSheet.create({
     maxWidth: 1050,
     alignSelf: "center",
   },
+  storyMakerHero: {
+    overflow: "hidden",
+    borderRadius: 26,
+    backgroundColor: "#173F46",
+    padding: 24,
+    minHeight: 214,
+    justifyContent: "flex-end",
+    ...shadows.card,
+  },
+  storyMakerOrb: {
+    position: "absolute",
+    right: -28,
+    top: -36,
+    width: 156,
+    height: 156,
+    borderRadius: 78,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(105,225,207,0.14)",
+    borderWidth: 1,
+    borderColor: "rgba(174,255,241,0.25)",
+  },
+  storyMakerOrbText: { color: "#A8EFE1", fontSize: 54 },
+  storyMakerEyebrow: { color: "#A8EFE1", fontSize: 10, fontWeight: "900", letterSpacing: 1.4 },
+  storyMakerTitle: { color: "#FFFFFF", fontSize: 25, lineHeight: 34, fontWeight: "900", maxWidth: 620, marginTop: 10 },
+  storyMakerCopy: { color: "#C9E2DE", fontSize: 13, lineHeight: 21, maxWidth: 660, marginTop: 9 },
+  storyMakerForm: {
+    marginTop: 18,
+    borderRadius: 22,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    padding: 18,
+    ...shadows.card,
+  },
+  storyFieldLabel: { color: colors.ink, fontSize: 13, fontWeight: "800", marginTop: 15, marginBottom: 8 },
+  storyInput: {
+    minHeight: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surfaceMuted,
+    color: colors.ink,
+    fontSize: 14,
+    lineHeight: 21,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  storyInputLarge: { minHeight: 116, textAlignVertical: "top" },
+  storyInputMedium: { minHeight: 82, textAlignVertical: "top" },
+  storyChoiceWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  storyChoice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    minHeight: 40,
+    paddingHorizontal: 12,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  storyCountChoice: {
+    minHeight: 38,
+    minWidth: 58,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  storyChoiceActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  storyChoiceText: { color: colors.inkMuted, fontSize: 12, fontWeight: "700" },
+  storyChoiceTextActive: { color: "#FFFFFF" },
+  storyStageRow: { gap: 8, paddingRight: 14 },
+  storyStageChoice: {
+    minHeight: 40,
+    justifyContent: "center",
+    paddingHorizontal: 13,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  storySubmit: {
+    minHeight: 52,
+    marginTop: 22,
+    borderRadius: 15,
+    backgroundColor: colors.primary,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 9,
+  },
+  storySubmitDisabled: { opacity: 0.42 },
+  storySubmitText: { color: "#FFFFFF", fontSize: 15, fontWeight: "900" },
+  storySubmitHint: { color: colors.inkMuted, fontSize: 11, textAlign: "center", marginTop: 9 },
+  storyEmpty: { alignItems: "center", padding: 28, borderRadius: 20, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+  storyEmptyEmoji: { fontSize: 34 },
+  storyEmptyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800", marginTop: 10 },
+  storyEmptyCopy: { color: colors.inkMuted, fontSize: 12, lineHeight: 19, textAlign: "center", maxWidth: 420, marginTop: 6 },
+  storyShelfCard: { borderRadius: 20, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, padding: 16, marginBottom: 12, ...shadows.card },
+  storyShelfTop: { flexDirection: "row", alignItems: "flex-start", gap: 11 },
+  storyShelfIcon: { width: 42, height: 42, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#E1F1ED" },
+  storyShelfIconText: { color: colors.primary, fontSize: 22, fontWeight: "900" },
+  storyShelfTitle: { color: colors.ink, fontSize: 16, fontWeight: "900" },
+  storyShelfIdea: { color: colors.inkMuted, fontSize: 11, lineHeight: 17, marginTop: 4 },
+  storyStatus: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 9, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: "#E9F2F0" },
+  storyStatusDone: { backgroundColor: "#E6F5E8" },
+  storyStatusFailed: { backgroundColor: "#FBE9E8" },
+  storyStatusText: { color: colors.primaryDark, fontSize: 10, fontWeight: "800" },
+  storyError: { color: "#A8443D", fontSize: 11, lineHeight: 17, marginTop: 12 },
+  storyEpisodeList: { gap: 8, marginTop: 14 },
+  storyEpisode: { minHeight: 62, flexDirection: "row", alignItems: "center", gap: 11, borderRadius: 14, backgroundColor: colors.surfaceMuted, paddingHorizontal: 12, paddingVertical: 9 },
+  storyEpisodeLocked: { opacity: 0.52 },
+  storyEpisodeNumber: { width: 29, color: colors.primary, fontSize: 12, fontWeight: "900", textAlign: "center" },
+  storyEpisodeTitle: { color: colors.ink, fontSize: 13, fontWeight: "800" },
+  storyEpisodeMeta: { color: colors.inkMuted, fontSize: 10, marginTop: 4 },
   nativeModalRoot: {
     flex: 1,
     justifyContent: "flex-end",

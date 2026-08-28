@@ -6,6 +6,8 @@ import {
   Article,
   ArticleAnswerState,
   ArticleTranslation,
+  CustomStory,
+  CustomStoryInput,
   ExamId,
   HistoryRecord,
   InterestCategory,
@@ -414,6 +416,17 @@ export const api = {
     }),
 
   getInterestCategories: () => request<InterestCategory[]>("/interests"),
+
+  getCustomStories: () => request<CustomStory[]>("/custom-stories"),
+
+  getCustomStory: (id: string) =>
+    request<CustomStory>(`/custom-stories/${encodeURIComponent(id)}`),
+
+  createCustomStory: (input: CustomStoryInput) =>
+    request<CustomStory>("/custom-stories", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
 
   async getInterestFeed(interestId?: InterestId): Promise<Article[]> {
     const query = interestId

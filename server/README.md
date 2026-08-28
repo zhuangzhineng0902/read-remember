@@ -261,6 +261,20 @@ npm run generate:story-series -- --interest tiger --exam middle --episodes 6 --d
 
 常用参数还包括 `--model`、`--review-model`、`--base-url`、`--api-key`、`--database`、`--plan-candidates` 和 `--force`。详细说明可运行 `npm run generate:story-series -- --help`。
 
+### 用户定制故事
+
+客户端“编故事”页面允许已注册用户提交故事构想、角色、关键词、期待情节、风格、章节数和分级难度。服务端创建持久化后台任务，复用上述候选季纲、故事圣经、多维审稿和 ECDICT 词频门禁；任务在服务重启后会自动恢复。生成内容使用隐藏的 `custom-story` 分类，不进入公共兴趣栏目或每日三选一。
+
+定制故事默认读取 `config/story-generation.json`，也可以通过 `CUSTOM_STORY_CONFIG_PATH` 指定配置。相关接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/v1/custom-stories` | 创建定制故事后台任务 |
+| `GET` | `/api/v1/custom-stories` | 查询当前用户的故事书架和任务状态 |
+| `GET` | `/api/v1/custom-stories/:id` | 查询单个任务、章节与解锁状态 |
+
+任务完成后只自动解锁第一章；提交本章答案后，沿用现有连续故事流程解锁下一章。章节可直接使用长按查词、全文翻译、Kokoro 语音、限时阅读和答题解析。
+
 ## 认证
 
 首次启动由客户端生成并持久化一个设备 ID：

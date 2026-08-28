@@ -15,6 +15,7 @@ const { DatabaseSync } = createRequire(import.meta.url)(
 const db = createDatabase(":memory:");
 let phraseTranslationCalls = 0;
 let articleTranslationCalls = 0;
+const enqueuedCustomStories: string[] = [];
 const cachedArticleTranslation = (articleId: string, targetLanguage = "zh-CN") => {
   const row = db
     .prepare(
@@ -98,6 +99,13 @@ const server = createServer(
           cached: false,
         };
       },
+    },
+    {
+      enabled: true,
+      enqueue(requestId) {
+        enqueuedCustomStories.push(requestId);
+      },
+      resume() {},
     },
   ),
 );
@@ -370,6 +378,41 @@ test("anonymous account can register, login, and update profile", async () => {
   const preferenceData = (await preferences.json()).data;
   assert.equal(preferenceData.learning.dailyGoal, 3);
   assert.equal(preferenceData.interests.length, 9);
+});
+
+test("registered users can queue and inspect a private custom story", async () => {
+  const created = await request("/api/v1/custom-stories", {
+    method: "POST",
+    body: JSON.stringify({
+      idea: "三个孩子在会移动的图书馆里寻找一张失踪的星图",
+      characters: "爱画画的 Mia、擅长机械的 Ben",
+      keywords: ["星图", "机关", "猫"],
+      plotNotes: "每一集找到一部分地图，最后发现猫一直在保护它",
+      tone: "mystery",
+      episodeCount: 3,
+      readerStage: "stage1",
+    }),
+  });
+  assert.equal(created.status, 202);
+  const story = (await created.json()).data;
+  assert.equal(story.status, "queued");
+  assert.equal(story.episodeCount, 3);
+  assert.deepEqual(story.keywords, ["星图", "机关", "猫"]);
+  assert.deepEqual(enqueuedCustomStories, [story.id]);
+
+  const detail = await request(`/api/v1/custom-stories/${story.id}`);
+  assert.equal(detail.status, 200);
+  assert.equal((await detail.json()).data.idea, story.idea);
+
+  const list = await request("/api/v1/custom-stories");
+  assert.equal(list.status, 200);
+  assert.equal((await list.json()).data[0].id, story.id);
+
+  const invalid = await request("/api/v1/custom-stories", {
+    method: "POST",
+    body: JSON.stringify({ idea: "太短" }),
+  });
+  assert.equal(invalid.status, 400);
 });
 
 test("interest preferences drive the interest feed and mixed daily reading", async () => {

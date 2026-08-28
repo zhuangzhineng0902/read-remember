@@ -194,3 +194,42 @@ export type UserPreferences = {
   interests: InterestId[];
   updatedAt: string;
 };
+
+export type CustomStoryTone =
+  | "adventure"
+  | "funny"
+  | "mystery"
+  | "friendship"
+  | "fantasy";
+
+export type CustomStoryReaderStage =
+  | "auto"
+  | "starter"
+  | "stage1"
+  | "stage2"
+  | "stage3"
+  | "stage4"
+  | "stage5"
+  | "stage6";
+
+export type CustomStoryInput = {
+  idea: string;
+  characters: string;
+  keywords: string[];
+  plotNotes: string;
+  tone: CustomStoryTone;
+  episodeCount: number;
+  readerStage: CustomStoryReaderStage;
+};
+
+export type CustomStory = CustomStoryInput & {
+  id: string;
+  examId: ExamId;
+  status: "queued" | "generating" | "completed" | "failed";
+  seriesTitle: string;
+  errorMessage: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  articles: Array<Omit<Article, "paragraphs" | "questions"> & { unlocked: boolean }>;
+};

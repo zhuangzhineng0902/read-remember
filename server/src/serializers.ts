@@ -11,6 +11,7 @@ export type ArticleRow = {
   contentKind: "exam" | "interest";
   interestId: string | null;
   seriesTitle: string | null;
+  seriesKey: string | null;
   episodeNumber: number | null;
   paragraphsJson: string;
   questionsJson: string;
@@ -37,6 +38,7 @@ export const articleSelect = `
   a.content_kind AS contentKind,
   a.interest_id AS interestId,
   a.series_title AS seriesTitle,
+  a.series_key AS seriesKey,
   a.episode_number AS episodeNumber,
   a.paragraphs_json AS paragraphsJson,
   a.questions_json AS questionsJson

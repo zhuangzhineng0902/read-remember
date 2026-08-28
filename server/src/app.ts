@@ -40,6 +40,7 @@ import { scheduleMemoryReview } from "../../client/src/memory";
 import type { ArticleAudioService } from "./article-audio";
 import type { PhraseTranslationProvider } from "./phrase-translation";
 import type { ArticleTranslationProvider } from "./article-translation";
+import type { CustomStoryProvider } from "./custom-story";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -126,19 +127,33 @@ function unlockNextSeriesEpisode(
   ) {
     return null;
   }
-  const next = db
-    .prepare(
-      `SELECT ${articleSelect}
-       FROM articles a
-       WHERE a.exam_id = ? AND a.content_kind = 'interest'
-         AND a.series_title = ? AND a.episode_number = ?
-       ORDER BY a.id LIMIT 1`,
-    )
-    .get(
-      current.examId,
-      current.seriesTitle,
-      current.episodeNumber + 1,
-    ) as ArticleRow | undefined;
+  const next = current.seriesKey
+    ? (db
+        .prepare(
+          `SELECT ${articleSelect}
+           FROM articles a
+           WHERE a.exam_id = ? AND a.content_kind = 'interest'
+             AND a.series_key = ? AND a.episode_number = ?
+           ORDER BY a.id LIMIT 1`,
+        )
+        .get(
+          current.examId,
+          current.seriesKey,
+          current.episodeNumber + 1,
+        ) as ArticleRow | undefined)
+    : (db
+        .prepare(
+          `SELECT ${articleSelect}
+           FROM articles a
+           WHERE a.exam_id = ? AND a.content_kind = 'interest'
+             AND a.series_title = ? AND a.episode_number = ?
+           ORDER BY a.id LIMIT 1`,
+        )
+        .get(
+          current.examId,
+          current.seriesTitle,
+          current.episodeNumber + 1,
+        ) as ArticleRow | undefined);
   if (!next) return null;
   db.prepare(
     `INSERT OR IGNORE INTO interest_deliveries(user_id, article_id, delivery_date)
@@ -596,6 +611,7 @@ export function createApp(
   articleAudio: ArticleAudioService | null = null,
   phraseTranslation: PhraseTranslationProvider | null = null,
   articleTranslation: ArticleTranslationProvider | null = null,
+  customStories: CustomStoryProvider | null = null,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -618,6 +634,7 @@ export function createApp(
       timestamp: new Date().toISOString(),
       dictionary: dictionary ? "ecdict-ready" : "ecdict-unavailable",
       articleAudio: articleAudio?.enabled ? "kokoro-ready" : "kokoro-unavailable",
+      customStories: customStories?.enabled ? "ready" : "unavailable",
     });
   });
 
@@ -847,6 +864,131 @@ export function createApp(
   });
 
   authenticated.use(requireRegistered);
+
+  const customStorySelect = `
+    id, user_id AS userId, exam_id AS examId, status, idea, characters,
+    keywords_json AS keywordsJson, plot_notes AS plotNotes, tone,
+    episode_count AS episodeCount, reader_stage AS readerStage,
+    series_title AS seriesTitle, error_message AS errorMessage,
+    created_at AS createdAt, updated_at AS updatedAt, completed_at AS completedAt
+  `;
+  type CustomStoryRow = {
+    id: string;
+    userId: string;
+    examId: string;
+    status: "queued" | "generating" | "completed" | "failed";
+    idea: string;
+    characters: string;
+    keywordsJson: string;
+    plotNotes: string;
+    tone: string;
+    episodeCount: number;
+    readerStage: string;
+    seriesTitle: string;
+    errorMessage: string;
+    createdAt: string;
+    updatedAt: string;
+    completedAt: string | null;
+  };
+  const serializeCustomStory = (row: CustomStoryRow) => {
+    const articles = db
+      .prepare(
+        `SELECT ${articleSelect},
+          CASE WHEN EXISTS (
+            SELECT 1 FROM interest_deliveries delivery
+            WHERE delivery.user_id = ? AND delivery.article_id = a.id
+          ) THEN 1 ELSE 0 END AS unlocked
+         FROM articles a WHERE a.series_key = ?
+         ORDER BY a.episode_number, a.id`,
+      )
+      .all(row.userId, row.id) as unknown as Array<ArticleRow & { unlocked: number }>;
+    return {
+      id: row.id,
+      examId: row.examId,
+      status: row.status,
+      idea: row.idea,
+      characters: row.characters,
+      keywords: JSON.parse(row.keywordsJson) as string[],
+      plotNotes: row.plotNotes,
+      tone: row.tone,
+      episodeCount: row.episodeCount,
+      readerStage: row.readerStage,
+      seriesTitle: row.seriesTitle,
+      errorMessage: row.errorMessage,
+      createdAt: sqliteTimestampToIso(row.createdAt),
+      updatedAt: sqliteTimestampToIso(row.updatedAt),
+      completedAt: row.completedAt ? sqliteTimestampToIso(row.completedAt) : null,
+      articles: articles.map((article) => ({
+        ...serializeArticleSummary(article),
+        unlocked: Boolean(article.unlocked),
+      })),
+    };
+  };
+
+  authenticated.get("/custom-stories", (_req, res) => {
+    const user = currentUser(res);
+    const rows = db
+      .prepare(
+        `SELECT ${customStorySelect} FROM custom_story_requests
+         WHERE user_id = ? ORDER BY created_at DESC LIMIT 30`,
+      )
+      .all(user.id) as unknown as CustomStoryRow[];
+    res.json({ data: rows.map(serializeCustomStory) });
+  });
+
+  authenticated.get("/custom-stories/:id", (req, res) => {
+    const user = currentUser(res);
+    const row = db
+      .prepare(
+        `SELECT ${customStorySelect} FROM custom_story_requests
+         WHERE id = ? AND user_id = ?`,
+      )
+      .get(req.params.id, user.id) as CustomStoryRow | undefined;
+    if (!row) throw new ApiError(404, "CUSTOM_STORY_NOT_FOUND", "定制故事不存在");
+    res.json({ data: serializeCustomStory(row) });
+  });
+
+  authenticated.post("/custom-stories", (req, res) => {
+    const user = currentUser(res);
+    if (!customStories?.enabled) {
+      throw new ApiError(503, "CUSTOM_STORY_NOT_CONFIGURED", "定制故事生成服务尚未配置");
+    }
+    const body = parse(
+      z.object({
+        idea: z.string().trim().min(10).max(600),
+        characters: z.string().trim().max(400).default(""),
+        keywords: z.array(z.string().trim().min(1).max(40)).max(12).default([]),
+        plotNotes: z.string().trim().max(600).default(""),
+        tone: z.enum(["adventure", "funny", "mystery", "friendship", "fantasy"]).default("adventure"),
+        episodeCount: z.number().int().min(2).max(6).default(3),
+        readerStage: z.enum(["auto", "starter", "stage1", "stage2", "stage3", "stage4", "stage5", "stage6"]).default("auto"),
+      }),
+      req.body,
+    );
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO custom_story_requests(
+        id, user_id, exam_id, status, idea, characters, keywords_json,
+        plot_notes, tone, episode_count, reader_stage
+       ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      user.id,
+      user.examId,
+      body.idea,
+      body.characters,
+      JSON.stringify([...new Set(body.keywords)]),
+      body.plotNotes,
+      body.tone,
+      body.episodeCount,
+      body.readerStage,
+    );
+    customStories.enqueue(id);
+    const row = db
+      .prepare(`SELECT ${customStorySelect} FROM custom_story_requests WHERE id = ?`)
+      .get(id) as CustomStoryRow;
+    res.status(202).json({ data: serializeCustomStory(row) });
+  });
 
   authenticated.get("/article-audio/config", (_req, res) => {
     res.json({

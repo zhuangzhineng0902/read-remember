@@ -14,6 +14,8 @@ import {
 } from "./phrase-translation";
 import { ArticleTranslationService } from "./article-translation";
 import { translationOptionsFromCli } from "../scripts/translate-articles";
+import { storyOptionsFromCli } from "../scripts/generate-story-series";
+import { CustomStoryService } from "./custom-story";
 
 const localEnvFile = path.resolve(process.cwd(), ".env");
 if (existsSync(localEnvFile)) loadEnvFile(localEnvFile);
@@ -51,6 +53,22 @@ const articleTranslation = new ArticleTranslationService(
     config.databasePath,
   ]),
 );
+const customStoryConfigPath =
+  process.env.CUSTOM_STORY_CONFIG_PATH ??
+  process.env.STORY_GENERATION_CONFIG_PATH ??
+  path.resolve(process.cwd(), "config/story-generation.json");
+const customStories = new CustomStoryService(
+  db,
+  storyOptionsFromCli([
+    ...(existsSync(customStoryConfigPath)
+      ? ["--config", customStoryConfigPath]
+      : []),
+    "--database",
+    config.databasePath,
+    "--ecdict",
+    config.ecdictPath,
+  ]),
+);
 const app = createApp(
   db,
   config,
@@ -58,6 +76,7 @@ const app = createApp(
   articleAudio,
   phraseTranslation,
   articleTranslation,
+  customStories,
 );
 const server = createServer(app);
 const dailyPushScheduler = startDailyPushScheduler(db, {
@@ -65,10 +84,16 @@ const dailyPushScheduler = startDailyPushScheduler(db, {
   hour: config.dailyPushHour,
   timeZone: config.dailyPushTimeZone,
 });
+customStories.resume();
 
 server.listen(config.port, config.host, () => {
   console.log(
     `Read & Remember API listening on http://${config.host}:${config.port}`,
+  );
+  console.log(
+    customStories.enabled
+      ? "Custom story generation: ready"
+      : "Custom story generation unavailable: configure story-generation.json",
   );
   console.log(
     articleAudio.enabled

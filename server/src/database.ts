@@ -61,6 +61,7 @@ export function createDatabase(filename: string): AppDatabase {
       content_kind TEXT NOT NULL DEFAULT 'exam' CHECK(content_kind IN ('exam', 'interest')),
       interest_id TEXT,
       series_title TEXT,
+      series_key TEXT,
       episode_number INTEGER,
       paragraphs_json TEXT NOT NULL,
       questions_json TEXT NOT NULL,
@@ -115,6 +116,26 @@ export function createDatabase(filename: string): AppDatabase {
       reader_json TEXT NOT NULL DEFAULT '{}',
       interests_json TEXT NOT NULL DEFAULT '[]',
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS custom_story_requests (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      exam_id TEXT NOT NULL REFERENCES exams(id),
+      status TEXT NOT NULL CHECK(status IN ('queued', 'generating', 'completed', 'failed')),
+      idea TEXT NOT NULL,
+      characters TEXT NOT NULL DEFAULT '',
+      keywords_json TEXT NOT NULL DEFAULT '[]',
+      plot_notes TEXT NOT NULL DEFAULT '',
+      tone TEXT NOT NULL DEFAULT 'adventure',
+      episode_count INTEGER NOT NULL DEFAULT 3 CHECK(episode_count BETWEEN 2 AND 6),
+      reader_stage TEXT NOT NULL DEFAULT 'auto',
+      series_title TEXT NOT NULL DEFAULT '',
+      article_ids_json TEXT NOT NULL DEFAULT '[]',
+      error_message TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS article_reading_states (
@@ -361,6 +382,7 @@ export function createDatabase(filename: string): AppDatabase {
   ensureColumn("articles", "content_kind", "content_kind TEXT NOT NULL DEFAULT 'exam'");
   ensureColumn("articles", "interest_id", "interest_id TEXT");
   ensureColumn("articles", "series_title", "series_title TEXT");
+  ensureColumn("articles", "series_key", "series_key TEXT");
   ensureColumn("articles", "episode_number", "episode_number INTEGER");
   ensureColumn(
     "translation_segments",
@@ -395,6 +417,10 @@ export function createDatabase(filename: string): AppDatabase {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_articles_interest
     ON articles(content_kind, interest_id, exam_id);
+    CREATE INDEX IF NOT EXISTS idx_articles_series_key
+    ON articles(series_key, episode_number);
+    CREATE INDEX IF NOT EXISTS idx_custom_story_requests_user
+    ON custom_story_requests(user_id, created_at DESC);
   `);
 
   const deliveryColumns = db.prepare("PRAGMA table_info(deliveries)").all() as Array<{
