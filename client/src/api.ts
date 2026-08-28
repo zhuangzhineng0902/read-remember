@@ -428,6 +428,11 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
+  retryCustomStory: (id: string) =>
+    request<CustomStory>(`/custom-stories/${encodeURIComponent(id)}/retry`, {
+      method: "POST",
+    }),
+
   async getInterestFeed(interestId?: InterestId): Promise<Article[]> {
     const query = interestId
       ? `?interestId=${encodeURIComponent(interestId)}`

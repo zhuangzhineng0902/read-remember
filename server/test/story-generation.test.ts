@@ -4,6 +4,7 @@ import {
   assessStoryQuality,
   buildSeriesPlanPrompt,
   loadStoryEngagementBrief,
+  parseJson,
   resolveReaderProfile,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
@@ -195,4 +196,12 @@ test("story quality measures actual frequency coverage", () => {
   assert.equal(quality.lexicalCoverage, 0.9);
   assert.deepEqual(quality.unfamiliarWords, ["xylophonic"]);
   assert.match(quality.issues.join(" "), /高频词覆盖率不足/);
+});
+
+test("model JSON parser ignores a second object or trailing commentary", () => {
+  assert.deepEqual(
+    parseJson('{"title":"first","note":"brace } inside"}\n{"title":"second"}'),
+    { title: "first", note: "brace } inside" },
+  );
+  assert.deepEqual(parseJson('说明：\n[1,{"ok":true}]\n完成'), [1, { ok: true }]);
 });

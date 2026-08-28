@@ -413,6 +413,16 @@ test("registered users can queue and inspect a private custom story", async () =
     body: JSON.stringify({ idea: "太短" }),
   });
   assert.equal(invalid.status, 400);
+
+  db.prepare(
+    "UPDATE custom_story_requests SET status = 'failed', error_message = 'bad json' WHERE id = ?",
+  ).run(story.id);
+  const retried = await request(`/api/v1/custom-stories/${story.id}/retry`, {
+    method: "POST",
+  });
+  assert.equal(retried.status, 202);
+  assert.equal((await retried.json()).data.status, "queued");
+  assert.deepEqual(enqueuedCustomStories, [story.id, story.id]);
 });
 
 test("interest preferences drive the interest feed and mixed daily reading", async () => {

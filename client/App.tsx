@@ -1680,10 +1680,12 @@ function CreateStoryScreen({
   stories,
   onCreate,
   onOpen,
+  onRetry,
 }: {
   stories: CustomStory[];
   onCreate: (input: CustomStoryInput) => Promise<void>;
   onOpen: (story: CustomStory, article: CustomStory["articles"][number]) => void;
+  onRetry: (story: CustomStory) => Promise<void>;
 }) {
   const [idea, setIdea] = useState("");
   const [characters, setCharacters] = useState("");
@@ -1867,7 +1869,19 @@ function CreateStoryScreen({
               <Text style={styles.storyStatusText}>{story.status === "queued" ? "排队中" : story.status === "generating" ? "创作中" : story.status === "completed" ? "已完成" : "失败"}</Text>
             </View>
           </View>
-          {story.status === "failed" && <Text style={styles.storyError}>{story.errorMessage || "生成失败，请稍后重新提交。"}</Text>}
+          {story.status === "failed" && (
+            <View style={styles.storyFailureRow}>
+              <Text style={[styles.storyError, styles.flexOne]}>{story.errorMessage || "生成失败，请稍后重新提交。"}</Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => void onRetry(story)}
+                style={({ pressed }) => [styles.storyRetryButton, pressed && styles.pressed]}
+              >
+                <RotateCcw size={14} color={colors.primary} />
+                <Text style={styles.storyRetryText}>重新生成</Text>
+              </Pressable>
+            </View>
+          )}
           {story.articles.length > 0 && (
             <View style={styles.storyEpisodeList}>
               {story.articles.map((article) => (
@@ -1896,6 +1910,7 @@ function CreateStoryScreen({
 function TodayScreen({
   examId,
   daily,
+  customStories,
   interestFeed,
   selectedInterests,
   streakDays,
@@ -1905,11 +1920,13 @@ function TodayScreen({
   onOpen,
   onChooseDaily,
   onOpenInterest,
+  onOpenCustom,
   onOpenPush,
   onNavigate,
 }: {
   examId: ExamId;
   daily: Article[];
+  customStories: CustomStory[];
   interestFeed: Article[];
   selectedInterests: InterestId[];
   streakDays: number;
@@ -1919,6 +1936,7 @@ function TodayScreen({
   onOpen: (a: Article) => void;
   onChooseDaily: (a: Article) => void | Promise<void>;
   onOpenInterest: (a: Article) => void;
+  onOpenCustom: (story: CustomStory, article: CustomStory["articles"][number]) => void;
   onOpenPush: (articleId: string) => void;
   onNavigate: (tab: TabId) => void;
 }) {
@@ -1935,6 +1953,9 @@ function TodayScreen({
     (article) =>
       interestFilter === "all" || article.interestId === interestFilter,
   );
+  const homeCustomStories = customStories
+    .filter((story) => story.status !== "failed")
+    .slice(0, 3);
 
   return (
     <ScrollView
@@ -2012,6 +2033,48 @@ function TodayScreen({
           />
         ))}
       </View>
+
+      {homeCustomStories.length > 0 && (
+        <View style={styles.customHomeSection}>
+          <View style={styles.sectionHeading}>
+            <View>
+              <Text style={styles.sectionTitle}>我的定制故事</Text>
+              <Text style={styles.sectionSubtitle}>你的灵感，正在变成英语冒险</Text>
+            </View>
+            <Pressable onPress={() => onNavigate("create")} style={styles.customHomeMore}>
+              <Text style={styles.customHomeMoreText}>故事书架</Text>
+              <ChevronRight size={14} color={colors.primary} />
+            </Pressable>
+          </View>
+          <View style={styles.customHomeList}>
+            {homeCustomStories.map((story) => {
+              const unlocked = story.articles.filter((article) => article.unlocked);
+              const activeArticle =
+                unlocked.find((article) => !completed.includes(article.id)) ??
+                unlocked[unlocked.length - 1];
+              return (
+                <Pressable
+                  key={story.id}
+                  disabled={!activeArticle}
+                  onPress={() => activeArticle && onOpenCustom(story, activeArticle)}
+                  style={({ pressed }) => [styles.customHomeCard, !activeArticle && styles.customHomeCardPending, pressed && styles.cardPressed]}
+                >
+                  <View style={styles.customHomeGlyph}><Text style={styles.customHomeGlyphText}>✦</Text></View>
+                  <View style={styles.flexOne}>
+                    <Text numberOfLines={1} style={styles.customHomeTitle}>{story.seriesTitle || story.idea}</Text>
+                    <Text numberOfLines={1} style={styles.customHomeMeta}>
+                      {activeArticle
+                        ? `第 ${activeArticle.episodeNumber} 章 · ${activeArticle.title}`
+                        : story.status === "queued" ? "灵感已排队，等待开始创作" : "故事工坊正在创作中"}
+                    </Text>
+                  </View>
+                  {activeArticle ? <ChevronRight size={18} color={colors.primary} /> : <ActivityIndicator size="small" color={colors.primary} />}
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      )}
 
       {interestFeed.length > 0 && (
         <View style={styles.interestExploreSection}>
@@ -7794,6 +7857,25 @@ function AppContent() {
     }
   };
 
+  const retryCustomStory = async (story: CustomStory) => {
+    try {
+      const retried = await api.retryCustomStory(story.id);
+      setCustomStories((current) =>
+        current.map((item) => (item.id === retried.id ? retried : item)),
+      );
+      setAppNotice({
+        title: "已重新送入故事工坊",
+        message: "这次会自动兼容模型返回的附加 JSON，创作将在后台继续。",
+      });
+    } catch (error) {
+      setAppNotice({
+        title: "重新生成失败",
+        message: error instanceof Error ? error.message : "请稍后重试",
+        tone: "error",
+      });
+    }
+  };
+
   const openPushedArticle = async (articleId: string) => {
     setReaderPracticeMode(false);
     const queue = manualPushes.map((push) => push.article.id);
@@ -7978,6 +8060,7 @@ function AppContent() {
       <TodayScreen
         examId={examId}
         daily={daily}
+        customStories={customStories}
         interestFeed={interestFeed}
         selectedInterests={selectedInterests}
         streakDays={learningStats.streakDays}
@@ -7987,6 +8070,7 @@ function AppContent() {
         onOpen={openDailyArticle}
         onChooseDaily={chooseDailyArticle}
         onOpenInterest={openInterestArticle}
+        onOpenCustom={openCustomStoryArticle}
         onOpenPush={openPushedArticle}
         onNavigate={setTab}
       />
@@ -7995,6 +8079,7 @@ function AppContent() {
         stories={customStories}
         onCreate={createCustomStory}
         onOpen={openCustomStoryArticle}
+        onRetry={retryCustomStory}
       />
     ) : tab === "history" ? (
       <HistoryScreen
@@ -8253,6 +8338,9 @@ const styles = StyleSheet.create({
   storyStatusFailed: { backgroundColor: "#FBE9E8" },
   storyStatusText: { color: colors.primaryDark, fontSize: 10, fontWeight: "800" },
   storyError: { color: "#A8443D", fontSize: 11, lineHeight: 17, marginTop: 12 },
+  storyFailureRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  storyRetryButton: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 11, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.primarySoft, marginTop: 12 },
+  storyRetryText: { color: colors.primary, fontSize: 11, fontWeight: "800" },
   storyEpisodeList: { gap: 8, marginTop: 14 },
   storyEpisode: { minHeight: 62, flexDirection: "row", alignItems: "center", gap: 11, borderRadius: 14, backgroundColor: colors.surfaceMuted, paddingHorizontal: 12, paddingVertical: 9 },
   storyEpisodeLocked: { opacity: 0.52 },
@@ -8963,6 +9051,16 @@ const styles = StyleSheet.create({
   },
   countPillText: { color: colors.inkMuted, fontSize: 11, fontWeight: "700" },
   articleList: { gap: 12 },
+  customHomeSection: { marginTop: 2 },
+  customHomeMore: { flexDirection: "row", alignItems: "center", gap: 2, paddingVertical: 6 },
+  customHomeMoreText: { color: colors.primary, fontSize: 11, fontWeight: "800" },
+  customHomeList: { gap: 9 },
+  customHomeCard: { minHeight: 72, borderRadius: 17, paddingHorizontal: 14, paddingVertical: 12, backgroundColor: "#EAF4F1", borderWidth: 1, borderColor: "#CDE4DE", flexDirection: "row", alignItems: "center", gap: 11 },
+  customHomeCardPending: { opacity: 0.78 },
+  customHomeGlyph: { width: 42, height: 42, borderRadius: 14, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
+  customHomeGlyphText: { color: "#BDF2E8", fontSize: 22, fontWeight: "900" },
+  customHomeTitle: { color: colors.ink, fontSize: 14, fontWeight: "900" },
+  customHomeMeta: { color: colors.inkMuted, fontSize: 10, marginTop: 5 },
   interestExploreSection: { marginTop: 2 },
   interestSparkBadge: {
     flexDirection: "row",

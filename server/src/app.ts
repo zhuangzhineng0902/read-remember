@@ -948,6 +948,32 @@ export function createApp(
     res.json({ data: serializeCustomStory(row) });
   });
 
+  authenticated.post("/custom-stories/:id/retry", (req, res) => {
+    const user = currentUser(res);
+    if (!customStories?.enabled) {
+      throw new ApiError(503, "CUSTOM_STORY_NOT_CONFIGURED", "定制故事生成服务尚未配置");
+    }
+    const row = db
+      .prepare(
+        `SELECT ${customStorySelect} FROM custom_story_requests
+         WHERE id = ? AND user_id = ?`,
+      )
+      .get(req.params.id, user.id) as CustomStoryRow | undefined;
+    if (!row) throw new ApiError(404, "CUSTOM_STORY_NOT_FOUND", "定制故事不存在");
+    if (row.status !== "failed") {
+      throw new ApiError(409, "CUSTOM_STORY_NOT_FAILED", "只有失败的故事可以重新生成");
+    }
+    db.prepare(
+      `UPDATE custom_story_requests SET status = 'queued', error_message = '',
+       updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).run(row.id);
+    customStories.enqueue(row.id);
+    const retried = db
+      .prepare(`SELECT ${customStorySelect} FROM custom_story_requests WHERE id = ?`)
+      .get(row.id) as CustomStoryRow;
+    res.status(202).json({ data: serializeCustomStory(retried) });
+  });
+
   authenticated.post("/custom-stories", (req, res) => {
     const user = currentUser(res);
     if (!customStories?.enabled) {

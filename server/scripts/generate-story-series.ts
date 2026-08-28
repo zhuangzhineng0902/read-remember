@@ -442,15 +442,41 @@ function stripFence(value: string) {
   return value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
 }
 
-function parseJson(value: string) {
+export function parseJson(value: string) {
   const cleaned = stripFence(value);
   try {
     return JSON.parse(cleaned) as unknown;
   } catch {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start < 0 || end <= start) throw new Error("模型没有返回有效 JSON");
-    return JSON.parse(cleaned.slice(start, end + 1)) as unknown;
+    const objectStart = cleaned.indexOf("{");
+    const arrayStart = cleaned.indexOf("[");
+    const starts = [objectStart, arrayStart].filter((index) => index >= 0);
+    const start = starts.length ? Math.min(...starts) : -1;
+    if (start < 0) throw new Error("模型没有返回有效 JSON");
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < cleaned.length; index++) {
+      const character = cleaned[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === "{" || character === "[") stack.push(character);
+      if (character === "}" || character === "]") {
+        const expected = character === "}" ? "{" : "[";
+        if (stack.pop() !== expected) break;
+        if (stack.length === 0) {
+          return JSON.parse(cleaned.slice(start, index + 1)) as unknown;
+        }
+      }
+    }
+    throw new Error("模型没有返回完整 JSON");
   }
 }
 
