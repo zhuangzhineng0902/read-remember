@@ -80,7 +80,7 @@ test("health and exam list are public", async () => {
 
   const interests = await request("/api/v1/interests");
   assert.equal(interests.status, 200);
-  assert.equal((await interests.json()).data.length, 5);
+  assert.equal((await interests.json()).data.length, 9);
 });
 
 test("pronunciation metadata and cached audio are public", async () => {
@@ -307,7 +307,7 @@ test("anonymous account can register, login, and update profile", async () => {
   assert.equal(preferences.status, 200);
   const preferenceData = (await preferences.json()).data;
   assert.equal(preferenceData.learning.dailyGoal, 3);
-  assert.equal(preferenceData.interests.length, 5);
+  assert.equal(preferenceData.interests.length, 9);
 });
 
 test("interest preferences drive the interest feed and mixed daily reading", async () => {
@@ -352,16 +352,59 @@ test("interest preferences drive the interest feed and mixed daily reading", asy
   const daily = await request("/api/v1/daily?date=2026-08-08");
   assert.equal(daily.status, 200);
   const dailyItems = (await daily.json()).data.articles as Array<{
+    id: string;
     contentKind: string;
   }>;
   assert.equal(dailyItems.length, 3);
-  assert.equal(
-    dailyItems.filter((item) => item.contentKind === "interest").length,
-    1,
+  assert.deepEqual(
+    dailyItems.map((item) => item.contentKind),
+    ["interest", "exam", "interest"],
   );
+
+  const selected = await request("/api/v1/daily/select", {
+    method: "POST",
+    body: JSON.stringify({
+      date: "2026-08-08",
+      articleId: dailyItems[1].id,
+    }),
+  });
+  assert.equal(selected.status, 200);
+  const selectedDaily = await request("/api/v1/daily?date=2026-08-08");
+  assert.equal(
+    (await selectedDaily.json()).data.selectedArticleId,
+    dailyItems[1].id,
+  );
+
+  // Simulate a legacy client that persisted the selected exam in the first
+  // card. The API should keep the selection while restoring strict role order.
+  db.prepare(
+    `UPDATE deliveries SET slot = 4
+     WHERE user_id = ? AND delivery_date = ? AND exam_id = ? AND article_id = ?`,
+  ).run(userId, "2026-08-08", "toefl", dailyItems[0].id);
+  db.prepare(
+    `UPDATE deliveries SET slot = 1
+     WHERE user_id = ? AND delivery_date = ? AND exam_id = ? AND article_id = ?`,
+  ).run(userId, "2026-08-08", "toefl", dailyItems[1].id);
+  db.prepare(
+    `UPDATE deliveries SET slot = 2
+     WHERE user_id = ? AND delivery_date = ? AND exam_id = ? AND article_id = ?`,
+  ).run(userId, "2026-08-08", "toefl", dailyItems[0].id);
+
+  const repairedDaily = await request("/api/v1/daily?date=2026-08-08");
+  assert.equal(repairedDaily.status, 200);
+  const repairedData = (await repairedDaily.json()).data as {
+    selectedArticleId: string;
+    articles: Array<{ id: string; contentKind: string }>;
+  };
+  assert.equal(repairedData.selectedArticleId, dailyItems[1].id);
+  assert.deepEqual(
+    repairedData.articles.map((item) => item.contentKind),
+    ["interest", "exam", "interest"],
+  );
+  assert.equal(repairedData.articles[1].id, dailyItems[1].id);
 });
 
-test("interest corpus contains at least one hundred unique articles per stage and category", () => {
+test("interest corpus contains broad reference reading and complete original story series", () => {
   const rows = db
     .prepare(
       `SELECT exam_id AS examId, interest_id AS interestId,
@@ -378,15 +421,63 @@ test("interest corpus contains at least one hundred unique articles per stage an
     uniqueIds: number;
     uniqueBodies: number;
   }>;
-  assert.equal(rows.length, 25);
+  assert.equal(rows.length, 45);
   assert.ok(
     rows.every(
       (row) =>
-        row.total >= 100 &&
+        row.total >= (["mecha", "cultivation", "tiger", "cat"].includes(row.interestId) ? 6 : 100) &&
         row.uniqueIds === row.total &&
-        row.uniqueBodies >= 100,
+        row.uniqueBodies >= (["mecha", "cultivation", "tiger", "cat"].includes(row.interestId) ? 6 : 100),
     ),
   );
+});
+
+test("completing a story episode unlocks the next chapter", async () => {
+  const preferences = await request("/api/v1/users/me/preferences", {
+    method: "PATCH",
+    body: JSON.stringify({ interests: ["mecha"] }),
+  });
+  assert.equal(preferences.status, 200);
+
+  const feed = await request("/api/v1/interest-feed?interestId=mecha&limit=1");
+  assert.equal(feed.status, 200);
+  const first = (await feed.json()).data[0] as {
+    id: string;
+    seriesTitle: string;
+    episodeNumber: number;
+  };
+  assert.equal(first.episodeNumber, 1);
+
+  const completed = await request(`/api/v1/articles/${first.id}/complete`, {
+    method: "POST",
+    body: JSON.stringify({ answers: [0, 1] }),
+  });
+  assert.equal(completed.status, 200);
+  const nextEpisode = (await completed.json()).data.nextEpisode as {
+    id: string;
+    seriesTitle: string;
+    episodeNumber: number;
+  };
+  assert.equal(nextEpisode.seriesTitle, first.seriesTitle);
+  assert.equal(nextEpisode.episodeNumber, 2);
+
+  const nextArticle = await request(`/api/v1/articles/${nextEpisode.id}`);
+  assert.equal(nextArticle.status, 200);
+
+  // Keep this integration assertion isolated from later aggregate-stat tests.
+  db.prepare("DELETE FROM article_progress WHERE user_id = ? AND article_id = ?").run(
+    userId,
+    first.id,
+  );
+  db.prepare("DELETE FROM article_attempts WHERE user_id = ? AND article_id = ?").run(
+    userId,
+    first.id,
+  );
+  const restoredPreferences = await request("/api/v1/users/me/preferences", {
+    method: "PATCH",
+    body: JSON.stringify({ interests: ["military", "art"] }),
+  });
+  assert.equal(restoredPreferences.status, 200);
 });
 
 test("daily delivery is idempotent and never repeats across dates", async () => {
@@ -466,7 +557,7 @@ test("translated article content is returned when materialized", async () => {
   assert.equal(translation.model, "test-translator");
 });
 
-test("custom daily goal immediately replenishes today's target articles", async () => {
+test("daily reading remains a three-card choice when legacy goal settings change", async () => {
   await request("/api/v1/users/me/exam", {
     method: "PATCH",
     body: JSON.stringify({ examId: "ielts" }),
@@ -488,8 +579,8 @@ test("custom daily goal immediately replenishes today's target articles", async 
   const daily = await request("/api/v1/daily");
   const data = (await daily.json()).data;
   assert.equal(data.examId, "ielts");
-  assert.equal(data.articles.length, 5);
-  assert.equal(new Set(data.articles.map((item: { id: string }) => item.id)).size, 5);
+  assert.equal(data.articles.length, 3);
+  assert.equal(new Set(data.articles.map((item: { id: string }) => item.id)).size, 3);
 
   await request("/api/v1/users/me/preferences", {
     method: "PATCH",
@@ -605,7 +696,7 @@ test("vocabulary can be added, filtered, and removed", async () => {
       exampleTranslation: "幼树容易受到干旱影响。",
     }),
   });
-  assert.equal(saved.status, 201);
+  assert.equal(saved.status, 201, await saved.clone().text());
 
   const list = await request("/api/v1/vocabulary?examId=toefl&search=vul");
   assert.equal((await list.json()).data.length, 1);
@@ -687,6 +778,75 @@ test("daily automatic push follows each user's exam and is idempotent", async ()
   assert.equal(count.count, 1);
 });
 
+test("admin can add a custom interest used by preferences and article imports", async () => {
+  const headers = {
+    "x-admin-key": "test-admin-key",
+    "content-type": "application/json",
+  };
+  const created = await fetch(`${baseUrl}/api/v1/admin/interests`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      id: "dinosaur",
+      name: "恐龙探险",
+      subtitle: "化石、史前世界与科学冒险",
+      emoji: "🦕",
+      color: "#55766D",
+      activityPrompt: "用一句英文记录本章发现，并预测下一集。",
+      storyPrompt: "围绕恐龙、化石和野外考察创作连续冒险，知识必须来自观察和证据。",
+    }),
+  });
+  assert.equal(created.status, 201, await created.clone().text());
+
+  const catalog = await request("/api/v1/interests");
+  const categories = (await catalog.json()).data as Array<{ id: string }>;
+  assert.ok(categories.some((category) => category.id === "dinosaur"));
+
+  const preferences = await request("/api/v1/users/me/preferences", {
+    method: "PATCH",
+    body: JSON.stringify({ interests: ["dinosaur", "science"] }),
+  });
+  assert.equal(preferences.status, 200, await preferences.clone().text());
+  assert.deepEqual((await preferences.json()).data.interests, ["dinosaur", "science"]);
+
+  const imported = await fetch(`${baseUrl}/api/v1/admin/articles/import`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      examId: "middle",
+      sourceName: "Custom interest test",
+      licenseNote: "Original test content for custom interest validation",
+      rightsConfirmed: true,
+      articles: [
+        {
+          externalId: "dinosaur-test-1",
+          year: 2026,
+          title: "The Footprint Beside the Tent",
+          eyebrow: "DINOSAUR FIELD MYSTERY",
+          readMinutes: 4,
+          difficulty: 2,
+          contentKind: "interest",
+          interestId: "dinosaur",
+          seriesTitle: "The Young Fossil Team",
+          episodeNumber: 1,
+          paragraphs: [
+            "Mia found a three-toed mark beside the team's tent, but the rain had fallen before anyone arrived at the field camp.",
+          ],
+          questions: [
+            {
+              prompt: "What did Mia find beside the tent?",
+              options: ["A footprint", "A map", "A feather", "A key"],
+              answer: 0,
+              explanation: "The passage says she found a three-toed mark.",
+            },
+          ],
+        },
+      ],
+    }),
+  });
+  assert.equal(imported.status, 201, await imported.clone().text());
+});
+
 test("admin can inspect the bank, import authorized content, and view metrics", async () => {
   const unauthorized = await fetch(`${baseUrl}/api/v1/admin/overview`);
   assert.equal(unauthorized.status, 401);
@@ -757,8 +917,9 @@ test("admin can inspect the bank, import authorized content, and view metrics", 
 
   const users = await fetch(`${baseUrl}/api/v1/admin/users`, { headers });
   const userRows = (await users.json()).data;
-  assert.equal(userRows[0].id, userId);
-  assert.ok(userRows[0].pushedArticles >= 6);
+  const primaryUser = userRows.find((user: { id: string }) => user.id === userId);
+  assert.ok(primaryUser);
+  assert.ok(primaryUser.pushedArticles >= 6);
 });
 
 test("admin manual push reaches the selected mobile user", async () => {

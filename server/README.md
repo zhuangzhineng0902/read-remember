@@ -194,7 +194,9 @@ npm run translate:articles -- \
 
 每日自动推荐默认按 `Asia/Shanghai` 时区在 08:00 后，为每位用户从其当前选择的考试分类中分配一篇未推送过的文章。服务晚启动会补发当天任务，客户端在线时每分钟刷新应用内推送列表。
 
-兴趣题库会为 TOEFL、IELTS、TOEIC、高中和初中五个阶段分别初始化五个栏目。每个“阶段 × 栏目”至少 100 篇，当前为 102 篇，共 2,550 篇；同一主题会按考试阶段调整句式、篇幅、任务语境和题目推理强度。兴趣书架按栏目均衡抽取未出现过的文章，已经进入书架或每日任务的文章不会再次推荐。
+兴趣题库会为 TOEFL、IELTS、TOEIC、高中和初中五个阶段初始化内置栏目；信息类栏目提供大规模短篇语料，连续故事栏目提供分集解锁内容。同一主题会按考试阶段调整句式、篇幅、任务语境和题目推理强度。兴趣书架按栏目均衡抽取未出现过的文章，已经进入书架或每日任务的文章不会再次推荐。
+
+每日三选一固定采用三个槽位：一篇所选兴趣的连续故事、一篇当前考试分类的真题、一篇科普／名著简化／其他兴趣拓展。候选不足时才跨类型补位；已经选择或开始阅读的当天文章不会被自动替换。
 
 运营后台：`http://localhost:4000/admin/`
 
@@ -205,6 +207,59 @@ npm run translate:articles -- \
 ```text
 http://192.168.1.14:4000/api/v1
 ```
+
+## 连续兴趣故事生成
+
+复制 `config/story-generation.example.json` 为本地配置，然后运行：
+
+```bash
+npm run generate:story-series -- --config config/story-generation.json
+```
+
+全部九个内置栏目都能生成连续故事：`military`、`art`、`science`、`why`、`fantasy`、`mecha`、`cultivation`、`tiger` 和 `cat`。生成过程先规划整季主谜题与角色成长，再逐集生成，并使用编辑模型进行第二遍重写审校；只有篇幅、句长、目标词数量、团队协作和题目结构达到质量线的章节才会写入数据库。
+
+也可以使用自定义小写 slug 新增兴趣。首次成功生成时，脚本会把栏目资料写入 `interest_categories`，客户端重新加载后会自动显示：
+
+```bash
+npm run generate:story-series -- \
+  --interest dinosaur \
+  --interest-name "恐龙探险" \
+  --interest-subtitle "化石、史前世界与科学冒险" \
+  --interest-emoji "🦕" \
+  --interest-color "#55766D" \
+  --interest-prompt "围绕恐龙、化石和野外考察创作连续冒险，知识来自观察和证据" \
+  --exam middle --reader-stage stage1 --episodes 6
+```
+
+运营后台“内容同步”页面也提供兴趣栏目的新增／更新表单，保存后即可在导入数据和用户兴趣选择中使用。
+
+选材支持三种模式：
+
+- `original`：完全原创连续故事。
+- `classic`：基于内置公版名著独立简化重述，可选《爱丽丝梦游仙境》《金银岛》《秘密花园》《八十天环游地球》《西游记》《伊索寓言》、早期福尔摩斯故事、《小公主》《绿野仙踪》和《汤姆·索亚历险记》。
+- `favorite`：根据孩子喜欢的作品或题材提取“吸引力配方”，但重新创作人物、世界和情节。
+
+词汇分级借鉴成熟分级读物的控制方法，可用 `--reader-stage` 选择 `starter`（约 250 核心词）到 `stage6`（约 2500 核心词）；`auto` 会按考试阶段自动匹配。脚本不会复制 Oxford Bookworms 或其他商业简写本的文本。
+
+例如，把《金银岛》简化成适合初中生的连续冒险：
+
+```bash
+npm run generate:story-series -- --source-mode classic --classic treasure-island --interest tiger --exam middle --reader-stage stage1 --episodes 6
+```
+
+根据孩子喜欢的“魔法学校、幽默宠物和伙伴闯关”创作全新故事：
+
+```bash
+npm run generate:story-series -- --source-mode favorite --source-title "魔法校园故事" --source-notes "幽默宠物、伙伴闯关、藏在学校里的谜题" --interest cultivation --exam middle --reader-stage stage1 --episodes 6
+```
+
+可以先检查策划提示而不调用模型：
+
+```bash
+npm run generate:story-series -- --interest tiger --exam middle --episodes 6 --dry-run
+```
+
+常用参数还包括 `--model`、`--review-model`、`--base-url`、`--api-key`、`--database` 和 `--force`。详细说明可运行 `npm run generate:story-series -- --help`。
 
 ## 认证
 

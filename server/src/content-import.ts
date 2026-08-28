@@ -15,6 +15,12 @@ const questionSchema = z
     message: "answer 必须对应一个有效选项",
   });
 
+const interestIdSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z][a-z0-9-]{1,39}$/);
+
 export const importedArticleSchema = z
   .object({
     externalId: z.string().trim().min(1).max(160),
@@ -24,10 +30,7 @@ export const importedArticleSchema = z
     readMinutes: z.number().int().min(1).max(60).default(8),
     difficulty: z.number().int().min(1).max(5),
     contentKind: z.enum(["exam", "interest"]).default("exam"),
-    interestId: z
-      .enum(["military", "art", "science", "why", "fantasy"])
-      .nullable()
-      .optional(),
+    interestId: interestIdSchema.nullable().optional(),
     seriesTitle: z.string().trim().min(2).max(160).nullable().optional(),
     episodeNumber: z.number().int().min(1).max(999).nullable().optional(),
     paragraphs: z.array(z.string().trim().min(10).max(20000)).min(1).max(30),
@@ -50,6 +53,31 @@ export const importPayloadSchema = z.object({
 export type ImportPayload = z.infer<typeof importPayloadSchema>;
 
 export function importArticles(db: AppDatabase, payload: ImportPayload) {
+  const requestedInterests = [
+    ...new Set(
+      payload.articles.flatMap((article) =>
+        article.contentKind === "interest" && article.interestId
+          ? [article.interestId]
+          : [],
+      ),
+    ),
+  ];
+  if (requestedInterests.length) {
+    const placeholders = requestedInterests.map(() => "?").join(",");
+    const available = db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM interest_categories
+         WHERE active = 1 AND id IN (${placeholders})`,
+      )
+      .get(...requestedInterests) as { count: number };
+    if (available.count !== requestedInterests.length) {
+      throw new ApiError(
+        400,
+        "INVALID_INTEREST",
+        "兴趣文章引用了不存在或已停用的兴趣分类",
+      );
+    }
+  }
   const existingSource = db.prepare(`
     SELECT article_id AS articleId
     FROM article_sources

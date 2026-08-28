@@ -11,6 +11,22 @@ import {
 } from "./content-import";
 import { ApiError, parse } from "./http";
 
+const interestIdSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z][a-z0-9-]{1,39}$/);
+
+const interestCategorySchema = z.object({
+  id: interestIdSchema,
+  name: z.string().trim().min(1).max(30),
+  subtitle: z.string().trim().min(2).max(100),
+  emoji: z.string().trim().min(1).max(12),
+  color: z.string().trim().regex(/^#[0-9a-f]{6}$/i),
+  activityPrompt: z.string().trim().min(4).max(300),
+  storyPrompt: z.string().trim().min(10).max(1000),
+});
+
 function safeKeyMatch(actual: string, expected: string) {
   const left = Buffer.from(actual);
   const right = Buffer.from(expected);
@@ -75,6 +91,56 @@ export function createAdminRouter(
     res.json({ data: { metrics, recent } });
   });
 
+  router.get("/interests", (_req, res) => {
+    const rows = db
+      .prepare(
+        `SELECT id, name, subtitle, emoji, color,
+          activity_prompt AS activityPrompt, story_prompt AS storyPrompt,
+          CASE WHEN built_in = 1 THEN 1 ELSE 0 END AS builtIn,
+          CASE WHEN active = 1 THEN 1 ELSE 0 END AS active
+         FROM interest_categories ORDER BY sort_order, created_at, id`,
+      )
+      .all();
+    res.json({ data: rows });
+  });
+
+  router.post("/interests", (req, res) => {
+    const body = parse(interestCategorySchema, req.body);
+    db.prepare(
+      `INSERT INTO interest_categories(
+         id, name, subtitle, emoji, color, activity_prompt, story_prompt
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         subtitle = excluded.subtitle,
+         emoji = excluded.emoji,
+         color = excluded.color,
+         activity_prompt = excluded.activity_prompt,
+         story_prompt = excluded.story_prompt,
+         active = 1,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).run(
+      body.id,
+      body.name,
+      body.subtitle,
+      body.emoji,
+      body.color,
+      body.activityPrompt,
+      body.storyPrompt,
+    );
+    audit(db, "interests.upsert", { id: body.id, name: body.name });
+    const created = db
+      .prepare(
+        `SELECT id, name, subtitle, emoji, color,
+          activity_prompt AS activityPrompt, story_prompt AS storyPrompt,
+          CASE WHEN built_in = 1 THEN 1 ELSE 0 END AS builtIn,
+          CASE WHEN active = 1 THEN 1 ELSE 0 END AS active
+         FROM interest_categories WHERE id = ?`,
+      )
+      .get(body.id);
+    res.status(201).json({ data: created });
+  });
+
   router.get("/articles", (req, res) => {
     const query = parse(
       z.object({
@@ -84,9 +150,7 @@ export function createAdminRouter(
         search: z.string().trim().max(100).optional(),
         eyebrow: z.string().trim().max(120).optional(),
         contentKind: z.enum(["exam", "interest"]).optional(),
-        interestId: z
-          .enum(["military", "art", "science", "why", "fantasy"])
-          .optional(),
+        interestId: interestIdSchema.optional(),
         limit: z.coerce.number().int().min(1).max(500).default(50),
         offset: z.coerce.number().int().min(0).default(0),
       }),

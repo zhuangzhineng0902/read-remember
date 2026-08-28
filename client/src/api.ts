@@ -29,6 +29,12 @@ export type Session = UserProfile & {
 
 export type ArticleSummary = Omit<Article, "paragraphs" | "questions">;
 
+export type DailyReading = {
+  date: string;
+  articles: Article[];
+  selectedArticleId: string | null;
+};
+
 export type ManualPush = {
   batchId: string;
   pushName: string;
@@ -421,18 +427,29 @@ export const api = {
 
   getMistakes: () => request<MistakeItem[]>("/mistakes"),
 
-  async getDaily(date?: string): Promise<Article[]> {
+  async getDaily(date?: string): Promise<DailyReading> {
     const query = date ? `?date=${encodeURIComponent(date)}` : "";
     const daily = await request<{
       date: string;
       examId: ExamId;
       articles: ArticleSummary[];
+      selectedArticleId: string | null;
       corpusExhausted: boolean;
     }>(`/daily${query}`);
-    return Promise.all(
-      daily.articles.map((article) => this.getArticle(article.id)),
-    );
+    return {
+      date: daily.date,
+      selectedArticleId: daily.selectedArticleId,
+      articles: await Promise.all(
+        daily.articles.map((article) => this.getArticle(article.id)),
+      ),
+    };
   },
+
+  selectDailyArticle: (articleId: string, date?: string) =>
+    request<{ date: string; articleId: string }>("/daily/select", {
+      method: "POST",
+      body: JSON.stringify({ articleId, ...(date ? { date } : {}) }),
+    }),
 
   async getArticle(id: string): Promise<Article> {
     return hydrateArticle(
@@ -504,6 +521,7 @@ export const api = {
       score: number;
       total: number;
       results: AnswerResult[];
+      nextEpisode: ArticleSummary | null;
     }>(`/articles/${encodeURIComponent(id)}/complete`, {
       method: "POST",
       body: JSON.stringify({ answers }),

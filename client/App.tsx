@@ -61,6 +61,7 @@ import * as Speech from "expo-speech";
 import {
   api,
   type ArticleAudioConfig,
+  type ArticleSummary,
   type ManualPush,
 } from "./src/api";
 import {
@@ -75,6 +76,7 @@ import {
   getInterestArticles,
   getInterestCategory,
   interestCategories,
+  replaceInterestCategories,
 } from "./src/interest-data";
 import { storage } from "./src/storage";
 import { syncDailyReminder } from "./src/notifications";
@@ -141,7 +143,7 @@ const DEFAULT_LEARNING_SETTINGS: LearningSettings = {
   dailyReminderEnabled: true,
   reminderTime: "20:30",
   pronunciationAccent: "us",
-  dailyGoal: 3,
+  dailyGoal: 1,
 };
 
 const EMPTY_LEARNING_STATS: LearningStats = {
@@ -1414,7 +1416,7 @@ function Onboarding({
   const { width } = useWindowDimensions();
   const tablet = width >= 768;
   const [selected, setSelected] = useState<ExamId>("toefl");
-  const [dailyGoal, setDailyGoal] = useState(3);
+  const [dailyGoal, setDailyGoal] = useState(1);
   const [selectedInterests, setSelectedInterests] = useState<InterestId[]>(
     defaultInterestIds,
   );
@@ -1461,9 +1463,7 @@ function Onboarding({
           <View style={styles.onboardingCopy}>
             <View style={styles.pillSoft}>
               <Sparkles size={14} color={colors.primary} />
-              <Text style={styles.pillSoftText}>
-                每天 {dailyGoal} 篇，读有所获
-              </Text>
+              <Text style={styles.pillSoftText}>每天三选一，读有所获</Text>
             </View>
             <Text style={[styles.heroTitle, tablet && styles.heroTitleTablet]}>
               从阅读里，{`\n`}把单词真正记下来。
@@ -1520,41 +1520,17 @@ function Onboarding({
           </View>
           <View style={styles.onboardingGoalSection}>
             <View style={styles.onboardingGoalCopy}>
-              <Text style={styles.stepLabel}>02 / 设置篇数</Text>
-              <Text style={styles.onboardingGoalTitle}>每天想读几篇？</Text>
-              <Text style={styles.panelHint}>保存后会立即生成今天的推荐</Text>
+              <Text style={styles.stepLabel}>02 / 每日仪式</Text>
+              <Text style={styles.onboardingGoalTitle}>每天三选一</Text>
+              <Text style={styles.panelHint}>
+                系统每天准备 3 篇，选一篇喜欢的完成即可
+              </Text>
             </View>
             <View style={styles.onboardingGoalStepper}>
-              <Pressable
-                accessibilityLabel="减少每日阅读篇数"
-                accessibilityState={{ disabled: dailyGoal <= 1 }}
-                disabled={dailyGoal <= 1}
-                onPress={() => setDailyGoal((value) => Math.max(1, value - 1))}
-                style={({ pressed }) => [
-                  styles.onboardingGoalButton,
-                  pressed && styles.pressed,
-                  dailyGoal <= 1 && styles.disabledButton,
-                ]}
-              >
-                <Minus size={20} color={colors.primary} />
-              </Pressable>
               <View style={styles.onboardingGoalValue}>
-                <Text style={styles.onboardingGoalNumber}>{dailyGoal}</Text>
-                <Text style={styles.onboardingGoalUnit}>篇 / 天</Text>
+                <Text style={styles.onboardingGoalNumber}>1</Text>
+                <Text style={styles.onboardingGoalUnit}>篇完成</Text>
               </View>
-              <Pressable
-                accessibilityLabel="增加每日阅读篇数"
-                accessibilityState={{ disabled: dailyGoal >= 10 }}
-                disabled={dailyGoal >= 10}
-                onPress={() => setDailyGoal((value) => Math.min(10, value + 1))}
-                style={({ pressed }) => [
-                  styles.onboardingGoalButton,
-                  pressed && styles.pressed,
-                  dailyGoal >= 10 && styles.disabledButton,
-                ]}
-              >
-                <Plus size={20} color={colors.primary} />
-              </Pressable>
             </View>
           </View>
           <View style={styles.onboardingInterestSection}>
@@ -1683,11 +1659,12 @@ function TodayScreen({
   daily,
   interestFeed,
   selectedInterests,
-  dailyGoal,
   streakDays,
   manualPushes,
   completed,
+  selectedDailyArticleId,
   onOpen,
+  onChooseDaily,
   onOpenInterest,
   onOpenPush,
   onNavigate,
@@ -1696,11 +1673,12 @@ function TodayScreen({
   daily: Article[];
   interestFeed: Article[];
   selectedInterests: InterestId[];
-  dailyGoal: LearningSettings["dailyGoal"];
   streakDays: number;
   manualPushes: ManualPush[];
   completed: string[];
+  selectedDailyArticleId: string | null;
   onOpen: (a: Article) => void;
+  onChooseDaily: (a: Article) => void | Promise<void>;
   onOpenInterest: (a: Article) => void;
   onOpenPush: (articleId: string) => void;
   onNavigate: (tab: TabId) => void;
@@ -1709,9 +1687,11 @@ function TodayScreen({
     "all",
   );
   const exam = getExam(examId);
-  const done = daily.filter((item) => completed.includes(item.id)).length;
-  const goalDone = Math.min(done, dailyGoal);
-  const remaining = Math.max(0, dailyGoal - goalDone);
+  const chosenCompleted = Boolean(
+    selectedDailyArticleId && completed.includes(selectedDailyArticleId),
+  );
+  const goalDone = chosenCompleted ? 1 : 0;
+  const remaining = 1 - goalDone;
   const visibleInterestArticles = interestFeed.filter(
     (article) =>
       interestFilter === "all" || article.interestId === interestFilter,
@@ -1737,9 +1717,7 @@ function TodayScreen({
           <View>
             <Text style={styles.goalEyebrow}>今日阅读计划</Text>
             <Text style={styles.goalTitle}>
-              {remaining === 0
-                ? "今天的计划完成了"
-                : `还剩 ${remaining} 篇，慢慢来`}
+              {remaining === 0 ? "今天的冒险完成了" : "从三篇里，选一篇出发"}
             </Text>
           </View>
           <View style={styles.streakPill}>
@@ -1751,20 +1729,22 @@ function TodayScreen({
           <View
             style={[
               styles.progressFill,
-              { width: `${Math.max(5, (goalDone / dailyGoal) * 100)}%` },
+              { width: `${Math.max(5, goalDone * 100)}%` },
             ]}
           />
         </View>
         <View style={styles.goalBottom}>
-          <Text style={styles.goalProgress}>{goalDone} / {dailyGoal} 篇</Text>
+          <Text style={styles.goalProgress}>{goalDone} / 1 篇</Text>
           <Text style={styles.goalExam}>{exam.name}</Text>
         </View>
       </View>
 
       <View style={styles.sectionHeading}>
         <View>
-          <Text style={styles.sectionTitle}>今日精选</Text>
-          <Text style={styles.sectionSubtitle}>根据你的目标与进度智能匹配</Text>
+          <Text style={styles.sectionTitle}>今日三选一</Text>
+          <Text style={styles.sectionSubtitle}>
+            兴趣故事 · 考试真题 · 科普名著拓展
+          </Text>
         </View>
         <View style={styles.countPill}>
           <Text style={styles.countPillText}>{daily.length} 篇</Text>
@@ -1778,7 +1758,18 @@ function TodayScreen({
             article={article}
             index={index}
             completed={completed.includes(article.id)}
-            onPress={() => onOpen(article)}
+            choiceState={
+              selectedDailyArticleId === article.id
+                ? "selected"
+                : selectedDailyArticleId
+                  ? "unchosen"
+                  : "candidate"
+            }
+            onPress={() =>
+              selectedDailyArticleId === article.id
+                ? onOpen(article)
+                : void onChooseDaily(article)
+            }
           />
         ))}
       </View>
@@ -1942,11 +1933,13 @@ function ArticleCard({
   article,
   index,
   completed,
+  choiceState,
   onPress,
 }: {
   article: Article;
   index: number;
   completed: boolean;
+  choiceState?: "candidate" | "selected" | "unchosen";
   onPress: () => void;
 }) {
   const cardColors = ["#DCECE7", "#F2E5CF", "#E2E7EF"];
@@ -1956,6 +1949,8 @@ function ArticleCard({
       onPress={onPress}
       style={({ pressed }) => [
         styles.articleCard,
+        choiceState === "selected" && styles.articleCardSelected,
+        choiceState === "unchosen" && styles.articleCardUnchosen,
         pressed && styles.cardPressed,
       ]}
     >
@@ -1980,6 +1975,28 @@ function ArticleCard({
               ? `${interestCategory?.emoji ?? "✨"} ${interestCategory?.name ?? "兴趣阅读"}`
               : `${article.year} 真题精选`}
           </Text>
+          {choiceState && (
+            <View
+              style={[
+                styles.dailyChoiceBadge,
+                choiceState === "selected" && styles.dailyChoiceBadgeSelected,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.dailyChoiceBadgeText,
+                  choiceState === "selected" &&
+                    styles.dailyChoiceBadgeTextSelected,
+                ]}
+              >
+                {choiceState === "selected"
+                  ? "今日已选"
+                  : choiceState === "candidate"
+                    ? "选这篇"
+                    : "换选"}
+              </Text>
+            </View>
+          )}
         </View>
         <Text style={styles.articleTitle}>{article.title}</Text>
         <View style={styles.articleMeta}>
@@ -1993,7 +2010,11 @@ function ArticleCard({
           </View>
           <View style={styles.readButton}>
             <Text style={styles.readButtonText}>
-              {completed ? "再读一次" : "开始阅读"}
+              {completed
+                ? "再读一次"
+                : choiceState === "candidate" || choiceState === "unchosen"
+                  ? "选择并开始"
+                  : "继续阅读"}
             </Text>
             <ChevronRight size={16} color={colors.primary} />
           </View>
@@ -6277,23 +6298,15 @@ function ProfileScreen({
             <ChevronRight size={18} color={colors.inkMuted} />
           </Pressable>
           <View style={styles.settingSeparator} />
-          <Pressable
-            accessibilityLabel="修改每日阅读目标"
-            onPress={() => setActivePicker("goal")}
-            style={({ pressed }) => [
-              styles.settingRow,
-              pressed && styles.settingRowPressed,
-            ]}
-          >
+          <View style={styles.settingRow}>
             <View style={styles.settingIcon}>
               <BookOpen size={19} color={colors.primary} />
             </View>
             <View style={styles.flexOne}>
-              <Text style={styles.settingLabel}>每日阅读目标</Text>
-              <Text style={styles.settingValue}>每天 {settings.dailyGoal} 篇</Text>
+              <Text style={styles.settingLabel}>每日阅读方式</Text>
+              <Text style={styles.settingValue}>三选一 · 完成 1 篇</Text>
             </View>
-            <ChevronRight size={18} color={colors.inkMuted} />
-          </Pressable>
+          </View>
         </View>
         <View style={styles.quoteCard}>
           <Text style={styles.quoteMark}>“</Text>
@@ -6318,14 +6331,6 @@ function ProfileScreen({
         visible={activePicker === "interests"}
         selected={selectedInterests}
         onSave={onChangeInterests}
-        onClose={() => setActivePicker(null)}
-      />
-      <DailyGoalSheet
-        visible={activePicker === "goal"}
-        value={settings.dailyGoal}
-        onSave={(dailyGoal) =>
-          onChangeSettings({ ...settings, dailyGoal })
-        }
         onClose={() => setActivePicker(null)}
       />
     </View>
@@ -6451,11 +6456,13 @@ function Navigation({
                 },
               ]}
             />
-            <Icon
-              size={21}
-              color={active === id ? colors.primary : colors.inkMuted}
-              strokeWidth={active === id ? 2.5 : 2}
-            />
+            <View pointerEvents="none" style={styles.bottomIconGlyph}>
+              <Icon
+                size={21}
+                color={active === id ? colors.primaryDark : colors.inkMuted}
+                strokeWidth={active === id ? 2.7 : 2}
+              />
+            </View>
           </View>
           <Text
             style={[
@@ -6468,6 +6475,163 @@ function Navigation({
         </Pressable>
       ))}
     </View>
+  );
+}
+
+function SeriesUnlockModal({
+  episode,
+  onRead,
+  onClose,
+}: {
+  episode: ArticleSummary;
+  onRead: () => void;
+  onClose: () => void;
+}) {
+  const reveal = useRef(new Animated.Value(0)).current;
+  const halo = useRef(new Animated.Value(0)).current;
+  const category = getInterestCategory(episode.interestId);
+
+  useEffect(() => {
+    void Haptics.notificationAsync(
+      Haptics.NotificationFeedbackType.Success,
+    ).catch(() => undefined);
+    Animated.parallel([
+      Animated.spring(reveal, {
+        toValue: 1,
+        damping: 12,
+        stiffness: 145,
+        mass: 0.8,
+        useNativeDriver: USE_NATIVE_DRIVER,
+      }),
+      Animated.sequence([
+        Animated.delay(180),
+        Animated.timing(halo, {
+          toValue: 1,
+          duration: 700,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: USE_NATIVE_DRIVER,
+        }),
+      ]),
+    ]).start();
+    return () => {
+      reveal.stopAnimation();
+      halo.stopAnimation();
+    };
+  }, [halo, reveal]);
+
+  return (
+    <Modal
+      visible
+      transparent
+      statusBarTranslucent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <View style={styles.unlockRoot}>
+        <View style={styles.unlockBackdrop} />
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.unlockHalo,
+            {
+              opacity: halo.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0, 0.7],
+              }),
+              transform: [
+                {
+                  scale: halo.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0.35, 1.25],
+                  }),
+                },
+              ],
+            },
+          ]}
+        />
+        {[0, 1, 2, 3, 4, 5].map((item) => (
+          <Animated.View
+            key={item}
+            pointerEvents="none"
+            style={[
+              styles.unlockSpark,
+              {
+                left: `${14 + ((item * 17) % 70)}%`,
+                top: `${16 + ((item * 23) % 58)}%`,
+                opacity: halo,
+                transform: [
+                  {
+                    scale: halo.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.2, 1 + (item % 2) * 0.45],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
+        ))}
+        <Animated.View
+          accessibilityViewIsModal
+          style={[
+            styles.unlockCard,
+            {
+              opacity: reveal,
+              transform: [
+                {
+                  translateY: reveal.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [54, 0],
+                  }),
+                },
+                {
+                  scale: reveal.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0.78, 1],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
+          <View style={styles.unlockSealOuter}>
+            <View
+              style={[
+                styles.unlockSeal,
+                { backgroundColor: category?.color ?? colors.primary },
+              ]}
+            >
+              <Text style={styles.unlockSealEmoji}>{category?.emoji ?? "✨"}</Text>
+            </View>
+          </View>
+          <Text style={styles.unlockEyebrow}>NEXT CHAPTER UNLOCKED</Text>
+          <Text style={styles.unlockTitle}>新的篇章，已经回应你</Text>
+          <Text style={styles.unlockSeries}>
+            {episode.seriesTitle} · 第 {episode.episodeNumber} 章
+          </Text>
+          <Text style={styles.unlockEpisodeTitle}>{episode.title}</Text>
+          <Text style={styles.unlockCopy}>
+            你和伙伴完成了本章挑战。下一段线索已经点亮，要现在继续吗？
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`开启下一集：${episode.title}`}
+            onPress={onRead}
+            style={({ pressed }) => [
+              styles.unlockPrimary,
+              pressed && styles.primaryButtonPressed,
+            ]}
+          >
+            <Sparkles size={18} color="#0B1B19" />
+            <Text style={styles.unlockPrimaryText}>开启下一集</Text>
+            <ChevronRight size={18} color="#0B1B19" />
+          </Pressable>
+          <Pressable onPress={onClose} style={styles.unlockLater}>
+            <Text style={styles.unlockLaterText}>先休息，已放入兴趣书架</Text>
+          </Pressable>
+        </Animated.View>
+      </View>
+    </Modal>
   );
 }
 
@@ -6486,7 +6650,13 @@ function AppContent() {
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [completed, setCompleted] = useState<string[]>([]);
   const [daily, setDaily] = useState<Article[]>([]);
+  const [dailyDate, setDailyDate] = useState(formatDateKey());
+  const [selectedDailyArticleId, setSelectedDailyArticleId] = useState<
+    string | null
+  >(null);
   const [interestFeed, setInterestFeed] = useState<Article[]>([]);
+  const [unlockedEpisode, setUnlockedEpisode] =
+    useState<ArticleSummary | null>(null);
   const [selectedInterests, setSelectedInterests] = useState<InterestId[]>(
     defaultInterestIds,
   );
@@ -6520,6 +6690,7 @@ function AppContent() {
         cachedLearningSettings,
         cachedReaderSettings,
         cachedInterests,
+        remoteInterestCategories,
       ] = await Promise.all([
         storage.getExam(),
         storage.getWords(),
@@ -6530,7 +6701,10 @@ function AppContent() {
         storage.getLearningSettings(),
         storage.getReaderSettings(),
         storage.getInterests(),
+        api.getInterestCategories().catch(() => interestCategories),
       ]);
+
+      replaceInterestCategories(remoteInterestCategories);
 
       setExamId(savedExam);
       setCurrentDeviceId(deviceId);
@@ -6559,7 +6733,7 @@ function AppContent() {
             savedExam,
             new Date(),
             [],
-            cachedLearningSettings?.dailyGoal ?? 3,
+            cachedLearningSettings?.dailyGoal ?? 1,
             initialInterests,
           ),
         );
@@ -6616,7 +6790,9 @@ function AppContent() {
                 .map((push) => push.article.id),
             ]),
           ];
-          setDaily(remoteDaily);
+          setDaily(remoteDaily.articles);
+          setDailyDate(remoteDaily.date);
+          setSelectedDailyArticleId(remoteDaily.selectedArticleId);
           setManualPushes(pushes);
           setHistory(remoteHistory.records);
           setCompleted(completedIds);
@@ -6724,7 +6900,9 @@ function AppContent() {
         await api.updatePreferences({ learning: next });
         if (goalChanged) {
           const remoteDaily = await api.getDaily();
-          setDaily(remoteDaily);
+          setDaily(remoteDaily.articles);
+          setDailyDate(remoteDaily.date);
+          setSelectedDailyArticleId(remoteDaily.selectedArticleId);
         }
       } catch (error) {
         setAppNotice({
@@ -6806,7 +6984,9 @@ function AppContent() {
         api.getDaily(),
         api.getInterestFeed(),
       ]);
-      setDaily(remoteDaily);
+      setDaily(remoteDaily.articles);
+      setDailyDate(remoteDaily.date);
+      setSelectedDailyArticleId(remoteDaily.selectedArticleId);
       setInterestFeed(remoteInterestFeed);
     } catch (error) {
       setSelectedInterests(previous);
@@ -6870,7 +7050,9 @@ function AppContent() {
           .map((push) => push.article.id),
       ]),
     ];
-    setDaily(remoteDaily);
+    setDaily(remoteDaily.articles);
+    setDailyDate(remoteDaily.date);
+    setSelectedDailyArticleId(remoteDaily.selectedArticleId);
     setManualPushes(pushes);
     setHistory(remoteHistory.records);
     setCompleted(completedIds);
@@ -6978,7 +7160,9 @@ function AppContent() {
             .map((push) => push.article.id),
         ]),
       ];
-      setDaily(remoteDaily);
+      setDaily(remoteDaily.articles);
+      setDailyDate(remoteDaily.date);
+      setSelectedDailyArticleId(remoteDaily.selectedArticleId);
       setManualPushes(pushes);
       setHistory(remoteHistory.records);
       setCompleted(completedIds);
@@ -7117,9 +7301,11 @@ function AppContent() {
 
   const submitArticle = async (article: Article, answers: number[]) => {
     let results: AnswerResult[];
+    let nextEpisode: ArticleSummary | null = null;
     if (apiOnline) {
       const response = await api.completeArticle(article.id, answers);
       results = response.results;
+      nextEpisode = response.nextEpisode;
     } else {
       const localArticle =
         articles.find((item) => item.id === article.id) ?? article;
@@ -7130,6 +7316,18 @@ function AppContent() {
         correct: answers[index] === question.answer,
         explanation: question.explanation,
       }));
+      if (article.seriesTitle && article.episodeNumber) {
+        const nextLocal = articles.find(
+          (item) =>
+            item.examId === article.examId &&
+            item.seriesTitle === article.seriesTitle &&
+            item.episodeNumber === (article.episodeNumber ?? 0) + 1,
+        );
+        nextEpisode = nextLocal
+          ? (({ paragraphs: _paragraphs, questions: _questions, ...summary }) =>
+              summary)(nextLocal)
+          : null;
+      }
     }
     const next = completed.includes(article.id)
       ? completed
@@ -7155,6 +7353,24 @@ function AppContent() {
         storage.setHistory(remoteHistory.records),
         storage.setCompleted(completedIds),
       ]);
+    }
+    if (nextEpisode) {
+      try {
+        const unlocked = apiOnline
+          ? await api.getArticle(nextEpisode.id)
+          : articles.find((item) => item.id === nextEpisode?.id);
+        if (unlocked) {
+          setInterestFeed((current) =>
+            current.some((item) => item.id === unlocked.id)
+              ? current
+              : [unlocked, ...current],
+          );
+        }
+      } catch {
+        // The unlock remains persisted on the server; the chapter can be
+        // loaded again from the ceremonial modal.
+      }
+      setUnlockedEpisode(nextEpisode);
     }
     return results;
   };
@@ -7190,6 +7406,24 @@ function AppContent() {
     setReaderPracticeMode(false);
     setReaderQueue(daily.map((item) => item.id));
     setReader(article);
+  };
+
+  const chooseDailyArticle = async (article: Article) => {
+    const previous = selectedDailyArticleId;
+    setSelectedDailyArticleId(article.id);
+    try {
+      if (apiOnline) {
+        await api.selectDailyArticle(article.id, dailyDate);
+      }
+      openDailyArticle(article);
+    } catch (error) {
+      setSelectedDailyArticleId(previous);
+      setAppNotice({
+        title: "今日故事选择失败",
+        message: error instanceof Error ? error.message : "请稍后重试",
+        tone: "error",
+      });
+    }
   };
 
   const openInterestArticle = (article: Article) => {
@@ -7273,6 +7507,30 @@ function AppContent() {
     }
   };
 
+  const openUnlockedEpisode = async () => {
+    if (!unlockedEpisode) return;
+    try {
+      const loaded =
+        interestFeed.find((item) => item.id === unlockedEpisode.id) ??
+        (apiOnline
+          ? await api.getArticle(unlockedEpisode.id)
+          : articles.find((item) => item.id === unlockedEpisode.id));
+      if (!loaded) return;
+      setReaderQueue((current) =>
+        current.includes(loaded.id) ? current : [...current, loaded.id],
+      );
+      setReaderPracticeMode(false);
+      setReader(loaded);
+      setUnlockedEpisode(null);
+    } catch (error) {
+      setAppNotice({
+        title: "下一集加载失败",
+        message: error instanceof Error ? error.message : "请稍后再试",
+        tone: "error",
+      });
+    }
+  };
+
   if (loading)
     return (
       <View style={styles.loading}>
@@ -7343,6 +7601,13 @@ function AppContent() {
           notice={appNotice}
           onClose={() => setAppNotice(null)}
         />
+        {unlockedEpisode && (
+          <SeriesUnlockModal
+            episode={unlockedEpisode}
+            onClose={() => setUnlockedEpisode(null)}
+            onRead={() => void openUnlockedEpisode()}
+          />
+        )}
       </>
     );
 
@@ -7353,11 +7618,12 @@ function AppContent() {
         daily={daily}
         interestFeed={interestFeed}
         selectedInterests={selectedInterests}
-        dailyGoal={learningSettings.dailyGoal}
         streakDays={learningStats.streakDays}
         manualPushes={manualPushes}
         completed={completed}
+        selectedDailyArticleId={selectedDailyArticleId}
         onOpen={openDailyArticle}
+        onChooseDaily={chooseDailyArticle}
         onOpenInterest={openInterestArticle}
         onOpenPush={openPushedArticle}
         onNavigate={setTab}
@@ -8289,6 +8555,26 @@ const styles = StyleSheet.create({
     gap: 14,
     ...shadows.card,
   },
+  articleCardSelected: {
+    borderWidth: 2,
+    borderColor: colors.accent,
+    backgroundColor: "#FFFDF7",
+  },
+  articleCardUnchosen: { opacity: 0.66 },
+  dailyChoiceBadge: {
+    marginLeft: "auto",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primarySoft,
+  },
+  dailyChoiceBadgeSelected: { backgroundColor: colors.accent },
+  dailyChoiceBadgeText: {
+    color: colors.primary,
+    fontSize: 9,
+    fontWeight: "800",
+  },
+  dailyChoiceBadgeTextSelected: { color: "#17211E" },
   articleNumber: {
     width: 66,
     minHeight: 118,
@@ -10729,9 +11015,130 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     borderRadius: radius.pill,
     backgroundColor: colors.primarySoft,
+    zIndex: 0,
+  },
+  bottomIconGlyph: {
+    position: "relative",
+    zIndex: 1,
+    alignItems: "center",
+    justifyContent: "center",
   },
   bottomNavText: { color: colors.inkMuted, fontSize: 11, fontWeight: "600" },
   bottomNavTextActive: { color: colors.primary, fontWeight: "800" },
+  unlockRoot: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 22,
+  },
+  unlockBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(3,11,18,0.92)",
+  },
+  unlockHalo: {
+    position: "absolute",
+    width: 330,
+    height: 330,
+    borderRadius: 165,
+    borderWidth: 2,
+    borderColor: "#F2C66D",
+    backgroundColor: "rgba(242,198,109,0.08)",
+  },
+  unlockSpark: {
+    position: "absolute",
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: "#FFE5A5",
+    shadowColor: "#FFE5A5",
+    shadowOpacity: 0.9,
+    shadowRadius: 10,
+  },
+  unlockCard: {
+    width: "100%",
+    maxWidth: 520,
+    alignItems: "center",
+    borderRadius: 28,
+    borderWidth: 1,
+    borderColor: "rgba(242,198,109,0.7)",
+    backgroundColor: "#0A171D",
+    paddingHorizontal: 26,
+    paddingTop: 34,
+    paddingBottom: 24,
+    shadowColor: "#000",
+    shadowOpacity: 0.45,
+    shadowRadius: 30,
+    shadowOffset: { width: 0, height: 18 },
+    elevation: 20,
+  },
+  unlockSealOuter: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    borderWidth: 1,
+    borderColor: "rgba(255,229,165,0.7)",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  unlockSeal: {
+    width: 66,
+    height: 66,
+    borderRadius: 33,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  unlockSealEmoji: { fontSize: 33 },
+  unlockEyebrow: {
+    color: "#F2C66D",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 2,
+    marginTop: 22,
+  },
+  unlockTitle: {
+    color: "#FFFFFF",
+    fontSize: 24,
+    lineHeight: 31,
+    fontWeight: "900",
+    textAlign: "center",
+    marginTop: 10,
+  },
+  unlockSeries: {
+    color: "#9FB8C0",
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 15,
+  },
+  unlockEpisodeTitle: {
+    color: "#FFE5A5",
+    fontSize: 18,
+    lineHeight: 25,
+    fontWeight: "800",
+    textAlign: "center",
+    marginTop: 6,
+  },
+  unlockCopy: {
+    color: "#B9C8CC",
+    fontSize: 13,
+    lineHeight: 21,
+    textAlign: "center",
+    marginTop: 15,
+  },
+  unlockPrimary: {
+    width: "100%",
+    minHeight: 54,
+    marginTop: 24,
+    borderRadius: 17,
+    backgroundColor: "#F2C66D",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 9,
+  },
+  unlockPrimaryText: { color: "#0B1B19", fontSize: 15, fontWeight: "900" },
+  unlockLater: { paddingHorizontal: 16, paddingVertical: 14 },
+  unlockLaterText: { color: "#8EA2A8", fontSize: 11, fontWeight: "700" },
   sideNav: {
     width: 180,
     borderRightWidth: 1,

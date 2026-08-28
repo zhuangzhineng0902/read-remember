@@ -13,6 +13,8 @@ export type GeneratedInterestPassage = {
   questions: Question[];
 };
 
+type InformationalInterestId = "military" | "art" | "science" | "why";
+
 type TopicSeed = {
   slug: string;
   title: string;
@@ -95,14 +97,14 @@ const whyTopics: TopicSeed[] = [
   { slug: "bread-rises", title: "Why Does Bread Dough Rise?", subject: "rising dough", mechanism: "yeast uses sugars and releases carbon dioxide that becomes trapped in elastic dough", value: "many small gas pockets create a lighter texture", challenge: "temperature affects both yeast activity and dough structure", example: "warm dough expands faster than dough kept too cold" },
 ];
 
-const topicGroups: Record<Exclude<InterestId, "fantasy">, TopicSeed[]> = {
+const topicGroups: Record<InformationalInterestId, TopicSeed[]> = {
   military: militaryTopics,
   art: artTopics,
   science: scienceTopics,
   why: whyTopics,
 };
 
-const categoryEyebrows: Record<Exclude<InterestId, "fantasy">, string> = {
+const categoryEyebrows: Record<InformationalInterestId, string> = {
   military: "ENGINEERING & HISTORY",
   art: "ART & DESIGN STUDIO",
   science: "SCIENCE EXPLORER",
@@ -310,7 +312,7 @@ export function generateInterestCorpus(
 ): GeneratedInterestPassage[] {
   const detail = stageDetails[examId];
   const informational = (Object.entries(topicGroups) as Array<
-    [Exclude<InterestId, "fantasy">, TopicSeed[]]
+    [InformationalInterestId, TopicSeed[]]
   >).flatMap(([interestId, topics]) =>
     topics.flatMap((topic) =>
       lenses.map((lens) => ({

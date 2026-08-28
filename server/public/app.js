@@ -27,6 +27,10 @@ const examNames = {
   middle: "初中",
 };
 const interestNames = {
+  mecha: "高达机甲",
+  cultivation: "修仙奇遇",
+  tiger: "虎小满",
+  cat: "猫成成",
   military: "军事科技",
   art: "画画与设计",
   science: "科普知识",
@@ -103,7 +107,7 @@ async function render(view) {
   try {
     if (view === "overview") await renderOverview();
     if (view === "articles") await renderArticles();
-    if (view === "sync") renderSync();
+    if (view === "sync") await renderSync();
     if (view === "push") await renderPush();
     if (view === "users") await renderUsers();
   } catch (error) {
@@ -158,6 +162,10 @@ function activityRow(item) {
 }
 
 async function renderArticles() {
+  const categories = await api("/interests");
+  categories.forEach((category) => {
+    interestNames[category.id] = category.name;
+  });
   const search = state.articleSearch || "";
   const exam = state.articleExam || "";
   const kind = state.articleKind || "";
@@ -194,7 +202,11 @@ async function renderArticles() {
   bindGoButtons();
 }
 
-function renderSync() {
+async function renderSync() {
+  const categories = await api("/interests");
+  categories.forEach((category) => {
+    interestNames[category.id] = category.name;
+  });
   const sample = JSON.stringify(
     {
       articles: [
@@ -247,9 +259,52 @@ function renderSync() {
         <label class="check-row span-2"><input name="rightsConfirmed" type="checkbox" required><span>我确认拥有这些内容的存储、展示和向用户分发权利。</span></label>
         <button class="button primary span-2">校验并导入</button>
       </form>
+    </section>
+    <section class="panel form-grid" style="margin-top:14px">
+      <div class="span-2"><h3>新增或更新兴趣栏目</h3><p class="muted">保存后客户端兴趣选择和故事生成导入会自动识别，无需修改代码枚举。</p></div>
+      <form id="interest-form" class="span-2 form-grid">
+        <label class="field"><span>栏目 ID</span><input name="id" required pattern="[a-z][a-z0-9-]{1,39}" placeholder="例如 dinosaur"></label>
+        <label class="field"><span>栏目名称</span><input name="name" required placeholder="恐龙探险"></label>
+        <label class="field span-2"><span>栏目简介</span><input name="subtitle" required placeholder="化石、史前世界与科学冒险"></label>
+        <label class="field"><span>图标 Emoji</span><input name="emoji" required value="🦕"></label>
+        <label class="field"><span>主题颜色</span><input name="color" type="color" required value="#55766d"></label>
+        <label class="field span-2"><span>故事生成方向</span><textarea name="storyPrompt" required placeholder="围绕恐龙、化石和野外考察创作连续冒险，知识必须来自观察和证据。"></textarea></label>
+        <label class="field span-2"><span>阅读后互动任务</span><input name="activityPrompt" required value="用一句英文记录本章发现，并预测下一集。"></label>
+        <button class="button primary span-2">保存兴趣栏目</button>
+      </form>
+      <div class="span-2"><strong>当前栏目：</strong> ${categories.map((item) => `${escapeHtml(item.emoji)} ${escapeHtml(item.name)} <span class="muted">(${escapeHtml(item.id)})</span>`).join(" · ")}</div>
     </section>`;
   $("#sync-form").onsubmit = submitSync;
   $("#import-form").onsubmit = submitImport;
+  $("#interest-form").onsubmit = submitInterest;
+}
+
+async function submitInterest(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    const form = new FormData(event.currentTarget);
+    const category = await api("/interests", {
+      method: "POST",
+      body: JSON.stringify({
+        id: form.get("id"),
+        name: form.get("name"),
+        subtitle: form.get("subtitle"),
+        emoji: form.get("emoji"),
+        color: form.get("color"),
+        storyPrompt: form.get("storyPrompt"),
+        activityPrompt: form.get("activityPrompt"),
+      }),
+    });
+    interestNames[category.id] = category.name;
+    toast(`兴趣栏目“${category.name}”已保存`);
+    await render("sync");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function submitSync(event) {
@@ -302,11 +357,15 @@ async function submitImport(event) {
 }
 
 async function renderPush() {
-  const [articlePayload, users, types] = await Promise.all([
+  const [articlePayload, users, types, categories] = await Promise.all([
     api("/articles?limit=500"),
     api("/users"),
     api("/article-types"),
+    api("/interests"),
   ]);
+  categories.forEach((category) => {
+    interestNames[category.id] = category.name;
+  });
   state.articles = articlePayload;
   state.users = users;
   state.articleTypes = types;

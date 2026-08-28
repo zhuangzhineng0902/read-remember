@@ -10,6 +10,7 @@
     "build:site": "npm run build:web && npm run build",
     "setup:ecdict": "bash scripts/setup-ecdict.sh",
     "translate:articles": "tsx scripts/translate-articles.ts",
+    "generate:story-series": "tsx scripts/generate-story-series.ts",
     "generate:article-audio": "tsx scripts/generate-article-audio.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",

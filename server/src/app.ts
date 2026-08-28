@@ -29,10 +29,7 @@ import type {
   Question,
   ReaderSettings,
 } from "../../client/src/types";
-import {
-  defaultInterestIds,
-  interestCategories,
-} from "../../client/src/interest-data";
+import { defaultInterestIds } from "../../client/src/interest-data";
 import {
   lookupPronunciation,
   pronunciationAudio,
@@ -46,13 +43,17 @@ import type { PhraseTranslationProvider } from "./phrase-translation";
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const usernamePattern = /^[a-zA-Z0-9_]{3,24}$/;
-const interestIds = ["military", "art", "science", "why", "fantasy"] as const;
+const interestIdSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z][a-z0-9-]{1,39}$/);
 
 const defaultLearningSettings: LearningSettings = {
   dailyReminderEnabled: true,
   reminderTime: "20:30",
   pronunciationAccent: "us",
-  dailyGoal: 3,
+  dailyGoal: 1,
 };
 const defaultReaderSettings: ReaderSettings = {
   fontScale: 1,
@@ -110,6 +111,40 @@ const hasArticleAccess = (db: AppDatabase, userId: string, articleId: string) =>
       )
       .get(userId, articleId, userId, articleId, userId, articleId),
   );
+
+function unlockNextSeriesEpisode(
+  db: AppDatabase,
+  userId: string,
+  current: ArticleRow,
+  date: string,
+) {
+  if (
+    current.contentKind !== "interest" ||
+    !current.seriesTitle ||
+    !current.episodeNumber
+  ) {
+    return null;
+  }
+  const next = db
+    .prepare(
+      `SELECT ${articleSelect}
+       FROM articles a
+       WHERE a.exam_id = ? AND a.content_kind = 'interest'
+         AND a.series_title = ? AND a.episode_number = ?
+       ORDER BY a.id LIMIT 1`,
+    )
+    .get(
+      current.examId,
+      current.seriesTitle,
+      current.episodeNumber + 1,
+    ) as ArticleRow | undefined;
+  if (!next) return null;
+  db.prepare(
+    `INSERT OR IGNORE INTO interest_deliveries(user_id, article_id, delivery_date)
+     VALUES (?, ?, ?)`,
+  ).run(userId, next.id, date);
+  return next;
+}
 
 const sqliteTimestampToIso = (value: string) =>
   new Date(`${value.replace(" ", "T")}Z`).toISOString();
@@ -179,6 +214,17 @@ function userPreferences(db: AppDatabase, userId: string) {
   const storedInterests = row
     ? (JSON.parse(row.interestsJson) as InterestId[])
     : [];
+  const activeInterestIds = new Set(
+    (db
+      .prepare("SELECT id FROM interest_categories WHERE active = 1")
+      .all() as Array<{ id: string }>).map((item) => item.id),
+  );
+  const availableStoredInterests = storedInterests.filter((id) =>
+    activeInterestIds.has(id),
+  );
+  const fallbackInterests = defaultInterestIds.filter((id) =>
+    activeInterestIds.has(id),
+  );
   return {
     learning: row
       ? { ...defaultLearningSettings, ...JSON.parse(row.learningJson) }
@@ -186,7 +232,9 @@ function userPreferences(db: AppDatabase, userId: string) {
     reader: row
       ? { ...defaultReaderSettings, ...JSON.parse(row.readerJson) }
       : defaultReaderSettings,
-    interests: storedInterests.length ? storedInterests : defaultInterestIds,
+    interests: availableStoredInterests.length
+      ? availableStoredInterests
+      : fallbackInterests,
     updatedAt: row
       ? sqliteTimestampToIso(row.updatedAt)
       : new Date(0).toISOString(),
@@ -201,120 +249,330 @@ function ensureDailyDeliveries(
   requestedGoal: number,
   selectedInterests: InterestId[] = defaultInterestIds,
 ) {
-  const goal = Math.min(10, Math.max(1, Math.trunc(requestedGoal)));
-  const interestGoal = goal >= 3 && selectedInterests.length > 0 ? 1 : 0;
+  void requestedGoal;
+  const goal = 3;
+  type DailyDeliveryRow = ArticleRow & {
+    deliverySlot: number;
+    protectedDelivery: number;
+    selectedDelivery: number;
+  };
   const delivered = db.prepare(`
-    SELECT ${articleSelect}
+    SELECT ${articleSelect}, d.slot AS deliverySlot,
+      CASE WHEN p.article_id IS NOT NULL
+        OR COALESCE(r.ratio, 0) > 0
+        OR c.article_id IS NOT NULL
+      THEN 1 ELSE 0 END AS protectedDelivery
+      , CASE WHEN c.article_id IS NOT NULL THEN 1 ELSE 0 END AS selectedDelivery
     FROM deliveries d
     JOIN articles a ON a.id = d.article_id
+    LEFT JOIN article_progress p
+      ON p.user_id = d.user_id AND p.article_id = d.article_id
+    LEFT JOIN article_reading_states r
+      ON r.user_id = d.user_id AND r.article_id = d.article_id
+    LEFT JOIN daily_choices c
+      ON c.user_id = d.user_id
+      AND c.delivery_date = d.delivery_date
+      AND c.exam_id = d.exam_id
+      AND c.article_id = d.article_id
     WHERE d.user_id = ? AND d.delivery_date = ? AND d.exam_id = ?
     ORDER BY d.slot
   `);
+  const readRows = () =>
+    delivered.all(userId, date, examId) as unknown as DailyDeliveryRow[];
+  const roleMatches = (row: DailyDeliveryRow) => {
+    if (row.deliverySlot === 1) {
+      return row.contentKind === "interest" && Boolean(row.seriesTitle);
+    }
+    if (row.deliverySlot === 2) return row.contentKind === "exam";
+    if (row.deliverySlot === 3) return row.contentKind === "interest";
+    return false;
+  };
+  const targetSlotFor = (row: DailyDeliveryRow) => {
+    if (row.contentKind === "exam") return 2;
+    return row.seriesTitle ? 1 : 3;
+  };
+  const selected = [...new Set(selectedInterests)];
+  const interestFilter = selected.length
+    ? `a.interest_id IN (${selected.map(() => "?").join(",")})`
+    : "a.interest_id IS NOT NULL";
+
+  const chooseInterest = (preference: "story" | "explore") => {
+    const order =
+      preference === "story"
+        ? "CASE WHEN a.series_title IS NOT NULL THEN 0 ELSE 1 END"
+        : `CASE
+            WHEN a.series_title IS NULL THEN 0
+            WHEN a.interest_id IN ('science', 'why', 'art', 'military') THEN 1
+            ELSE 2
+          END`;
+    return db
+      .prepare(
+        `SELECT ${articleSelect}
+         FROM articles a
+         WHERE a.exam_id = ? AND a.content_kind = 'interest'
+           AND ${interestFilter}
+           AND NOT EXISTS (
+             SELECT 1 FROM deliveries d
+             WHERE d.user_id = ? AND d.article_id = a.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM interest_deliveries i
+             WHERE i.user_id = ? AND i.article_id = a.id
+           )
+           AND (
+             a.series_title IS NULL OR COALESCE(a.episode_number, 1) = 1 OR EXISTS (
+               SELECT 1
+               FROM articles previous
+               JOIN article_progress progress
+                 ON progress.article_id = previous.id AND progress.user_id = ?
+               WHERE previous.exam_id = a.exam_id
+                 AND previous.series_title = a.series_title
+                 AND previous.episode_number = a.episode_number - 1
+             )
+           )
+         ORDER BY
+           ${order},
+           (
+             SELECT COUNT(*)
+             FROM deliveries today_delivery
+             JOIN articles today_article
+               ON today_article.id = today_delivery.article_id
+             WHERE today_delivery.user_id = ?
+               AND today_delivery.delivery_date = ?
+               AND today_delivery.exam_id = ?
+               AND today_article.interest_id = a.interest_id
+           ) ASC,
+           CASE WHEN a.series_title IS NULL THEN 1 ELSE 0 END,
+           COALESCE(a.episode_number, 999), a.year DESC, a.id
+         LIMIT 1`,
+      )
+      .get(
+        examId,
+        ...selected,
+        userId,
+        userId,
+        userId,
+        userId,
+        date,
+        examId,
+      ) as unknown as ArticleRow | undefined;
+  };
+
+  const chooseExam = () =>
+    db
+      .prepare(
+        `SELECT ${articleSelect}
+         FROM articles a
+         WHERE a.exam_id = ? AND a.content_kind = 'exam'
+           AND NOT EXISTS (
+             SELECT 1 FROM deliveries d
+             WHERE d.user_id = ? AND d.article_id = a.id
+           )
+         ORDER BY a.year DESC, a.id
+         LIMIT 1`,
+      )
+      .get(examId, userId) as unknown as ArticleRow | undefined;
+
+  const chooseRecycledInterest = (preference: "story" | "explore") => {
+    const order =
+      preference === "story"
+        ? "CASE WHEN a.series_title IS NOT NULL THEN 0 ELSE 1 END"
+        : `CASE
+            WHEN a.series_title IS NULL THEN 0
+            WHEN a.interest_id IN ('science', 'why', 'art', 'military') THEN 1
+            ELSE 2
+          END`;
+    return db
+      .prepare(
+        `SELECT ${articleSelect}
+         FROM articles a
+         WHERE a.exam_id = ? AND a.content_kind = 'interest'
+           AND ${interestFilter}
+           AND NOT EXISTS (
+             SELECT 1 FROM deliveries current_delivery
+             WHERE current_delivery.user_id = ?
+               AND current_delivery.delivery_date = ?
+               AND current_delivery.exam_id = ?
+               AND current_delivery.article_id = a.id
+           )
+           AND (
+             a.series_title IS NULL OR COALESCE(a.episode_number, 1) = 1 OR EXISTS (
+               SELECT 1
+               FROM articles previous
+               JOIN article_progress progress
+                 ON progress.article_id = previous.id AND progress.user_id = ?
+               WHERE previous.exam_id = a.exam_id
+                 AND previous.series_title = a.series_title
+                 AND previous.episode_number = a.episode_number - 1
+             )
+           )
+         ORDER BY ${order},
+           COALESCE((
+             SELECT MAX(previous_delivery.delivery_date)
+             FROM deliveries previous_delivery
+             WHERE previous_delivery.user_id = ?
+               AND previous_delivery.article_id = a.id
+           ), '') ASC,
+           COALESCE(a.episode_number, 999), a.year DESC, a.id
+         LIMIT 1`,
+      )
+      .get(
+        examId,
+        ...selected,
+        userId,
+        date,
+        examId,
+        userId,
+        userId,
+      ) as unknown as ArticleRow | undefined;
+  };
+
+  const chooseRecycledExam = () =>
+    db
+      .prepare(
+        `SELECT ${articleSelect}
+         FROM articles a
+         WHERE a.exam_id = ? AND a.content_kind = 'exam'
+           AND NOT EXISTS (
+             SELECT 1 FROM deliveries current_delivery
+             WHERE current_delivery.user_id = ?
+               AND current_delivery.delivery_date = ?
+               AND current_delivery.exam_id = ?
+               AND current_delivery.article_id = a.id
+           )
+         ORDER BY COALESCE((
+             SELECT MAX(previous_delivery.delivery_date)
+             FROM deliveries previous_delivery
+             WHERE previous_delivery.user_id = ?
+               AND previous_delivery.article_id = a.id
+           ), '') ASC,
+           a.year DESC, a.id
+         LIMIT 1`,
+      )
+      .get(examId, userId, date, examId, userId) as unknown as
+      | ArticleRow
+      | undefined;
+
+  const chooseAny = () =>
+    db
+      .prepare(
+        `SELECT ${articleSelect}
+         FROM articles a
+         WHERE a.exam_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM deliveries d
+             WHERE d.user_id = ? AND d.article_id = a.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM interest_deliveries delivered
+             WHERE delivered.user_id = ? AND delivered.article_id = a.id
+           )
+           AND (
+             a.content_kind = 'exam'
+             OR a.series_title IS NULL
+             OR COALESCE(a.episode_number, 1) = 1
+             OR EXISTS (
+               SELECT 1
+               FROM articles previous
+               JOIN article_progress previous_progress
+                 ON previous_progress.article_id = previous.id
+                AND previous_progress.user_id = ?
+                AND previous_progress.completed_at IS NOT NULL
+               WHERE previous.exam_id = a.exam_id
+                 AND previous.series_title = a.series_title
+                 AND previous.episode_number = a.episode_number - 1
+             )
+           )
+         ORDER BY CASE WHEN a.content_kind = 'exam' THEN 0 ELSE 1 END,
+           a.year DESC, a.id
+         LIMIT 1`,
+      )
+      .get(examId, userId, userId, userId) as unknown as ArticleRow | undefined;
 
   db.exec("BEGIN IMMEDIATE");
   try {
-    let rows = delivered.all(userId, date, examId) as unknown as ArticleRow[];
-    const hasInterestArticle = rows.some(
-      (row) => row.contentKind === "interest",
+    let rows = readRows();
+    const updateSlot = db.prepare(
+      `UPDATE deliveries SET slot = ?
+       WHERE user_id = ? AND delivery_date = ? AND exam_id = ? AND article_id = ?`,
     );
-    if (interestGoal > 0 && !hasInterestArticle && rows.length >= goal) {
-      const replaceable = db
-        .prepare(
-          `SELECT d.article_id AS articleId
-           FROM deliveries d
-           JOIN articles a ON a.id = d.article_id
-           LEFT JOIN article_progress p
-             ON p.user_id = d.user_id AND p.article_id = d.article_id
-           LEFT JOIN article_reading_states r
-             ON r.user_id = d.user_id AND r.article_id = d.article_id
-           WHERE d.user_id = ? AND d.delivery_date = ? AND d.exam_id = ?
-             AND a.content_kind = 'exam'
-             AND p.article_id IS NULL
-             AND COALESCE(r.ratio, 0) = 0
-           ORDER BY d.slot DESC LIMIT 1`,
-        )
-        .get(userId, date, examId) as { articleId: string } | undefined;
-      if (replaceable) {
-        db.prepare(
-          `DELETE FROM deliveries
-           WHERE user_id = ? AND delivery_date = ? AND exam_id = ? AND article_id = ?`,
-        ).run(userId, date, examId, replaceable.articleId);
-        rows = delivered.all(userId, date, examId) as unknown as ArticleRow[];
+    const removeDelivery = db.prepare(
+      `DELETE FROM deliveries
+       WHERE user_id = ? AND delivery_date = ? AND exam_id = ? AND article_id = ?`,
+    );
+    const moveToOverflow = (row: DailyDeliveryRow) => {
+      rows = readRows();
+      const occupied = new Set(rows.map((item) => item.deliverySlot));
+      const overflowSlot = [4, 5, 6, 7, 8, 9, 10].find(
+        (slot) => !occupied.has(slot),
+      );
+      if (!overflowSlot) return false;
+      updateSlot.run(overflowSlot, userId, date, examId, row.id);
+      rows = readRows();
+      return true;
+    };
+
+    // A choice made before the mixed-card rollout may still occupy the wrong
+    // slot. Keep the selected article, but place it in the slot matching its
+    // content type so the three visible cards retain their promised roles.
+    const misplacedProtected = rows
+      .filter((row) => row.protectedDelivery && !roleMatches(row))
+      .sort((left, right) => right.selectedDelivery - left.selectedDelivery);
+    for (const original of misplacedProtected) {
+      rows = readRows();
+      const row = rows.find(
+        (item) =>
+          item.id === original.id && item.deliverySlot === original.deliverySlot,
+      );
+      if (!row || roleMatches(row)) continue;
+      if (!row.selectedDelivery) {
+        moveToOverflow(row);
+        continue;
       }
+      const targetSlot = targetSlotFor(row);
+      const occupant = rows.find(
+        (item) => item.deliverySlot === targetSlot && item.id !== row.id,
+      );
+      if (occupant?.protectedDelivery) {
+        if (!moveToOverflow(occupant)) continue;
+      } else if (occupant) {
+        removeDelivery.run(userId, date, examId, occupant.id);
+      }
+      updateSlot.run(targetSlot, userId, date, examId, row.id);
+      rows = readRows();
     }
 
+    rows = readRows();
+    for (const row of rows) {
+      if (
+        (!row.protectedDelivery && row.deliverySlot > goal) ||
+        (!roleMatches(row) && !row.protectedDelivery)
+      ) {
+        removeDelivery.run(userId, date, examId, row.id);
+      }
+    }
     const insert = db.prepare(`
       INSERT INTO deliveries(user_id, article_id, exam_id, delivery_date, slot)
       VALUES (?, ?, ?, ?, ?)
     `);
-    while (rows.length < goal) {
-      const nextSlot =
-        (db
-          .prepare(
-            `SELECT COALESCE(MAX(slot), 0) AS maxSlot FROM deliveries
-             WHERE user_id = ? AND delivery_date = ? AND exam_id = ?`,
-          )
-          .get(userId, date, examId) as { maxSlot: number }).maxSlot + 1;
-      const currentInterestCount = rows.filter(
-        (row) => row.contentKind === "interest",
-      ).length;
-      const needsInterest = currentInterestCount < interestGoal;
-      const interestPlaceholders = selectedInterests.map(() => "?").join(",");
-      const contentConditions = needsInterest
-        ? `a.content_kind = 'interest' AND a.interest_id IN (${interestPlaceholders})`
-        : "a.content_kind = 'exam'";
-      const params: Array<string | number> = [examId];
-      if (needsInterest) params.push(...selectedInterests);
-      params.push(userId, userId, userId);
-      let addition = db
-        .prepare(
-          `SELECT ${articleSelect}
-           FROM articles a
-           WHERE a.exam_id = ? AND ${contentConditions}
-             AND NOT EXISTS (
-               SELECT 1 FROM deliveries d
-               WHERE d.user_id = ? AND d.article_id = a.id
-             )
-             AND NOT EXISTS (
-               SELECT 1 FROM interest_deliveries i
-               WHERE i.user_id = ? AND i.article_id = a.id
-             )
-           ORDER BY
-             CASE WHEN a.content_kind = 'interest' THEN (
-               SELECT COUNT(*) FROM vocabulary v
-               WHERE v.user_id = ?
-                 AND datetime(v.next_review_at) <= CURRENT_TIMESTAMP
-                 AND instr(lower(a.paragraphs_json), lower(v.word)) > 0
-             ) ELSE 0 END DESC,
-             CASE WHEN a.series_title IS NULL THEN 1 ELSE 0 END,
-             COALESCE(a.episode_number, 999), a.year DESC, a.id ASC
-           LIMIT 1`,
-        )
-        .get(...params) as unknown as ArticleRow | undefined;
-      if (!addition) {
-        addition = db
-          .prepare(
-            `SELECT ${articleSelect}
-             FROM articles a
-             WHERE a.exam_id = ?
-               AND NOT EXISTS (
-                 SELECT 1 FROM deliveries d
-                 WHERE d.user_id = ? AND d.article_id = a.id
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM interest_deliveries i
-                 WHERE i.user_id = ? AND i.article_id = a.id
-               )
-             ORDER BY a.content_kind ASC, a.year DESC, a.id ASC LIMIT 1`,
-          )
-          .get(examId, userId, userId) as unknown as ArticleRow | undefined;
-      }
+    rows = readRows();
+    for (let slot = 1; slot <= goal; slot++) {
+      if (rows.some((row) => row.deliverySlot === slot)) continue;
+      const addition =
+        (slot === 1
+          ? chooseInterest("story") ?? chooseRecycledInterest("story")
+          : slot === 2
+            ? chooseExam() ?? chooseRecycledExam()
+            : chooseInterest("explore") ?? chooseRecycledInterest("explore")) ??
+        chooseAny();
       if (!addition) break;
-      insert.run(userId, addition.id, examId, date, nextSlot);
-      rows = delivered.all(userId, date, examId) as unknown as ArticleRow[];
+      insert.run(userId, addition.id, examId, date, slot);
+      rows = readRows();
     }
     db.exec("COMMIT");
-    return rows.slice(0, goal);
+    return rows
+      .sort((left, right) => left.deliverySlot - right.deliverySlot)
+      .slice(0, goal);
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
@@ -371,7 +629,17 @@ export function createApp(
   });
 
   app.get("/api/v1/interests", (_req, res) => {
-    res.json({ data: interestCategories });
+    const rows = db
+      .prepare(
+        `SELECT id, name, subtitle, emoji, color,
+          activity_prompt AS activityPrompt, story_prompt AS storyPrompt,
+          CASE WHEN built_in = 1 THEN 1 ELSE 0 END AS builtIn
+         FROM interest_categories
+         WHERE active = 1
+         ORDER BY sort_order, created_at, id`,
+      )
+      .all();
+    res.json({ data: rows });
   });
 
   const pronunciationParams = z.object({
@@ -641,7 +909,7 @@ export function createApp(
       z.object({
         learning: learningSettingsSchema.optional(),
         reader: readerSettingsSchema.optional(),
-        interests: z.array(z.enum(interestIds)).min(1).max(5).optional(),
+        interests: z.array(interestIdSchema).min(1).max(30).optional(),
       }),
       req.body,
     );
@@ -650,6 +918,18 @@ export function createApp(
     const learning = body.learning ?? current.learning;
     const reader = body.reader ?? current.reader;
     const interests = body.interests ?? current.interests;
+    if (body.interests?.length) {
+      const placeholders = body.interests.map(() => "?").join(",");
+      const available = db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM interest_categories
+           WHERE active = 1 AND id IN (${placeholders})`,
+        )
+        .get(...body.interests) as { count: number };
+      if (available.count !== new Set(body.interests).size) {
+        throw new ApiError(400, "INVALID_INTERESTS", "包含不存在或已停用的兴趣分类");
+      }
+    }
     db.prepare(
       `INSERT INTO user_preferences(
          user_id, learning_json, reader_json, interests_json
@@ -815,7 +1095,7 @@ export function createApp(
   authenticated.get("/interest-feed", (req, res) => {
     const query = parse(
       z.object({
-        interestId: z.enum(interestIds).optional(),
+        interestId: interestIdSchema.optional(),
         limit: z.coerce.number().int().min(1).max(50).default(20),
       }),
       req.query,
@@ -849,6 +1129,17 @@ export function createApp(
                SELECT 1 FROM deliveries d
                WHERE d.user_id = ? AND d.article_id = a.id
              )
+             AND (
+               a.series_title IS NULL OR COALESCE(a.episode_number, 1) = 1 OR EXISTS (
+                 SELECT 1
+                 FROM articles previous
+                 JOIN article_progress progress
+                   ON progress.article_id = previous.id AND progress.user_id = ?
+                 WHERE previous.exam_id = a.exam_id
+                   AND previous.series_title = a.series_title
+                   AND previous.episode_number = a.episode_number - 1
+               )
+             )
          )
          SELECT * FROM ranked_articles
          ORDER BY categoryRank, interestId, title
@@ -857,6 +1148,7 @@ export function createApp(
       .all(
         user.examId,
         ...selected,
+        user.id,
         user.id,
         user.id,
         query.limit,
@@ -924,15 +1216,56 @@ export function createApp(
       goal,
       interests,
     );
+    const selection = db
+      .prepare(
+        `SELECT article_id AS articleId FROM daily_choices
+         WHERE user_id = ? AND delivery_date = ? AND exam_id = ?`,
+      )
+      .get(user.id, date, user.examId) as { articleId: string } | undefined;
 
     res.json({
       data: {
         date,
         examId: user.examId,
         articles: rows.map(serializeArticleSummary),
-        corpusExhausted: rows.length < goal,
+        selectedArticleId: selection?.articleId ?? null,
+        corpusExhausted: rows.length < 3,
       },
     });
+  });
+
+  authenticated.post("/daily/select", (req, res) => {
+    const body = parse(
+      z.object({
+        articleId: z.string().min(1).max(160),
+        date: z.string().regex(datePattern).optional(),
+      }),
+      req.body,
+    );
+    const user = currentUser(res);
+    const date =
+      body.date ??
+      localDateParts(
+        new Date(),
+        config.dailyPushTimeZone ?? "Asia/Shanghai",
+      ).date;
+    const delivered = db
+      .prepare(
+        `SELECT 1 FROM deliveries
+         WHERE user_id = ? AND delivery_date = ? AND exam_id = ? AND article_id = ?`,
+      )
+      .get(user.id, date, user.examId, body.articleId);
+    if (!delivered) {
+      throw new ApiError(400, "INVALID_DAILY_CHOICE", "只能选择今天的三篇候选文章");
+    }
+    db.prepare(
+      `INSERT INTO daily_choices(user_id, delivery_date, exam_id, article_id)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, delivery_date, exam_id) DO UPDATE SET
+         article_id = excluded.article_id,
+         selected_at = CURRENT_TIMESTAMP`,
+    ).run(user.id, date, user.examId, body.articleId);
+    res.json({ data: { date, articleId: body.articleId } });
   });
 
   authenticated.get("/pushes", (_req, res) => {
@@ -1280,8 +1613,24 @@ export function createApp(
          updated_at = CURRENT_TIMESTAMP`,
     ).run(user.id, row.id, JSON.stringify(body.answers));
 
+    const nextEpisode = unlockNextSeriesEpisode(
+      db,
+      user.id,
+      row,
+      localDateParts(
+        new Date(),
+        config.dailyPushTimeZone ?? "Asia/Shanghai",
+      ).date,
+    );
+
     res.json({
-      data: { articleId: row.id, score, total: questions.length, results },
+      data: {
+        articleId: row.id,
+        score,
+        total: questions.length,
+        results,
+        nextEpisode: nextEpisode ? serializeArticleSummary(nextEpisode) : null,
+      },
     });
   });
 

@@ -1,11 +1,21 @@
 export type ExamId = "toefl" | "ielts" | "toeic" | "middle" | "high";
 
-export type InterestId =
-  | "military"
-  | "art"
-  | "science"
-  | "why"
-  | "fantasy";
+export const interestIds = [
+  "military",
+  "art",
+  "science",
+  "why",
+  "fantasy",
+  "mecha",
+  "cultivation",
+  "tiger",
+  "cat",
+] as const;
+
+export type BuiltInInterestId = (typeof interestIds)[number];
+// Interest categories are data-driven. Built-in IDs remain exported for
+// offline content, while server-created categories use the same slug format.
+export type InterestId = string;
 
 export type InterestCategory = {
   id: InterestId;
@@ -14,6 +24,8 @@ export type InterestCategory = {
   emoji: string;
   color: string;
   activityPrompt: string;
+  storyPrompt?: string;
+  builtIn?: boolean;
 };
 
 export type Exam = {

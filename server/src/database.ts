@@ -3,7 +3,10 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { articles, exams } from "../../client/src/data";
-import { interestSourceGuides } from "../../client/src/interest-data";
+import {
+  interestCategories,
+  interestSourceGuides,
+} from "../../client/src/interest-data";
 import { contentFingerprint } from "./content-fingerprint";
 
 // Some bundlers do not yet recognize node:sqlite as a built-in module and
@@ -30,6 +33,21 @@ export function createDatabase(filename: string): AppDatabase {
       subtitle TEXT NOT NULL,
       level TEXT NOT NULL,
       color TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS interest_categories (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      subtitle TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      color TEXT NOT NULL,
+      activity_prompt TEXT NOT NULL,
+      story_prompt TEXT NOT NULL DEFAULT '',
+      built_in INTEGER NOT NULL DEFAULT 0 CHECK(built_in IN (0, 1)),
+      active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+      sort_order INTEGER NOT NULL DEFAULT 1000,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS articles (
@@ -70,8 +88,7 @@ export function createDatabase(filename: string): AppDatabase {
       delivery_date TEXT NOT NULL,
       slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 10),
       delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(user_id, delivery_date, exam_id, slot),
-      UNIQUE(user_id, article_id)
+      UNIQUE(user_id, delivery_date, exam_id, slot)
     );
 
     CREATE TABLE IF NOT EXISTS article_progress (
@@ -272,6 +289,15 @@ export function createDatabase(filename: string): AppDatabase {
       PRIMARY KEY(user_id, article_id)
     );
 
+    CREATE TABLE IF NOT EXISTS daily_choices (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      delivery_date TEXT NOT NULL,
+      exam_id TEXT NOT NULL REFERENCES exams(id),
+      article_id TEXT NOT NULL REFERENCES articles(id),
+      selected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_id, delivery_date, exam_id)
+    );
+
     CREATE TABLE IF NOT EXISTS admin_audit_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       action TEXT NOT NULL,
@@ -280,12 +306,14 @@ export function createDatabase(filename: string): AppDatabase {
     );
 
     CREATE INDEX IF NOT EXISTS idx_articles_exam ON articles(exam_id);
+    CREATE INDEX IF NOT EXISTS idx_interest_categories_active ON interest_categories(active, created_at);
     CREATE INDEX IF NOT EXISTS idx_deliveries_user_date ON deliveries(user_id, delivery_date);
     CREATE INDEX IF NOT EXISTS idx_vocabulary_user_exam ON vocabulary(user_id, exam_id, saved_at DESC);
     CREATE INDEX IF NOT EXISTS idx_pronunciation_updated ON pronunciation_cache(updated_at);
     CREATE INDEX IF NOT EXISTS idx_user_push_user ON user_push_items(user_id, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_daily_auto_push_date ON daily_auto_pushes(delivery_date);
     CREATE INDEX IF NOT EXISTS idx_interest_deliveries_user_date ON interest_deliveries(user_id, delivery_date DESC);
+    CREATE INDEX IF NOT EXISTS idx_daily_choices_user_date ON daily_choices(user_id, delivery_date DESC);
     CREATE INDEX IF NOT EXISTS idx_article_sources_content_hash ON article_sources(content_hash);
     CREATE INDEX IF NOT EXISTS idx_translation_segments_language ON translation_segments(target_language, translated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_article_translations_language ON article_translations(target_language, translated_at DESC);
@@ -360,6 +388,10 @@ export function createDatabase(filename: string): AppDatabase {
     "quality_issues_json TEXT NOT NULL DEFAULT '[]'",
   );
   ensureColumn("user_preferences", "interests_json", "interests_json TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn("interest_categories", "story_prompt", "story_prompt TEXT NOT NULL DEFAULT ''");
+  ensureColumn("interest_categories", "built_in", "built_in INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("interest_categories", "active", "active INTEGER NOT NULL DEFAULT 1");
+  ensureColumn("interest_categories", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 1000");
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_articles_interest
     ON articles(content_kind, interest_id, exam_id);
@@ -379,8 +411,7 @@ export function createDatabase(filename: string): AppDatabase {
         delivery_date TEXT NOT NULL,
         slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 10),
         delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id, delivery_date, exam_id, slot),
-        UNIQUE(user_id, article_id)
+        UNIQUE(user_id, delivery_date, exam_id, slot)
       );
       INSERT INTO deliveries(
         id, user_id, article_id, exam_id, delivery_date, slot, delivered_at
@@ -412,8 +443,7 @@ export function createDatabase(filename: string): AppDatabase {
         delivery_date TEXT NOT NULL,
         slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 10),
         delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id, delivery_date, exam_id, slot),
-        UNIQUE(user_id, article_id)
+        UNIQUE(user_id, delivery_date, exam_id, slot)
       );
       INSERT INTO deliveries(
         id, user_id, article_id, exam_id, delivery_date, slot, delivered_at
@@ -421,6 +451,36 @@ export function createDatabase(filename: string): AppDatabase {
       SELECT id, user_id, article_id, exam_id, delivery_date, slot, delivered_at
       FROM deliveries_goal_legacy;
       DROP TABLE deliveries_goal_legacy;
+    `);
+  }
+  const deliveryRepeatConstraint = db
+    .prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'deliveries'",
+    )
+    .get() as { sql: string } | undefined;
+  if (
+    deliveryRepeatConstraint?.sql.match(
+      /UNIQUE\s*\(\s*user_id\s*,\s*article_id\s*\)/i,
+    )
+  ) {
+    db.exec(`
+      ALTER TABLE deliveries RENAME TO deliveries_repeat_legacy;
+      CREATE TABLE deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        article_id TEXT NOT NULL REFERENCES articles(id),
+        exam_id TEXT NOT NULL REFERENCES exams(id),
+        delivery_date TEXT NOT NULL,
+        slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 10),
+        delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, delivery_date, exam_id, slot)
+      );
+      INSERT INTO deliveries(
+        id, user_id, article_id, exam_id, delivery_date, slot, delivered_at
+      )
+      SELECT id, user_id, article_id, exam_id, delivery_date, slot, delivered_at
+      FROM deliveries_repeat_legacy;
+      DROP TABLE deliveries_repeat_legacy;
     `);
   }
   db.exec(`
@@ -470,11 +530,39 @@ function seedContent(db: AppDatabase) {
       paragraphs_json = excluded.paragraphs_json,
       questions_json = excluded.questions_json
   `);
+  const insertInterest = db.prepare(`
+    INSERT INTO interest_categories(
+      id, name, subtitle, emoji, color, activity_prompt, story_prompt,
+      built_in, sort_order
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      subtitle = excluded.subtitle,
+      emoji = excluded.emoji,
+      color = excluded.color,
+      activity_prompt = excluded.activity_prompt,
+      built_in = 1,
+      sort_order = excluded.sort_order,
+      active = 1,
+      updated_at = CURRENT_TIMESTAMP
+  `);
 
   db.exec("BEGIN IMMEDIATE");
   try {
     for (const exam of exams) {
       insertExam.run(exam.id, exam.name, exam.subtitle, exam.level, exam.color);
+    }
+    for (const [index, category] of interestCategories.entries()) {
+      insertInterest.run(
+        category.id,
+        category.name,
+        category.subtitle,
+        category.emoji,
+        category.color,
+        category.activityPrompt,
+        category.storyPrompt ?? "",
+        index,
+      );
     }
     for (const article of articles) {
       insertArticle.run(
@@ -508,7 +596,13 @@ function seedContent(db: AppDatabase) {
     for (const article of articles.filter((item) => item.contentKind === "interest")) {
       const guide = interestSourceGuides[article.interestId!];
       const hash = contentFingerprint(article);
-      insertSource.run(article.id, guide.name, guide.url, article.id, hash);
+      insertSource.run(
+        article.id,
+        guide?.name ?? "拾词原创兴趣阅读",
+        guide?.url ?? null,
+        article.id,
+        hash,
+      );
     }
     db.exec("COMMIT");
   } catch (error) {

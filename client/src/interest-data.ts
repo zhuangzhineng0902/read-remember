@@ -6,8 +6,41 @@ import type {
   Question,
 } from "./types";
 import { generateInterestCorpus } from "./interest-corpus";
+import { generateOriginalStorySeries } from "./story-series";
 
 export const interestCategories: InterestCategory[] = [
+  {
+    id: "mecha",
+    name: "高达机甲",
+    subtitle: "原创机甲、宇宙任务与战队羁绊",
+    emoji: "🤖",
+    color: "#3559A8",
+    activityPrompt: "机师日志：用一句英文记录本章最关键的团队决定。",
+  },
+  {
+    id: "cultivation",
+    name: "修仙奇遇",
+    subtitle: "御剑、灵兽、秘境与东方谜题",
+    emoji: "⚔️",
+    color: "#5E5AA7",
+    activityPrompt: "仙门手记：找出一个关键线索，并用英文预测下一关。",
+  },
+  {
+    id: "tiger",
+    name: "虎小满",
+    subtitle: "热血小虎与伙伴们的爆笑冒险",
+    emoji: "🐯",
+    color: "#D67832",
+    activityPrompt: "伙伴任务：说说虎小满这次做对了什么，再教他一句英文。",
+  },
+  {
+    id: "cat",
+    name: "猫成成",
+    subtitle: "聪明小猫、机关城与温暖谜案",
+    emoji: "🐱",
+    color: "#A85679",
+    activityPrompt: "侦探笔记：用三个英文关键词写下猫成成发现的线索。",
+  },
   {
     id: "military",
     name: "军事科技",
@@ -54,10 +87,15 @@ export const defaultInterestIds = interestCategories.map(
   (category) => category.id,
 );
 
-export const interestSourceGuides: Record<
+export function replaceInterestCategories(categories: InterestCategory[]) {
+  if (!categories.length) return;
+  interestCategories.splice(0, interestCategories.length, ...categories);
+}
+
+export const interestSourceGuides: Partial<Record<
   InterestId,
   { name: string; url: string | null }
-> = {
+>> = {
   military: {
     name: "原创选题 · National Army Museum / IWM Education",
     url: "https://www.nam.ac.uk/subjects/technology",
@@ -76,6 +114,22 @@ export const interestSourceGuides: Record<
   },
   fantasy: {
     name: "拾词原创连续故事",
+    url: null,
+  },
+  mecha: {
+    name: "拾词原创机甲连续故事",
+    url: null,
+  },
+  cultivation: {
+    name: "拾词原创东方奇幻连续故事",
+    url: null,
+  },
+  tiger: {
+    name: "拾词原创虎小满连续故事",
+    url: null,
+  },
+  cat: {
+    name: "拾词原创猫成成连续故事",
     url: null,
   },
 };
@@ -463,7 +517,7 @@ const passages: InterestPassage[] = [
 const examIds: ExamId[] = ["toefl", "ielts", "toeic", "high", "middle"];
 
 export const interestArticles: Article[] = examIds.flatMap((examId) =>
-  [...passages, ...generateInterestCorpus(examId)].map((passage) => ({
+  [...passages, ...generateInterestCorpus(examId), ...generateOriginalStorySeries(examId)].map((passage) => ({
     id: `${examId}-interest-${passage.slug}`,
     examId,
     year: 2026,
