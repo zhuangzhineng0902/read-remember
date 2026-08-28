@@ -2914,6 +2914,7 @@ function ReaderScreen({
     ArticleTranslation | null | undefined
   >(undefined);
   const [translationLoading, setTranslationLoading] = useState(false);
+  const [translationGenerating, setTranslationGenerating] = useState(false);
   const [translationError, setTranslationError] = useState<string | null>(null);
   const isSaved = (word: string) =>
     savedWords.some(
@@ -3788,7 +3789,10 @@ function ReaderScreen({
   };
 
   const loadArticleTranslation = async (force = false) => {
-    if (!force && (translationLoading || articleTranslation !== undefined)) {
+    if (
+      !force &&
+      (translationLoading || translationGenerating || articleTranslation !== undefined)
+    ) {
       return;
     }
     const requestId = ++translationRequestRef.current;
@@ -3813,10 +3817,35 @@ function ReaderScreen({
     }
   };
 
+  const generateArticleTranslation = async () => {
+    if (translationLoading || translationGenerating) return;
+    const requestId = ++translationRequestRef.current;
+    setTranslationGenerating(true);
+    setTranslationError(null);
+    try {
+      const translation = await api.ensureArticleTranslation(article.id);
+      if (requestId === translationRequestRef.current) {
+        setArticleTranslation(translation);
+      }
+    } catch (error) {
+      if (requestId === translationRequestRef.current) {
+        setArticleTranslation(null);
+        setTranslationError(
+          error instanceof Error ? error.message : "译文生成失败，请稍后重试",
+        );
+      }
+    } finally {
+      if (requestId === translationRequestRef.current) {
+        setTranslationGenerating(false);
+      }
+    }
+  };
+
   useEffect(() => {
     translationRequestRef.current += 1;
     setArticleTranslation(undefined);
     setTranslationLoading(false);
+    setTranslationGenerating(false);
     setTranslationError(null);
     setReaderTab((current) =>
       current === "translation" ? "article" : current,
@@ -4501,14 +4530,20 @@ function ReaderScreen({
               </View>
             ) : readerTab === "translation" ? (
               <View style={styles.articleTranslationView}>
-                {translationLoading || articleTranslation === undefined ? (
+                {translationLoading ||
+                translationGenerating ||
+                articleTranslation === undefined ? (
                   <View style={styles.translationStateCard}>
                     <ActivityIndicator size="small" color={colors.primary} />
                     <Text style={styles.translationStateTitle}>
-                      正在读取整篇译文
+                      {translationGenerating
+                        ? "正在生成整篇中文译文"
+                        : "正在读取整篇译文"}
                     </Text>
                     <Text style={styles.translationStateText}>
-                      正在从文章翻译数据库加载中文内容…
+                      {translationGenerating
+                        ? "正在调用翻译模型并进行整篇上下文审校，完成后会自动缓存到数据库…"
+                        : "正在从文章翻译数据库加载中文内容…"}
                     </Text>
                   </View>
                 ) : translationError ? (
@@ -4522,11 +4557,17 @@ function ReaderScreen({
                     </Text>
                     <Pressable
                       accessibilityRole="button"
-                      onPress={() => void loadArticleTranslation(true)}
+                      onPress={() =>
+                        void (articleTranslation === null
+                          ? generateArticleTranslation()
+                          : loadArticleTranslation(true))
+                      }
                       style={styles.translationRetryButton}
                     >
                       <RotateCcw size={15} color="#fff" />
-                      <Text style={styles.translationRetryText}>重新加载</Text>
+                      <Text style={styles.translationRetryText}>
+                        {articleTranslation === null ? "重新生成" : "重新加载"}
+                      </Text>
                     </Pressable>
                   </View>
                 ) : articleTranslation === null ? (
@@ -4538,15 +4579,15 @@ function ReaderScreen({
                       这篇文章暂无中文译文
                     </Text>
                     <Text style={styles.translationStateText}>
-                      数据库中还没有这篇文章的完整译文。运行文章翻译脚本后，点击下方按钮即可查看。
+                      数据库中还没有这篇文章的完整译文。点击下方按钮将调用翻译模型，首次生成完成后会自动缓存。
                     </Text>
                     <Pressable
                       accessibilityRole="button"
-                      onPress={() => void loadArticleTranslation(true)}
+                      onPress={() => void generateArticleTranslation()}
                       style={styles.translationRetryButton}
                     >
-                      <RotateCcw size={15} color="#fff" />
-                      <Text style={styles.translationRetryText}>重新检查译文</Text>
+                      <Languages size={15} color="#fff" />
+                      <Text style={styles.translationRetryText}>生成本文章译文</Text>
                     </Pressable>
                   </View>
                 ) : (

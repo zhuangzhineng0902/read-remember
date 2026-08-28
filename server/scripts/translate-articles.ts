@@ -50,6 +50,7 @@ export type TranslationRunOptions = {
   jsonMode: boolean;
   headers: Record<string, string>;
   glossary: Record<string, string>;
+  articleId?: string;
   examId?: string;
   contentKind?: ContentKind;
   limit?: number;
@@ -123,7 +124,7 @@ export type TranslationRunResult = {
 
 const defaultConfig: Omit<
   TranslationRunOptions,
-  "databasePath" | "examId" | "contentKind" | "limit" | "log"
+  "databasePath" | "articleId" | "examId" | "contentKind" | "limit" | "log"
 > = {
   baseUrl: "",
   apiPath: "/chat/completions",
@@ -161,6 +162,7 @@ const helpText = `
   --target <language>      默认 zh-CN
   --batch-size <n>         保留用于兼容旧配置；新版固定按整篇文章请求
   --concurrency <n>        并发请求数，默认 2
+  --article <id>           仅翻译指定文章（供页面按需生成使用）
   --exam <id>              仅处理 toefl/ielts/toeic/middle/high
   --kind <exam|interest>   仅处理考试文章或兴趣文章
   --limit <n>              最多处理多少篇文章
@@ -671,6 +673,10 @@ async function translateArticle(
 function selectedArticles(db: DatabaseSyncType, options: TranslationRunOptions) {
   const conditions: string[] = [];
   const params: Array<string | number> = [];
+  if (options.articleId) {
+    conditions.push("id = ?");
+    params.push(options.articleId);
+  }
   if (options.examId) {
     conditions.push("exam_id = ?");
     params.push(options.examId);
@@ -1201,6 +1207,7 @@ export function translationOptionsFromCli(argv: string[]): TranslationRunOptions
       ),
     headers: { ...configHeaders, ...environmentHeaders },
     glossary: { ...(fileConfig.glossary ?? {}), ...environmentGlossary },
+    articleId: values.get("article") ?? process.env.TRANSLATION_ARTICLE_ID,
     examId: values.get("exam") ?? process.env.TRANSLATION_EXAM_ID,
     contentKind,
     limit: values.has("limit")
@@ -1213,6 +1220,7 @@ export function translationOptionsFromCli(argv: string[]): TranslationRunOptions
 
 const isMain =
   process.argv[1] &&
+  /translate-articles\.(?:ts|js|mjs)$/i.test(process.argv[1]) &&
   path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
 if (isMain) {

@@ -26,6 +26,7 @@ server/data/*.db
 server/data/*.zip
 server/data/article-audio/
 server/config/translation.json
+server/config/story-generation.json
 
 # Logs and coverage
 *.log

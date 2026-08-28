@@ -14,6 +14,41 @@ const { DatabaseSync } = createRequire(import.meta.url)(
 
 const db = createDatabase(":memory:");
 let phraseTranslationCalls = 0;
+let articleTranslationCalls = 0;
+const cachedArticleTranslation = (articleId: string, targetLanguage = "zh-CN") => {
+  const row = db
+    .prepare(
+      `SELECT article_id AS articleId, target_language AS targetLanguage,
+        translated_title AS title,
+        translated_paragraphs_json AS paragraphsJson,
+        provider, model, translated_at AS translatedAt
+       FROM article_translations
+       WHERE article_id = ? AND target_language = ?`,
+    )
+    .get(articleId, targetLanguage) as
+    | {
+        articleId: string;
+        targetLanguage: string;
+        title: string;
+        paragraphsJson: string;
+        provider: string;
+        model: string;
+        translatedAt: string;
+      }
+    | undefined;
+  return row
+    ? {
+        articleId: row.articleId,
+        targetLanguage: row.targetLanguage,
+        title: row.title,
+        paragraphs: JSON.parse(row.paragraphsJson) as string[],
+        provider: row.provider,
+        model: row.model,
+        translatedAt: row.translatedAt,
+        cached: true,
+      }
+    : null;
+};
 const server = createServer(
   createApp(
     db,
@@ -33,6 +68,33 @@ const server = createServer(
           text,
           translation: context.includes("clock") ? "墙上的大钟" : "测试短语",
           targetLanguage,
+          cached: false,
+        };
+      },
+    },
+    {
+      enabled: true,
+      metadata: cachedArticleTranslation,
+      async ensure(articleId, targetLanguage = "zh-CN") {
+        const cached = cachedArticleTranslation(articleId, targetLanguage);
+        if (cached) return cached;
+        articleTranslationCalls += 1;
+        db.prepare(
+          `INSERT INTO article_translations(
+            article_id, target_language, source_hash, translated_title,
+            translated_paragraphs_json, provider, model
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          articleId,
+          targetLanguage,
+          "test-source-hash",
+          "测试中文标题",
+          JSON.stringify(["第一段中文译文。", "第二段中文译文。"]),
+          "http://translation.test/v1",
+          "test-translator",
+        );
+        return {
+          ...cachedArticleTranslation(articleId, targetLanguage)!,
           cached: false,
         };
       },
@@ -527,20 +589,15 @@ test("translated article content is returned when materialized", async () => {
   assert.equal(missing.status, 200);
   assert.equal((await missing.json()).data, null);
 
-  db.prepare(
-    `INSERT INTO article_translations(
-      article_id, target_language, source_hash, translated_title,
-      translated_paragraphs_json, provider, model
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    firstArticleId,
-    "zh-CN",
-    "test-source-hash",
-    "测试中文标题",
-    JSON.stringify(["第一段中文译文。", "第二段中文译文。"]),
-    "http://translation.test/v1",
-    "test-translator",
+  const generated = await request(
+    `/api/v1/articles/${firstArticleId}/translation`,
+    {
+      method: "POST",
+      body: JSON.stringify({ language: "zh-CN" }),
+    },
   );
+  assert.equal(generated.status, 201);
+  assert.equal(articleTranslationCalls, 1);
 
   const response = await request(
     `/api/v1/articles/${firstArticleId}/translation`,
@@ -555,6 +612,16 @@ test("translated article content is returned when materialized", async () => {
     "第二段中文译文。",
   ]);
   assert.equal(translation.model, "test-translator");
+
+  const cached = await request(
+    `/api/v1/articles/${firstArticleId}/translation`,
+    {
+      method: "POST",
+      body: JSON.stringify({ language: "zh-CN" }),
+    },
+  );
+  assert.equal(cached.status, 200);
+  assert.equal(articleTranslationCalls, 1);
 });
 
 test("daily reading remains a three-card choice when legacy goal settings change", async () => {

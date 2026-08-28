@@ -39,6 +39,7 @@ import type { EcdictDictionary } from "./ecdict";
 import { scheduleMemoryReview } from "../../client/src/memory";
 import type { ArticleAudioService } from "./article-audio";
 import type { PhraseTranslationProvider } from "./phrase-translation";
+import type { ArticleTranslationProvider } from "./article-translation";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -594,6 +595,7 @@ export function createApp(
   dictionary: EcdictDictionary | null = null,
   articleAudio: ArticleAudioService | null = null,
   phraseTranslation: PhraseTranslationProvider | null = null,
+  articleTranslation: ArticleTranslationProvider | null = null,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -1355,6 +1357,12 @@ export function createApp(
     res.json({ data: serializeArticle(row) });
   });
 
+  const articleTranslationLanguage = z
+    .string()
+    .trim()
+    .regex(/^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$/)
+    .default("zh-CN");
+
   authenticated.get("/articles/:id/translation", (req, res) => {
     const user = currentUser(res);
     if (!hasArticleAccess(db, user.id, req.params.id)) {
@@ -1362,14 +1370,16 @@ export function createApp(
     }
     const query = parse(
       z.object({
-        language: z
-          .string()
-          .trim()
-          .regex(/^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$/)
-          .default("zh-CN"),
+        language: articleTranslationLanguage,
       }),
       req.query,
     );
+    if (articleTranslation) {
+      res.json({
+        data: articleTranslation.metadata(req.params.id, query.language),
+      });
+      return;
+    }
     const row = db
       .prepare(
         `SELECT article_id AS articleId, target_language AS targetLanguage,
@@ -1381,6 +1391,37 @@ export function createApp(
       )
       .get(req.params.id, query.language) as ArticleTranslationRow | undefined;
     res.json({ data: row ? serializeArticleTranslation(row) : null });
+  });
+
+  authenticated.post("/articles/:id/translation", async (req, res, next) => {
+    try {
+      const user = currentUser(res);
+      if (!hasArticleAccess(db, user.id, req.params.id)) {
+        throw new ApiError(
+          403,
+          "ARTICLE_NOT_DELIVERED",
+          "该文章尚未推送给当前用户",
+        );
+      }
+      if (!articleTranslation) {
+        throw new ApiError(
+          503,
+          "ARTICLE_TRANSLATION_NOT_CONFIGURED",
+          "整篇文章翻译服务尚未配置",
+        );
+      }
+      const body = parse(
+        z.object({ language: articleTranslationLanguage }),
+        req.body ?? {},
+      );
+      const value = await articleTranslation.ensure(
+        req.params.id,
+        body.language,
+      );
+      res.status(value.cached ? 200 : 201).json({ data: value });
+    } catch (error) {
+      next(error);
+    }
   });
 
   const articleAudioVoiceQuery = z.object({

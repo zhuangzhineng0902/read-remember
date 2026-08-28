@@ -462,6 +462,15 @@ export const api = {
       `/articles/${encodeURIComponent(id)}/translation?${new URLSearchParams({ language }).toString()}`,
     ),
 
+  ensureArticleTranslation: (id: string, language = "zh-CN") =>
+    request<ArticleTranslation>(
+      `/articles/${encodeURIComponent(id)}/translation`,
+      {
+        method: "POST",
+        body: JSON.stringify({ language }),
+      },
+    ),
+
   translatePhrase: (text: string, context: string, articleId: string) =>
     request<PhraseTranslation>("/phrases/translate", {
       method: "POST",

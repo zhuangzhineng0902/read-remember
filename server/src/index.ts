@@ -12,6 +12,8 @@ import {
   loadPhraseTranslationConfig,
   PhraseTranslationService,
 } from "./phrase-translation";
+import { ArticleTranslationService } from "./article-translation";
+import { translationOptionsFromCli } from "../scripts/translate-articles";
 
 const localEnvFile = path.resolve(process.cwd(), ".env");
 if (existsSync(localEnvFile)) loadEnvFile(localEnvFile);
@@ -35,12 +37,27 @@ const phraseTranslation = new PhraseTranslationService(
   db,
   loadPhraseTranslationConfig(),
 );
+const articleTranslationConfigPath =
+  process.env.ARTICLE_TRANSLATION_CONFIG_PATH ??
+  process.env.PHRASE_TRANSLATION_CONFIG_PATH ??
+  path.resolve(process.cwd(), "config/translation.json");
+const articleTranslation = new ArticleTranslationService(
+  db,
+  translationOptionsFromCli([
+    ...(existsSync(articleTranslationConfigPath)
+      ? ["--config", articleTranslationConfigPath]
+      : []),
+    "--database",
+    config.databasePath,
+  ]),
+);
 const app = createApp(
   db,
   config,
   dictionary,
   articleAudio,
   phraseTranslation,
+  articleTranslation,
 );
 const server = createServer(app);
 const dailyPushScheduler = startDailyPushScheduler(db, {
@@ -68,6 +85,11 @@ server.listen(config.port, config.host, () => {
     phraseTranslation.enabled
       ? "Phrase translation: ready"
       : "Phrase translation unavailable: configure translation.json",
+  );
+  console.log(
+    articleTranslation.enabled
+      ? "Article translation: ready"
+      : "Article translation unavailable: configure translation.json",
   );
 });
 
