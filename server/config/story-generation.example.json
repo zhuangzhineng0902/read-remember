@@ -1,5 +1,6 @@
 {
   "databasePath": "data/read-remember.sqlite",
+  "ecdictPath": "data/ecdict.sqlite",
   "baseUrl": "http://127.0.0.1:11434/v1",
   "apiPath": "/chat/completions",
   "apiKey": "",
@@ -19,6 +20,8 @@
   "sourceNotes": "",
   "readerStage": "stage1",
   "episodes": 6,
+  "planCandidates": 3,
+  "minLexicalCoverage": 0.95,
   "temperature": 0.82,
   "reviewTemperature": 0.25,
   "timeoutMs": 180000,

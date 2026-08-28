@@ -216,7 +216,7 @@ http://192.168.1.14:4000/api/v1
 npm run generate:story-series -- --config config/story-generation.json
 ```
 
-全部九个内置栏目都能生成连续故事：`military`、`art`、`science`、`why`、`fantasy`、`mecha`、`cultivation`、`tiger` 和 `cat`。生成过程先规划整季主谜题与角色成长，再逐集生成，并使用编辑模型进行第二遍重写审校；只有篇幅、句长、目标词数量、团队协作和题目结构达到质量线的章节才会写入数据库。
+全部九个内置栏目都能生成连续故事：`military`、`art`、`science`、`why`、`fantasy`、`mecha`、`cultivation`、`tiger` 和 `cat`。默认并行生成 3 套候选季纲，再由总编模型融合选优。最终策划包含故事圣经、角色成长、固定称呼、场景因果链和线索账本；每集生成后由剧情、儿童吸引力、分级语言和连续性四个审稿视角提出定向修改。脚本还会读取同栏目已有的选择、完成、阅读进度、答题、生词与下一集续读等聚合反馈，用于调整新一季的钩子、节奏和难度。只有篇幅、句长、真实词频覆盖率、目标词、团队协作和题目结构达到质量线的章节才会写入数据库。
 
 也可以使用自定义小写 slug 新增兴趣。首次成功生成时，脚本会把栏目资料写入 `interest_categories`，客户端重新加载后会自动显示：
 
@@ -239,7 +239,7 @@ npm run generate:story-series -- \
 - `classic`：基于内置公版名著独立简化重述，可选《爱丽丝梦游仙境》《金银岛》《秘密花园》《八十天环游地球》《西游记》《伊索寓言》、早期福尔摩斯故事、《小公主》《绿野仙踪》和《汤姆·索亚历险记》。
 - `favorite`：根据孩子喜欢的作品或题材提取“吸引力配方”，但重新创作人物、世界和情节。
 
-词汇分级借鉴成熟分级读物的控制方法，可用 `--reader-stage` 选择 `starter`（约 250 核心词）到 `stage6`（约 2500 核心词）；`auto` 会按考试阶段自动匹配。脚本不会复制 Oxford Bookworms 或其他商业简写本的文本。
+词汇分级借鉴成熟分级读物的控制方法，可用 `--reader-stage` 选择 `starter`（约 250 核心词）到 `stage6`（约 2500 核心词）；`auto` 会按考试阶段自动匹配。脚本通过 ECDICT 的 BNC/现代词频排名实测正文覆盖率，默认要求至少 95%；未达标时自动执行一次定向简化，仍未达标则停止导入。可用 `--ecdict` 指定词典，用 `--min-coverage` 调整门槛。脚本不会复制 Oxford Bookworms 或其他商业简写本的文本。
 
 例如，把《金银岛》简化成适合初中生的连续冒险：
 
@@ -259,7 +259,7 @@ npm run generate:story-series -- --source-mode favorite --source-title "魔法�
 npm run generate:story-series -- --interest tiger --exam middle --episodes 6 --dry-run
 ```
 
-常用参数还包括 `--model`、`--review-model`、`--base-url`、`--api-key`、`--database` 和 `--force`。详细说明可运行 `npm run generate:story-series -- --help`。
+常用参数还包括 `--model`、`--review-model`、`--base-url`、`--api-key`、`--database`、`--plan-candidates` 和 `--force`。详细说明可运行 `npm run generate:story-series -- --help`。
 
 ## 认证
 

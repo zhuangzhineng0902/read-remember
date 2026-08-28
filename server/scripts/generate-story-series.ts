@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ExamId, InterestId, Question } from "../../client/src/types";
 import { createDatabase } from "../src/database";
 import { importArticles } from "../src/content-import";
+import { openEcdict } from "../src/ecdict";
 
 const storyInterestIds = [
   "military",
@@ -200,6 +201,47 @@ function storyGuideFor(
   };
 }
 
+const storyBibleSchema = z.object({
+  worldRules: z.array(z.string().trim().min(8).max(300)).min(3).max(8),
+  fixedTerms: z.array(z.object({
+    concept: z.string().trim().min(2).max(100),
+    english: z.string().trim().min(1).max(100),
+  })).min(3).max(16),
+  characterArcs: z.array(z.object({
+    name: z.string().trim().min(1).max(50),
+    wants: z.string().trim().min(4).max(200),
+    fear: z.string().trim().min(4).max(200),
+    voice: z.string().trim().min(4).max(200),
+    growth: z.string().trim().min(8).max(300),
+  })).min(3).max(8),
+});
+
+const episodeBeatSchema = z.object({
+  number: z.number().int().min(1).max(100),
+  title: z.string().trim().min(3).max(160),
+  openingHook: z.string().trim().min(10).max(500),
+  goal: z.string().trim().min(8).max(400),
+  obstacle: z.string().trim().min(8).max(400),
+  choice: z.string().trim().min(8).max(400),
+  consequence: z.string().trim().min(8).max(400),
+  newQuestion: z.string().trim().min(8).max(400),
+  problem: z.string().trim().min(10).max(500),
+  clue: z.string().trim().min(5).max(500),
+  teamworkTurn: z.string().trim().min(10).max(500),
+  emotionalBeat: z.string().trim().min(10).max(500),
+  cliffhanger: z.string().trim().min(10).max(500),
+});
+
+const clueLedgerEntrySchema = z.object({
+  id: z.string().trim().regex(/^C\d+$/),
+  clue: z.string().trim().min(5).max(400),
+  introducedIn: z.number().int().min(1).max(100),
+  misdirection: z.string().trim().min(5).max(400),
+  usedIn: z.number().int().min(1).max(100),
+  payoffIn: z.number().int().min(1).max(100),
+  payoff: z.string().trim().min(8).max(500),
+});
+
 const planSchema = z.object({
   seriesTitle: z.string().trim().min(3).max(120),
   premise: z.string().trim().min(30).max(1000),
@@ -212,18 +254,9 @@ const planSchema = z.object({
     }),
   ).min(3).max(8),
   seasonMystery: z.string().trim().min(20).max(1000),
-  episodes: z.array(
-    z.object({
-      number: z.number().int().min(1).max(100),
-      title: z.string().trim().min(3).max(160),
-      openingHook: z.string().trim().min(10).max(500),
-      problem: z.string().trim().min(10).max(500),
-      clue: z.string().trim().min(5).max(500),
-      teamworkTurn: z.string().trim().min(10).max(500),
-      emotionalBeat: z.string().trim().min(10).max(500),
-      cliffhanger: z.string().trim().min(10).max(500),
-    }),
-  ).min(2).max(30),
+  storyBible: storyBibleSchema,
+  clueLedger: z.array(clueLedgerEntrySchema).min(2).max(30),
+  episodes: z.array(episodeBeatSchema).min(2).max(30),
 });
 
 const questionSchema = z.object({
@@ -238,16 +271,32 @@ const episodeSchema = z.object({
   paragraphs: z.array(z.string().trim().min(30).max(3000)).min(3).max(6),
   targetWords: z.array(z.string().trim().regex(/^[a-z][a-z'-]*$/i)).min(4).max(10),
   continuitySummary: z.string().trim().min(20).max(1200),
+  storyState: z.object({
+    characterPositions: z.array(z.string().trim().min(4).max(240)).min(1).max(12),
+    knownFacts: z.array(z.string().trim().min(4).max(240)).min(1).max(16),
+    unresolvedQuestions: z.array(z.string().trim().min(4).max(240)).min(1).max(12),
+    items: z.array(z.string().trim().min(2).max(200)).max(16),
+    relationshipChanges: z.array(z.string().trim().min(4).max(240)).max(12),
+  }),
   questions: z.array(questionSchema).min(2).max(3),
 });
 
-type SeriesPlan = z.infer<typeof planSchema>;
+const storyCritiqueSchema = z.object({
+  plot: z.object({ score: z.number().min(0).max(10), issues: z.array(z.string()).max(8) }),
+  childAppeal: z.object({ score: z.number().min(0).max(10), issues: z.array(z.string()).max(8) }),
+  gradedLanguage: z.object({ score: z.number().min(0).max(10), issues: z.array(z.string()).max(8) }),
+  continuity: z.object({ score: z.number().min(0).max(10), issues: z.array(z.string()).max(8) }),
+  rewritePriorities: z.array(z.string().trim().min(4).max(300)).min(1).max(8),
+});
+
+export type SeriesPlan = z.infer<typeof planSchema>;
 export type GeneratedStoryEpisode = z.infer<typeof episodeSchema>;
 
 type StoryConfigFile = Partial<StoryRunOptions>;
 
 export type StoryRunOptions = {
   databasePath: string;
+  ecdictPath: string;
   baseUrl: string;
   apiPath: string;
   apiKey: string;
@@ -267,6 +316,8 @@ export type StoryRunOptions = {
   sourceNotes: string;
   readerStage: ReaderStageId;
   episodes: number;
+  planCandidates: number;
+  minLexicalCoverage: number;
   temperature: number;
   reviewTemperature: number;
   timeoutMs: number;
@@ -280,8 +331,12 @@ export type StoryQuality = {
   score: number;
   wordCount: number;
   averageSentenceWords: number;
+  lexicalCoverage: number | null;
+  unfamiliarWords: string[];
   issues: string[];
 };
+
+export type LexicalRankLookup = (word: string) => number | null;
 
 const examGuide: Record<
   ExamId,
@@ -309,6 +364,7 @@ export function resolveReaderProfile(options: Pick<StoryRunOptions, "examId" | "
 
 const defaultOptions: Omit<StoryRunOptions, "log"> = {
   databasePath: path.resolve("data/read-remember.sqlite"),
+  ecdictPath: path.resolve("data/ecdict.sqlite"),
   baseUrl: "",
   apiPath: "/chat/completions",
   apiKey: "",
@@ -328,6 +384,8 @@ const defaultOptions: Omit<StoryRunOptions, "log"> = {
   sourceNotes: "",
   readerStage: "auto",
   episodes: 6,
+  planCandidates: 3,
+  minLexicalCoverage: 0.95,
   temperature: 0.82,
   reviewTemperature: 0.25,
   timeoutMs: 180_000,
@@ -358,6 +416,9 @@ const helpText = `
   --reader-stage <auto|starter|stage1|stage2|stage3|stage4|stage5|stage6>
   --episodes <2-30>
   --database <path>
+  --ecdict <path>         ECDICT SQLite，用于实测正文高频词覆盖率
+  --plan-candidates <2-4> 候选季纲数量，默认 3
+  --min-coverage <0.80-1> 最低高频词覆盖率，默认 0.95
   --base-url <url>
   --api-path <path>
   --api-key <key>
@@ -424,6 +485,30 @@ async function callModel(options: StoryRunOptions, system: string, user: string,
   throw lastError;
 }
 
+async function callStructured<T>(
+  options: StoryRunOptions,
+  schema: z.ZodType<T>,
+  system: string,
+  user: string,
+  model = options.model,
+  temperature = options.temperature,
+) {
+  let prompt = user;
+  let lastError: z.ZodError | null = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const value = await callModel(options, system, prompt, model, temperature);
+    const parsed = schema.safeParse(value);
+    if (parsed.success) return parsed.data;
+    lastError = parsed.error;
+    const issues = parsed.error.issues
+      .slice(0, 12)
+      .map((issue) => `${issue.path.join(".") || "root"}: ${issue.message}`)
+      .join("；");
+    prompt = `${user}\n\n你上一次返回的 JSON 结构不合格：${issues}。请保留完整内容，补齐或修正这些字段，只返回一份完整合法 JSON。`;
+  }
+  throw lastError ?? new Error("模型没有返回符合结构的 JSON");
+}
+
 function sourceBrief(
   options: Pick<StoryRunOptions, "sourceMode" | "classicId" | "sourceTitle" | "sourceNotes">,
 ) {
@@ -482,20 +567,35 @@ ${gradedReadingBrief(options)}
 6. 整季有主谜题、角色成长和线索回收；笑点来自人物性格，不靠网络热梗。
 7. 严格遵守上面的选材模式：公版名著可忠实简化原作；其余模式不得使用现有影视、动漫、小说或游戏的受保护表达。
 
-只返回 JSON：
-{"seriesTitle":"英文系列名","premise":"中文策划说明","cast":[{"name":"英文名","role":"中文角色作用","strength":"优点","flaw":"缺点"}],"seasonMystery":"中文主谜题","episodes":[{"number":1,"title":"英文标题","openingHook":"中文","problem":"中文","clue":"中文","teamworkTurn":"中文","emotionalBeat":"中文","cliffhanger":"中文"}]}`;
+每套策划还必须完成：
+- 故事圣经：3-8 条不可随意改变的世界规则；固定人物、地点和物件的英文称呼；每位主要角色的欲望、恐惧、说话特征和整季成长。
+- 线索账本：每条线索用 C1、C2……编号，明确在哪一集埋下、误导、使用和回收；埋下不得晚于使用，最后一集前回收主线线索。
+- 每集按“目标→阻碍→角色作出艰难选择→产生后果→出现新问题”构成因果链，不能只罗列事件。
+
+只返回一套策划 JSON，不要附加说明：
+{"seriesTitle":"英文系列名","premise":"中文策划说明","cast":[{"name":"英文名","role":"中文角色作用","strength":"优点","flaw":"缺点"}],"seasonMystery":"中文主谜题","storyBible":{"worldRules":["中文"],"fixedTerms":[{"concept":"中文概念","english":"固定英文称呼"}],"characterArcs":[{"name":"英文名","wants":"中文","fear":"中文","voice":"中文","growth":"中文"}]},"clueLedger":[{"id":"C1","clue":"中文","introducedIn":1,"misdirection":"中文","usedIn":2,"payoffIn":3,"payoff":"中文"}],"episodes":[{"number":1,"title":"英文标题","openingHook":"中文","goal":"中文","obstacle":"中文","choice":"中文","consequence":"中文","newQuestion":"中文","problem":"中文","clue":"中文","teamworkTurn":"中文","emotionalBeat":"中文","cliffhanger":"中文"}]}`;
 }
 
-function episodePrompt(options: StoryRunOptions, plan: SeriesPlan, episodeIndex: number, previousSummary: string) {
+function episodePrompt(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  episodeIndex: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+) {
   const level = examGuide[options.examId];
   const readerProfile = resolveReaderProfile(options);
   const beat = plan.episodes[episodeIndex];
   const range = episodeIndex < 2 ? level.firstWords : level.laterWords;
+  const relevantClues = plan.clueLedger.filter(
+    (item) => [item.introducedIn, item.usedIn, item.payoffIn].includes(beat.number),
+  );
   return `根据故事季策划，写第 ${beat.number} 集英文分级阅读文章。
 
 系列策划：${JSON.stringify(plan)}
-上一集连续性摘要：${previousSummary || "这是第一集，从一个立刻发生的异常事件开始。"}
+上一集连续性摘要：${previousEpisode?.continuitySummary || "这是第一集，从一个立刻发生的异常事件开始。"}
+上一集结构化状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集尚无历史状态"}
 本集节拍：${JSON.stringify(beat)}
+本集必须处理的线索账本：${JSON.stringify(relevantClues)}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
 
@@ -508,34 +608,71 @@ ${gradedReadingBrief(options)}
 
 叙事控制：
 - 前两句必须形成钩子。
+- 严格写出本集“目标→阻碍→选择→后果→新问题”的因果链；选择必须有代价，后果必须由角色选择引起。
 - 线索先出现、后使用；合作必须改变结果；结尾必须是公平悬念。
+- 遵守 storyBible 的固定称呼、人物声音和世界规则，不得让角色忘记已知事实或无故获得物件。
 - 文章本身要精彩，不要用“这告诉我们团队合作很重要”之类说教句。
 - 出 2 道四选一题：一道具体线索题，一道推断/人物选择题。错误项必须可信但能由原文排除。
 - explanation 使用中文并指出原文依据。
 
 只返回 JSON：
-{"title":"英文标题","paragraphs":["..."],"targetWords":["..."],"continuitySummary":"中文，供下一集保持连续性","questions":[{"prompt":"...","options":["A text","B text","C text","D text"],"answer":0,"explanation":"中文"}]}`;
+{"title":"英文标题","paragraphs":["..."],"targetWords":["..."],"continuitySummary":"中文，供下一集保持连续性","storyState":{"characterPositions":["中文：人物当前位置及状态"],"knownFacts":["中文：角色已经确认的事实"],"unresolvedQuestions":["中文：尚未解决的问题"],"items":["中文：物件及持有人"],"relationshipChanges":["中文：本集发生的关系变化"]},"questions":[{"prompt":"...","options":["A text","B text","C text","D text"],"answer":0,"explanation":"中文"}]}`;
 }
 
-function reviewPrompt(options: StoryRunOptions, plan: SeriesPlan, episode: GeneratedStoryEpisode, episodeNumber: number) {
+function critiquePrompt(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  episode: GeneratedStoryEpisode,
+  episodeNumber: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+) {
+  return `你是由四位编辑组成的儿童英语故事审稿组，只诊断问题，不重写正文。
+
+整季策划：${JSON.stringify(plan)}
+上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}
+第 ${episodeNumber} 集待审稿：${JSON.stringify(episode)}
+${sourceBrief(options)}
+${gradedReadingBrief(options)}
+
+四个视角分别按 0-10 分审查：
+1. plot：目标、阻碍、选择、后果是否构成因果链；线索是否公平；解法是否靠前文准备。
+2. childAppeal：前两句钩子、自然笑点、具体冒险、伙伴互动和结尾悬念是否真能让孩子想读下一集。
+3. gradedLanguage：句子、词汇、指代是否适龄；是否有不必要的难词、抽象解释和同义词漂移。
+4. continuity：是否遵守故事圣经、线索账本和上一集人物/物件/已知事实状态。
+
+只返回 JSON：
+{"plot":{"score":8,"issues":["中文问题"]},"childAppeal":{"score":8,"issues":["中文问题"]},"gradedLanguage":{"score":8,"issues":["中文问题"]},"continuity":{"score":8,"issues":["中文问题"]},"rewritePriorities":["按重要性排序的中文修改动作"]}`;
+}
+
+function reviewPrompt(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  episode: GeneratedStoryEpisode,
+  critique: z.infer<typeof storyCritiqueSchema>,
+  episodeNumber: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+) {
   const level = examGuide[options.examId];
   const range = episodeNumber <= 2 ? level.firstWords : level.laterWords;
   return `你是严格的儿童英语故事编辑。请重写并提升下面这一集，而不是只写评语。
 
 整季设定：${JSON.stringify(plan)}
+上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}
 待审稿：${JSON.stringify(episode)}
+四维审稿意见：${JSON.stringify(critique)}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
 
-检查并修复：开头钩子、人物声音、自然幽默、线索公平、团队合作的因果作用、情绪变化、悬念、连续性、选材边界、选择题唯一正确性。正文保持 ${range[0]}-${range[1]} 词、3-5 段，语言适合${level.audience}，平均句长约不超过 ${level.maxSentenceWords} 词。删除说教、空泛形容、突然出现的解法、不必要难词和为了变化而使用的生僻同义词。
+按 rewritePriorities 逐项定向修复，并检查：开头钩子、人物声音、自然幽默、线索公平、团队合作的因果作用、情绪变化、悬念、连续性、选材边界、选择题唯一正确性。正文保持 ${range[0]}-${range[1]} 词、3-5 段，语言适合${level.audience}，平均句长约不超过 ${level.maxSentenceWords} 词。删除说教、空泛形容、突然出现的解法、不必要难词和为了变化而使用的生僻同义词。必须更新 storyState，准确反映重写后的结局。
 
 返回与原稿完全相同结构的 JSON，不要附加评论。`;
 }
 
 export function assessStoryQuality(
   episode: GeneratedStoryEpisode,
-  options: Pick<StoryRunOptions, "examId" | "readerStage">,
+  options: Pick<StoryRunOptions, "examId" | "readerStage"> & Partial<Pick<StoryRunOptions, "minLexicalCoverage">>,
   episodeNumber: number,
+  lexical?: { lookup: LexicalRankLookup; allowedWords?: string[] },
 ): StoryQuality {
   const level = examGuide[options.examId];
   const readerProfile = resolveReaderProfile(options);
@@ -545,6 +682,8 @@ export function assessStoryQuality(
   const sentences = text.split(/[.!?]+/).map((item) => item.trim()).filter(Boolean);
   const averageSentenceWords = sentences.length ? words.length / sentences.length : words.length;
   const issues: string[] = [];
+  let lexicalCoverage: number | null = null;
+  let unfamiliarWords: string[] = [];
   if (words.length < range[0]) issues.push(`正文过短：${words.length} < ${range[0]}`);
   if (words.length > range[1]) issues.push(`正文过长：${words.length} > ${range[1]}`);
   if (averageSentenceWords > level.maxSentenceWords + 2) issues.push(`平均句长过高：${averageSentenceWords.toFixed(1)}`);
@@ -558,43 +697,199 @@ export function assessStoryQuality(
   );
   if (missingTargetWords.length) issues.push(`目标词未出现在正文：${missingTargetWords.join(", ")}`);
   if (episode.questions.some((question) => question.options.length !== 4 || question.answer > 3)) issues.push("题目选项或答案索引不合法");
+  if (lexical && words.length) {
+    const allowed = new Set((lexical.allowedWords ?? []).map((word) => word.toLowerCase()));
+    const rankCutoff = readerProfile.headwords * 3;
+    const unfamiliarCounts = new Map<string, number>();
+    let familiarCount = 0;
+    for (const word of words) {
+      const normalized = word.toLowerCase().replace(/^'+|'+$/g, "");
+      const rank = lexical.lookup(normalized);
+      if (allowed.has(normalized) || (rank !== null && rank <= rankCutoff)) {
+        familiarCount++;
+      } else {
+        unfamiliarCounts.set(normalized, (unfamiliarCounts.get(normalized) ?? 0) + 1);
+      }
+    }
+    lexicalCoverage = familiarCount / words.length;
+    unfamiliarWords = [...unfamiliarCounts.entries()]
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+      .slice(0, 12)
+      .map(([word]) => word);
+    const minimum = options.minLexicalCoverage ?? 0.95;
+    if (lexicalCoverage < minimum) {
+      issues.push(
+        `高频词覆盖率不足：${(lexicalCoverage * 100).toFixed(1)}% < ${(minimum * 100).toFixed(0)}%；优先简化 ${unfamiliarWords.slice(0, 8).join(", ")}`,
+      );
+    }
+  }
   return {
     score: Math.max(0, 100 - issues.length * 12),
     wordCount: words.length,
     averageSentenceWords: Number(averageSentenceWords.toFixed(1)),
+    lexicalCoverage: lexicalCoverage === null ? null : Number(lexicalCoverage.toFixed(3)),
+    unfamiliarWords,
     issues,
   };
 }
 
-async function generatePlan(options: StoryRunOptions) {
-  const value = await callModel(
-    options,
-    "你只输出合法 JSON。你擅长原创、连续、适龄、可读性高的儿童英语冒险故事策划。",
-    buildSeriesPlanPrompt(options),
-  );
-  const plan = planSchema.parse(value);
-  if (plan.episodes.length !== options.episodes) throw new Error(`故事策划返回 ${plan.episodes.length} 集，预期 ${options.episodes} 集`);
+export function validateSeriesPlan(plan: SeriesPlan, expectedEpisodes: number) {
+  if (plan.episodes.length !== expectedEpisodes) {
+    throw new Error(`故事策划返回 ${plan.episodes.length} 集，预期 ${expectedEpisodes} 集`);
+  }
+  const episodeNumbers = plan.episodes.map((episode) => episode.number);
+  const expectedNumbers = Array.from({ length: expectedEpisodes }, (_, index) => index + 1);
+  if (episodeNumbers.some((number, index) => number !== expectedNumbers[index])) {
+    throw new Error(`故事集数必须从 1 连续编号，实际为 ${episodeNumbers.join(", ")}`);
+  }
+  const clueIds = new Set<string>();
+  for (const clue of plan.clueLedger) {
+    if (clueIds.has(clue.id)) throw new Error(`线索编号重复：${clue.id}`);
+    clueIds.add(clue.id);
+    if (clue.introducedIn > clue.usedIn || clue.usedIn > clue.payoffIn) {
+      throw new Error(`线索 ${clue.id} 的埋设、使用、回收顺序不合法`);
+    }
+    if (clue.payoffIn > expectedEpisodes) {
+      throw new Error(`线索 ${clue.id} 在系列结束后才回收`);
+    }
+  }
   return plan;
 }
 
-async function generateEpisode(options: StoryRunOptions, plan: SeriesPlan, index: number, previousSummary: string) {
-  const draft = episodeSchema.parse(
-    await callModel(
-      options,
-      "你只输出合法 JSON。你是擅长悬念、幽默、伙伴感与分级英语的儿童故事作家。",
-      episodePrompt(options, plan, index, previousSummary),
-    ),
+export function loadStoryEngagementBrief(
+  databasePath: string,
+  interest: string,
+  examId: ExamId,
+) {
+  if (!existsSync(databasePath)) return "暂无历史阅读反馈，按栏目承诺和读者档位创作。";
+  const db = createDatabase(databasePath);
+  try {
+    const row = db.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM daily_choices c JOIN articles a ON a.id = c.article_id
+          WHERE a.interest_id = ? AND a.exam_id = ?) AS selected,
+         (SELECT COUNT(*) FROM article_progress p JOIN articles a ON a.id = p.article_id
+          WHERE a.interest_id = ? AND a.exam_id = ?) AS completed,
+         (SELECT AVG(CASE WHEN p.total > 0 THEN p.score * 1.0 / p.total END)
+          FROM article_progress p JOIN articles a ON a.id = p.article_id
+          WHERE a.interest_id = ? AND a.exam_id = ?) AS quizAccuracy,
+         (SELECT AVG(s.ratio) FROM article_reading_states s JOIN articles a ON a.id = s.article_id
+          WHERE a.interest_id = ? AND a.exam_id = ?) AS readingRatio,
+         (SELECT AVG(s.reading_seconds) FROM article_reading_states s JOIN articles a ON a.id = s.article_id
+          WHERE a.interest_id = ? AND a.exam_id = ?) AS readingSeconds,
+         (SELECT COUNT(*) FROM vocabulary v JOIN articles a ON a.id = v.article_id
+          WHERE a.interest_id = ? AND a.exam_id = ?) AS savedWords,
+         (SELECT AVG(CASE WHEN EXISTS (
+             SELECT 1 FROM articles next
+             JOIN article_progress next_progress ON next_progress.article_id = next.id AND next_progress.user_id = p.user_id
+             WHERE next.series_title = a.series_title AND next.episode_number = a.episode_number + 1
+           ) THEN 1.0 ELSE 0.0 END)
+          FROM article_progress p JOIN articles a ON a.id = p.article_id
+          WHERE a.interest_id = ? AND a.exam_id = ? AND a.series_title IS NOT NULL) AS continuationRate`,
+    ).get(
+      interest, examId, interest, examId, interest, examId, interest, examId,
+      interest, examId, interest, examId, interest, examId,
+    ) as {
+      selected: number;
+      completed: number;
+      quizAccuracy: number | null;
+      readingRatio: number | null;
+      readingSeconds: number | null;
+      savedWords: number;
+      continuationRate: number | null;
+    };
+    if (!row.selected && !row.completed) return "暂无历史阅读反馈，按栏目承诺和读者档位创作。";
+    const percent = (value: number | null) => value === null ? "暂无" : `${(value * 100).toFixed(0)}%`;
+    return `本栏目已有聚合反馈：被选择 ${row.selected} 次，完成 ${row.completed} 次，平均阅读进度 ${percent(row.readingRatio)}，答题正确率 ${percent(row.quizAccuracy)}，下一集续读率 ${percent(row.continuationRate)}，平均阅读 ${Math.round(row.readingSeconds ?? 0)} 秒，收藏生词 ${row.savedWords} 次。策划时保留有效的吸引点；若续读率或阅读进度偏低，强化前两句钩子、中段选择与结尾悬念；若正确率偏低或生词过多，降低信息密度和词汇难度。不要在故事中提及这些统计。`;
+  } finally {
+    db.close();
+  }
+}
+
+async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
+  const basePrompt = `${buildSeriesPlanPrompt(options)}\n\n真实使用反馈（仅供策划）：${engagementBrief}`;
+  options.log(`正在并行生成 ${options.planCandidates} 套候选季纲…`);
+  const candidates = await Promise.all(
+    Array.from({ length: options.planCandidates }, async (_, index) => {
+      const value = await callStructured(
+        options,
+        planSchema,
+        "你只输出合法 JSON。你擅长原创、连续、适龄、可读性高的儿童英语冒险故事策划。",
+        `${basePrompt}\n\n这是候选方案 ${index + 1}/${options.planCandidates}。请避开最先想到的套路，让核心谜题、角色缺点造成的选择和线索回收具有独特性。`,
+      );
+      return validateSeriesPlan(value, options.episodes);
+    }),
   );
-  const reviewed = episodeSchema.parse(
-    await callModel(
-      options,
-      "你只输出合法 JSON。你是严谨的儿童文学编辑，必须直接返回提升后的完整稿件。",
-      reviewPrompt(options, plan, draft, index + 1),
-      options.reviewModel || options.model,
-      options.reviewTemperature,
-    ),
+  const selection = await callStructured(
+    options,
+    planSchema,
+    "你只输出合法 JSON。你是儿童分级连续故事总编，善于比较方案并把最强元素融合成逻辑严密的新季纲。",
+    `${basePrompt}\n\n以下是 ${candidates.length} 套候选季纲：\n${JSON.stringify(candidates)}\n\n比较它们的开篇吸引力、整季因果链、角色成长、线索公平性、笑点潜力和连续追读欲。选择最强主结构，并只在不破坏因果和线索账本的前提下融合其他方案的优点。返回一套完整最终季纲 JSON。`,
+    options.reviewModel || options.model,
+    options.reviewTemperature,
+  );
+  return validateSeriesPlan(selection, options.episodes);
+}
+
+async function generateEpisode(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  index: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+) {
+  const draft = await callStructured(
+    options,
+    episodeSchema,
+    "你只输出合法 JSON。你是擅长悬念、幽默、伙伴感与分级英语的儿童故事作家。",
+    episodePrompt(options, plan, index, previousEpisode),
+  );
+  const critique = await callStructured(
+    options,
+    storyCritiqueSchema,
+    "你只输出合法 JSON。你代表剧情、儿童吸引力、分级语言和连续性四位专业编辑，必须指出可执行的问题。",
+    critiquePrompt(options, plan, draft, index + 1, previousEpisode),
+    options.reviewModel || options.model,
+    options.reviewTemperature,
+  );
+  const reviewed = await callStructured(
+    options,
+    episodeSchema,
+    "你只输出合法 JSON。你是严谨的儿童文学编辑，必须直接返回提升后的完整稿件。",
+    reviewPrompt(options, plan, draft, critique, index + 1, previousEpisode),
+    options.reviewModel || options.model,
+    options.reviewTemperature,
   );
   return reviewed;
+}
+
+async function repairEpisode(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  episode: GeneratedStoryEpisode,
+  episodeNumber: number,
+  quality: StoryQuality,
+) {
+  const level = examGuide[options.examId];
+  const range = episodeNumber <= 2 ? level.firstWords : level.laterWords;
+  return callStructured(
+    options,
+    episodeSchema,
+    "你只输出合法 JSON。你是分级阅读终审编辑，只修复自动质量检测指出的问题，并保持精彩情节和原有结构。",
+    `整季策划：${JSON.stringify(plan)}\n待修稿：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词（优先换成更常见表达，人物专名除外）：${quality.unfamiliarWords.join(", ")}\n\n正文必须保持 ${range[0]}-${range[1]} 词。不要删除关键线索、角色选择的后果或结尾悬念。修改后同步更新 continuitySummary、storyState 和题目。返回与待修稿相同结构的完整 JSON。`,
+    options.reviewModel || options.model,
+    0.1,
+  );
+}
+
+function lexicalAllowedWords(plan: SeriesPlan) {
+  return [
+    ...plan.cast.flatMap((character) => character.name.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? []),
+    ...plan.storyBible.fixedTerms.flatMap((term) => term.english.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? []),
+  ];
+}
+
+function passesQualityGate(quality: StoryQuality, minimumCoverage: number) {
+  return quality.score >= 80 && (quality.lexicalCoverage === null || quality.lexicalCoverage >= minimumCoverage);
 }
 
 function slug(value: string) {
@@ -607,19 +902,38 @@ export async function runStoryGeneration(options: StoryRunOptions) {
     return { generated: 0, imported: 0, seriesTitle: "", qualities: [] as StoryQuality[] };
   }
   if (!options.baseUrl || !options.model) throw new Error("需要配置 baseUrl 和 model");
-  const plan = await generatePlan(options);
+  const engagementBrief = loadStoryEngagementBrief(options.databasePath, options.interest, options.examId);
+  options.log(engagementBrief);
+  const plan = await generatePlan(options, engagementBrief);
   options.log(`系列策划完成：${plan.seriesTitle}`);
   const generated: GeneratedStoryEpisode[] = [];
   const qualities: StoryQuality[] = [];
-  let previousSummary = "";
-  for (let index = 0; index < options.episodes; index++) {
-    const episode = await generateEpisode(options, plan, index, previousSummary);
-    const quality = assessStoryQuality(episode, options, index + 1);
-    if (quality.score < 76) throw new Error(`第 ${index + 1} 集质量未达标：${quality.issues.join("；")}`);
-    generated.push(episode);
-    qualities.push(quality);
-    previousSummary = episode.continuitySummary;
-    options.log(`[${index + 1}/${options.episodes}] ${episode.title} · ${quality.wordCount} 词 · 质量 ${quality.score}`);
+  let previousEpisode: GeneratedStoryEpisode | null = null;
+  const dictionary = openEcdict(options.ecdictPath);
+  if (!dictionary) options.log(`未找到 ECDICT，跳过词频覆盖率检测：${options.ecdictPath}`);
+  const lexical = dictionary
+    ? { lookup: (word: string) => dictionary.frequencyRank(word), allowedWords: lexicalAllowedWords(plan) }
+    : undefined;
+  try {
+    for (let index = 0; index < options.episodes; index++) {
+      let episode = await generateEpisode(options, plan, index, previousEpisode);
+      let quality = assessStoryQuality(episode, options, index + 1, lexical);
+      if (!passesQualityGate(quality, options.minLexicalCoverage)) {
+        options.log(`[${index + 1}/${options.episodes}] 自动质量门禁触发，进行一次定向修稿：${quality.issues.join("；")}`);
+        episode = await repairEpisode(options, plan, episode, index + 1, quality);
+        quality = assessStoryQuality(episode, options, index + 1, lexical);
+      }
+      if (!passesQualityGate(quality, options.minLexicalCoverage)) {
+        throw new Error(`第 ${index + 1} 集质量未达标：${quality.issues.join("；")}`);
+      }
+      generated.push(episode);
+      qualities.push(quality);
+      previousEpisode = episode;
+      const coverage = quality.lexicalCoverage === null ? "未检测词频" : `高频词覆盖 ${(quality.lexicalCoverage * 100).toFixed(1)}%`;
+      options.log(`[${index + 1}/${options.episodes}] ${episode.title} · ${quality.wordCount} 词 · ${coverage} · 质量 ${quality.score}`);
+    }
+  } finally {
+    dictionary?.close();
   }
 
   const db = createDatabase(options.databasePath);
@@ -752,10 +1066,23 @@ function loadOptions(argv = process.argv.slice(2)): StoryRunOptions {
   }
   const episodes = Number(from("episodes", "STORY_EPISODES", "episodes") ?? defaultOptions.episodes);
   if (!Number.isInteger(episodes) || episodes < 2 || episodes > 30) throw new Error("episodes 必须为 2-30 的整数");
+  const planCandidates = Number(
+    from("plan-candidates", "STORY_PLAN_CANDIDATES", "planCandidates") ?? defaultOptions.planCandidates,
+  );
+  if (!Number.isInteger(planCandidates) || planCandidates < 2 || planCandidates > 4) {
+    throw new Error("plan-candidates 必须为 2-4 的整数");
+  }
+  const minLexicalCoverage = Number(
+    from("min-coverage", "STORY_MIN_LEXICAL_COVERAGE", "minLexicalCoverage") ?? defaultOptions.minLexicalCoverage,
+  );
+  if (!Number.isFinite(minLexicalCoverage) || minLexicalCoverage < 0.8 || minLexicalCoverage > 1) {
+    throw new Error("min-coverage 必须为 0.80-1 之间的小数");
+  }
   return {
     ...defaultOptions,
     ...fileConfig,
     databasePath: path.resolve(String(from("database", "DATABASE_PATH", "databasePath") ?? defaultOptions.databasePath)),
+    ecdictPath: path.resolve(String(from("ecdict", "ECDICT_PATH", "ecdictPath") ?? defaultOptions.ecdictPath)),
     baseUrl: String(from("base-url", "STORY_BASE_URL", "baseUrl") ?? ""),
     apiPath: String(from("api-path", "STORY_API_PATH", "apiPath") ?? defaultOptions.apiPath),
     apiKey: String(from("api-key", "STORY_API_KEY", "apiKey") ?? ""),
@@ -775,6 +1102,8 @@ function loadOptions(argv = process.argv.slice(2)): StoryRunOptions {
     sourceNotes,
     readerStage: readerStage as ReaderStageId,
     episodes,
+    planCandidates,
+    minLexicalCoverage,
     dryRun: flags.has("dry-run") || fileConfig.dryRun === true,
     force: flags.has("force") || fileConfig.force === true,
     log: console.log,

@@ -20,6 +20,12 @@ type EcdictRow = {
   exchange: string | null;
 };
 
+type EcdictFrequencyRow = {
+  frq: number | null;
+  bnc: number | null;
+  exchange: string | null;
+};
+
 export type EcdictEntry = {
   word: string;
   phonetic: string;
@@ -112,6 +118,8 @@ function serializeRow(row: EcdictRow): EcdictEntry {
 }
 
 export class EcdictDictionary {
+  private readonly frequencyCache = new Map<string, number | null>();
+
   constructor(
     private readonly db: DatabaseSyncType,
     readonly filename: string,
@@ -148,6 +156,34 @@ export class EcdictDictionary {
       if (serialized.translation) return serialized;
     }
     return fallback ? serializeRow(fallback) : null;
+  }
+
+  frequencyRank(value: string): number | null {
+    const normalized = normalizeWord(value);
+    if (!normalized) return null;
+    if (this.frequencyCache.has(normalized)) {
+      return this.frequencyCache.get(normalized) ?? null;
+    }
+    const select = this.db.prepare(
+      `SELECT frq, bnc, exchange
+       FROM stardict WHERE word = ? COLLATE NOCASE LIMIT 1`,
+    );
+    const ranks: number[] = [];
+    for (const candidate of lexicalCandidates(normalized)) {
+      const row = select.get(candidate) as EcdictFrequencyRow | undefined;
+      if (!row) continue;
+      if (row.frq && row.frq > 0) ranks.push(row.frq);
+      if (row.bnc && row.bnc > 0) ranks.push(row.bnc);
+      const lemma = lemmaFromExchange(row.exchange);
+      if (lemma && lemma !== candidate) {
+        const lemmaRow = select.get(lemma) as EcdictFrequencyRow | undefined;
+        if (lemmaRow?.frq && lemmaRow.frq > 0) ranks.push(lemmaRow.frq);
+        if (lemmaRow?.bnc && lemmaRow.bnc > 0) ranks.push(lemmaRow.bnc);
+      }
+    }
+    const rank = ranks.length ? Math.min(...ranks) : null;
+    this.frequencyCache.set(normalized, rank);
+    return rank;
   }
 
   close() {
