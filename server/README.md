@@ -111,9 +111,9 @@ npm run generate:article-audio -- --voices all
 
 执行 `npm run generate:article-audio -- --help` 可查看完整参数。第一次按 `Ctrl+C` 会在当前文章完成后安全停止，已经生成的文件和 SQLite 缓存记录都会保留；再次运行会从未缓存文章继续。
 
-## 批量生成文章译文
+## 按需与批量生成文章译文
 
-服务端提供可恢复的文章翻译脚本，支持任意 OpenAI Chat Completions 兼容接口，包括本地 Ollama、自建推理服务和云模型。新版按完整文章提供上下文，先保护题库标签、填空、网址、邮箱、数字等不可改写内容，再执行翻译、自动质量检查和可选的第二遍审校。缓存包含翻译策略版本和文章上下文，中途中断后可从新版合格缓存继续。
+文章页的“中文译文”标签支持按需生成：先查询 `article_translations` 缓存，没有译文时由用户点击“生成本文章译文”调用现有 OpenAI Chat Completions 兼容翻译配置，完成后立即写入数据库；相同文章再次请求直接返回缓存。服务端同时保留可恢复的批量翻译脚本，适合预生成大量内容。两种入口都按完整文章提供上下文，先保护题库标签、填空、网址、邮箱、数字等不可改写内容，再执行翻译、自动质量检查和可选的第二遍审校。
 
 先复制并修改配置：
 
@@ -188,7 +188,7 @@ npm run translate:articles -- \
   --model your-custom-model --limit 10
 ```
 
-翻译段缓存保存在 `translation_segments`，组装后的文章译文保存在 `article_translations`，并记录 `translation_policy`、`quality_score`、`reviewed` 与质量问题列表。自动检查覆盖空译、明显漏译、否定关系和英文残留；任何保护标记丢失都会使该文章失败并自动重试，避免模型填写考试空白或修改题库编号。客户端通过受登录保护的 `GET /api/v1/articles/:id/translation?language=zh-CN` 获取已推送文章的整篇译文；没有生成译文时接口返回 `data: null`。模型接口返回 `usage` 时，脚本会汇总翻译与审校的真实 Token。执行 `npm run translate:articles -- --help` 可以查看全部参数。
+翻译段缓存保存在 `translation_segments`，组装后的文章译文保存在 `article_translations`，并记录 `translation_policy`、`quality_score`、`reviewed` 与质量问题列表。自动检查覆盖空译、明显漏译、否定关系和英文残留；任何保护标记丢失都会使该文章失败并自动重试，避免模型填写考试空白或修改题库编号。客户端通过受登录保护的 `GET /api/v1/articles/:id/translation?language=zh-CN` 查询缓存，通过 `POST /api/v1/articles/:id/translation` 按需生成或复用译文。模型接口返回 `usage` 时，批处理脚本会汇总翻译与审校的真实 Token。执行 `npm run translate:articles -- --help` 可以查看全部参数。
 
 运营后台的手动推送支持按考试分类、文章主题类型及关键词筛选题库；切换筛选会清除不再可见的文章选择，避免误推。
 
@@ -293,6 +293,8 @@ Authorization: Bearer <token>
 | `GET`    | `/api/v1/daily?date=YYYY-MM-DD`         | 当日 3 篇文章              |
 | `GET`    | `/api/v1/interest-feed`                 | 当前用户的兴趣阅读书架     |
 | `GET`    | `/api/v1/articles/:id`                  | 文章与答题选项，不泄露答案 |
+| `GET`    | `/api/v1/articles/:id/translation`      | 查询整篇中文译文缓存       |
+| `POST`   | `/api/v1/articles/:id/translation`      | 生成或复用整篇中文译文     |
 | `GET`    | `/api/v1/article-audio/config`          | 整篇朗读配置与可用音色     |
 | `GET`    | `/api/v1/articles/:id/audio`            | 查询整篇朗读缓存           |
 | `POST`   | `/api/v1/articles/:id/audio`            | 生成或复用整篇朗读         |
