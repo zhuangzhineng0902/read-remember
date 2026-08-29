@@ -196,6 +196,16 @@ test("story quality measures actual frequency coverage", () => {
   assert.equal(quality.lexicalCoverage, 0.9);
   assert.deepEqual(quality.unfamiliarWords, ["xylophonic"]);
   assert.match(quality.issues.join(" "), /高频词覆盖率不足/);
+
+  episode.targetWords = ["xylophonic", "cat", "dog", "helped"];
+  const qualityWithNewWord = assessStoryQuality(
+    episode,
+    { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 },
+    1,
+    { lookup: (word) => word === "xylophonic" ? 5000 : 1 },
+  );
+  assert.equal(qualityWithNewWord.lexicalCoverage, 1);
+  assert.deepEqual(qualityWithNewWord.unfamiliarWords, []);
 });
 
 test("model JSON parser ignores a second object or trailing commentary", () => {

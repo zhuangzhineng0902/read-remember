@@ -806,7 +806,11 @@ export function assessStoryQuality(
   if (missingTargetWords.length) issues.push(`目标词未出现在正文：${missingTargetWords.join(", ")}`);
   if (episode.questions.some((question) => question.options.length !== 4 || question.answer > 3)) issues.push("题目选项或答案索引不合法");
   if (lexical && words.length) {
-    const allowed = new Set((lexical.allowedWords ?? []).map((word) => word.toLowerCase()));
+    // 每集明确选出的目标词就是允许孩子少量查阅的新词，不应反过来被
+    // 高频词门禁判为超纲；人物名和固定世界术语同样由调用方加入白名单。
+    const allowed = new Set(
+      [...(lexical.allowedWords ?? []), ...episode.targetWords].map((word) => word.toLowerCase()),
+    );
     const rankCutoff = readerProfile.headwords * 3;
     const unfamiliarCounts = new Map<string, number>();
     let familiarCount = 0;
@@ -983,7 +987,7 @@ async function repairEpisode(
     options,
     episodeSchema,
     "你只输出合法 JSON。你是分级阅读终审编辑，只修复自动质量检测指出的问题，并保持精彩情节和原有结构。",
-    `整季策划：${JSON.stringify(plan)}\n待修稿：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词（优先换成更常见表达，人物专名除外）：${quality.unfamiliarWords.join(", ")}\n\n正文必须保持 ${range[0]}-${range[1]} 词。不要删除关键线索、角色选择的后果或结尾悬念。修改后同步更新 continuitySummary、storyState 和题目。返回与待修稿相同结构的完整 JSON。`,
+    `整季策划：${JSON.stringify(plan)}\n待修稿：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词（除 targetWords、人物专名和固定术语外，逐个换成更常见表达）：${quality.unfamiliarWords.join(", ")}\n\n正文必须保持 ${range[0]}-${range[1]} 词。targetWords 中的每个词必须以完整单词实际出现在正文中；不要引入新的生僻同义词。不要删除关键线索、角色选择的后果或结尾悬念。修改后同步更新 continuitySummary、storyState 和题目。返回与待修稿相同结构的完整 JSON。`,
     options.reviewModel || options.model,
     0.1,
   );
@@ -1026,8 +1030,10 @@ export async function runStoryGeneration(options: StoryRunOptions) {
     for (let index = 0; index < options.episodes; index++) {
       let episode = await generateEpisode(options, plan, index, previousEpisode);
       let quality = assessStoryQuality(episode, options, index + 1, lexical);
-      if (!passesQualityGate(quality, options.minLexicalCoverage)) {
-        options.log(`[${index + 1}/${options.episodes}] 自动质量门禁触发，进行一次定向修稿：${quality.issues.join("；")}`);
+      for (let repairAttempt = 1; repairAttempt <= 3 && !passesQualityGate(quality, options.minLexicalCoverage); repairAttempt++) {
+        options.log(
+          `[${index + 1}/${options.episodes}] 自动质量门禁触发，进行第 ${repairAttempt}/3 次定向修稿：${quality.issues.join("；")}`,
+        );
         episode = await repairEpisode(options, plan, episode, index + 1, quality);
         quality = assessStoryQuality(episode, options, index + 1, lexical);
       }

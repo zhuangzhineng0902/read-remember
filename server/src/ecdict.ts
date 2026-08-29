@@ -81,7 +81,7 @@ function lexicalCandidates(value: string) {
   }
   return candidates.filter(
     (candidate, index, values) =>
-      candidate.length > 1 && values.indexOf(candidate) === index,
+      candidate.length > 0 && values.indexOf(candidate) === index,
   );
 }
 
