@@ -431,6 +431,22 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(retriedStory.progressMessage, "等待重新开始创作");
   assert.equal(retriedStory.progressPercent, 0);
   assert.deepEqual(enqueuedCustomStories, [story.id, story.id]);
+
+  db.prepare(
+    `UPDATE custom_story_requests
+     SET status = 'failed', checkpoint_json = '{"version":1}',
+         checkpoint_episode_count = 1 WHERE id = ?`,
+  ).run(story.id);
+  const resumed = await request(`/api/v1/custom-stories/${story.id}/retry`, {
+    method: "POST",
+  });
+  assert.equal(resumed.status, 202);
+  const resumedStory = (await resumed.json()).data;
+  assert.equal(resumedStory.resumeAvailable, true);
+  assert.equal(resumedStory.completedEpisodeCount, 1);
+  assert.equal(resumedStory.progressMessage, "等待从第 2 集继续创作");
+  assert.equal(resumedStory.progressPercent, 45);
+  assert.deepEqual(enqueuedCustomStories, [story.id, story.id, story.id]);
 });
 
 test("interest preferences drive the interest feed and mixed daily reading", async () => {

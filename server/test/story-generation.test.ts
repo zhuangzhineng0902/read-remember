@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
   assessStoryQuality,
@@ -8,11 +11,14 @@ import {
   parseStoryGenerationCheckpoint,
   passesStoryQualityFloor,
   resolveReaderProfile,
+  runStoryGeneration,
   storyGenerationCheckpointSchema,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
   type SeriesPlan,
+  type StoryRunOptions,
 } from "../scripts/generate-story-series";
+import { createDatabase } from "../src/database";
 
 test("classic story prompt uses a public-domain source and controlled reader stage", () => {
   const prompt = buildSeriesPlanPrompt({
@@ -163,12 +169,118 @@ const validPlan: SeriesPlan = {
   })),
 };
 
+function checkpointEpisode(title: string): GeneratedStoryEpisode {
+  return {
+    title,
+    paragraphs: [
+      "Mia and Ben stood together beside the old clock tower and heard a strange sound inside.",
+      "They shared the brass key, checked the small door, and found a safe path through the tower.",
+      "A new light moved under the floor, so the friends agreed to follow it in the next adventure.",
+    ],
+    targetWords: ["clock", "tower", "shared", "follow"],
+    continuitySummary: "伙伴们共同打开钟塔小门，发现地板下有一道移动的光，决定下一集继续追查。",
+    storyState: {
+      characterPositions: ["Mia 和 Ben 在旧钟塔内部"],
+      knownFacts: ["铜钥匙可以打开钟塔的小门"],
+      unresolvedQuestions: ["地板下移动的光来自哪里"],
+      items: ["Mia 和 Ben 共同保管铜钥匙"],
+      relationshipChanges: ["两人开始主动分享观察结果"],
+    },
+    questions: [
+      { prompt: "What did the friends share?", options: ["A brass key", "A boat", "A meal", "A map"], answer: 0, explanation: "原文说他们共同使用铜钥匙。" },
+      { prompt: "Why will they continue?", options: ["They saw a moving light", "They lost a book", "They heard music", "They felt tired"], answer: 0, explanation: "地板下移动的光形成了新的问题。" },
+    ],
+  };
+}
+
 test("series plan validator enforces clue chronology", () => {
   assert.equal(validateSeriesPlan(validPlan, 2).seriesTitle, validPlan.seriesTitle);
   const invalid = structuredClone(validPlan);
   invalid.clueLedger[0].introducedIn = 2;
   invalid.clueLedger[0].usedIn = 1;
   assert.throws(() => validateSeriesPlan(invalid, 2), /顺序不合法/);
+});
+
+test("a completed checkpoint skips model calls and imports saved episodes", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "read-remember-story-checkpoint-"));
+  const databasePath = path.join(directory, "checkpoint.sqlite");
+  const episodeOne = checkpointEpisode("The First Clock");
+  const episodeTwo = checkpointEpisode("The Second Clock");
+  const quality = {
+    score: 100,
+    wordCount: 210,
+    averageSentenceWords: 10,
+    lexicalCoverage: 0.98,
+    unfamiliarWords: [],
+    issues: [],
+  };
+  const logs: string[] = [];
+  const setupDb = createDatabase(databasePath);
+  setupDb.prepare(
+    `INSERT INTO interest_categories(
+      id, name, subtitle, emoji, color, activity_prompt, story_prompt, active
+     ) VALUES ('custom-story', '定制故事', '用户自己的连续故事', '✨', '#55766D',
+       '预测下一集。', '根据用户灵感创作原创连续故事。', 1)`,
+  ).run();
+  setupDb.close();
+  const options: StoryRunOptions = {
+    databasePath,
+    ecdictPath: path.join(directory, "missing-ecdict.sqlite"),
+    baseUrl: "http://127.0.0.1:1",
+    apiPath: "/must-not-be-called",
+    apiKey: "",
+    model: "unused",
+    reviewModel: "unused",
+    interest: "custom-story",
+    customInterestName: "定制故事",
+    customInterestSubtitle: "用户自己的连续故事",
+    customInterestEmoji: "✨",
+    customInterestColor: "#55766D",
+    customInterestPrompt: "根据用户灵感创作原创连续故事。",
+    customActivityPrompt: "预测下一集。",
+    examId: "middle",
+    sourceMode: "favorite",
+    classicId: "",
+    sourceTitle: "钟塔冒险",
+    sourceNotes: "伙伴合作解开钟塔谜题",
+    readerStage: "stage1",
+    episodes: 2,
+    importNamespace: "checkpoint-test",
+    planCandidates: 3,
+    minLexicalCoverage: 0.95,
+    temperature: 0.8,
+    reviewTemperature: 0.2,
+    timeoutMs: 50,
+    maxRetries: 1,
+    dryRun: false,
+    force: false,
+    log: (message) => logs.push(message),
+    checkpoint: {
+      version: 1,
+      plan: validPlan,
+      episodes: [
+        { episode: episodeOne, quality },
+        { episode: episodeTwo, quality },
+      ],
+    },
+  };
+  try {
+    const result = await runStoryGeneration(options);
+    assert.equal(result.generated, 2);
+    assert.equal(result.imported, 2);
+    assert.match(logs.join(" "), /已从检查点恢复/);
+    const db = createDatabase(databasePath);
+    try {
+      const row = db.prepare(
+        "SELECT COUNT(*) AS count FROM articles WHERE series_title = ?",
+      ).get(validPlan.seriesTitle) as { count: number };
+      assert.equal(row.count, 2);
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("story quality measures actual frequency coverage", () => {
