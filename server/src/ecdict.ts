@@ -26,6 +26,11 @@ type EcdictFrequencyRow = {
   exchange: string | null;
 };
 
+type EcdictVocabularyRow = {
+  tag: string | null;
+  exchange: string | null;
+};
+
 export type EcdictEntry = {
   word: string;
   phonetic: string;
@@ -119,6 +124,7 @@ function serializeRow(row: EcdictRow): EcdictEntry {
 
 export class EcdictDictionary {
   private readonly frequencyCache = new Map<string, number | null>();
+  private readonly vocabularyTagCache = new Map<string, boolean>();
 
   constructor(
     private readonly db: DatabaseSyncType,
@@ -184,6 +190,41 @@ export class EcdictDictionary {
     const rank = ranks.length ? Math.min(...ranks) : null;
     this.frequencyCache.set(normalized, rank);
     return rank;
+  }
+
+  hasVocabularyTag(value: string, acceptedTags: readonly string[]) {
+    const normalized = normalizeWord(value);
+    if (!normalized || !acceptedTags.length) return false;
+    const cacheKey = `${normalized}:${[...acceptedTags].sort().join(",")}`;
+    if (this.vocabularyTagCache.has(cacheKey)) {
+      return this.vocabularyTagCache.get(cacheKey) ?? false;
+    }
+    const expected = new Set(acceptedTags.map((tag) => tag.toLowerCase()));
+    const select = this.db.prepare(
+      `SELECT tag, exchange FROM stardict
+       WHERE word = ? COLLATE NOCASE LIMIT 1`,
+    );
+    const matches = (row: EcdictVocabularyRow | undefined) =>
+      row?.tag?.split(/\s+/).some((tag) => expected.has(tag.toLowerCase())) ?? false;
+    let found = false;
+    for (const candidate of lexicalCandidates(normalized)) {
+      const row = select.get(candidate) as EcdictVocabularyRow | undefined;
+      if (!row) continue;
+      if (matches(row)) {
+        found = true;
+        break;
+      }
+      const lemma = lemmaFromExchange(row.exchange);
+      if (lemma && lemma !== candidate) {
+        const lemmaRow = select.get(lemma) as EcdictVocabularyRow | undefined;
+        if (matches(lemmaRow)) {
+          found = true;
+          break;
+        }
+      }
+    }
+    this.vocabularyTagCache.set(cacheKey, found);
+    return found;
   }
 
   close() {

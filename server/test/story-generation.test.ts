@@ -5,6 +5,7 @@ import {
   buildSeriesPlanPrompt,
   loadStoryEngagementBrief,
   parseJson,
+  passesStoryQualityFloor,
   resolveReaderProfile,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
@@ -206,6 +207,22 @@ test("story quality measures actual frequency coverage", () => {
   );
   assert.equal(qualityWithNewWord.lexicalCoverage, 1);
   assert.deepEqual(qualityWithNewWord.unfamiliarWords, []);
+});
+
+test("story quality keeps 95 percent as a target but publishes above the 90 percent floor", () => {
+  const baseQuality = {
+    score: 88,
+    wordCount: 240,
+    averageSentenceWords: 10,
+    lexicalCoverage: 0.913,
+    unfamiliarWords: ["blade", "dull"],
+    issues: ["高频词覆盖率不足"],
+  };
+  assert.equal(passesStoryQualityFloor(baseQuality, 0.95), true);
+  assert.equal(
+    passesStoryQualityFloor({ ...baseQuality, lexicalCoverage: 0.899 }, 0.95),
+    false,
+  );
 });
 
 test("model JSON parser ignores a second object or trailing commentary", () => {

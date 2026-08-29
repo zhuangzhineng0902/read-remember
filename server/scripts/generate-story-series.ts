@@ -346,6 +346,7 @@ export type StoryQuality = {
 };
 
 export type LexicalRankLookup = (word: string) => number | null;
+export type LexicalFamiliarityLookup = (word: string) => boolean;
 
 const examGuide: Record<
   ExamId,
@@ -780,7 +781,11 @@ export function assessStoryQuality(
   episode: GeneratedStoryEpisode,
   options: Pick<StoryRunOptions, "examId" | "readerStage"> & Partial<Pick<StoryRunOptions, "minLexicalCoverage">>,
   episodeNumber: number,
-  lexical?: { lookup: LexicalRankLookup; allowedWords?: string[] },
+  lexical?: {
+    lookup: LexicalRankLookup;
+    isFamiliar?: LexicalFamiliarityLookup;
+    allowedWords?: string[];
+  },
 ): StoryQuality {
   const level = examGuide[options.examId];
   const readerProfile = resolveReaderProfile(options);
@@ -817,7 +822,11 @@ export function assessStoryQuality(
     for (const word of words) {
       const normalized = word.toLowerCase().replace(/^'+|'+$/g, "");
       const rank = lexical.lookup(normalized);
-      if (allowed.has(normalized) || (rank !== null && rank <= rankCutoff)) {
+      if (
+        allowed.has(normalized)
+        || lexical.isFamiliar?.(normalized)
+        || (rank !== null && rank <= rankCutoff)
+      ) {
         familiarCount++;
       } else {
         unfamiliarCounts.set(normalized, (unfamiliarCounts.get(normalized) ?? 0) + 1);
@@ -1000,8 +1009,21 @@ function lexicalAllowedWords(plan: SeriesPlan) {
   ];
 }
 
-function passesQualityGate(quality: StoryQuality, minimumCoverage: number) {
-  return quality.score >= 80 && (quality.lexicalCoverage === null || quality.lexicalCoverage >= minimumCoverage);
+function examVocabularyTags(examId: ExamId) {
+  if (examId === "middle") return ["zk"];
+  if (examId === "high") return ["zk", "gk"];
+  if (examId === "toefl") return ["toefl"];
+  if (examId === "ielts") return ["ielts"];
+  return ["zk", "gk", "cet4", "cet6"];
+}
+
+function meetsQualityTarget(quality: StoryQuality, targetCoverage: number) {
+  return quality.score >= 80 && (quality.lexicalCoverage === null || quality.lexicalCoverage >= targetCoverage);
+}
+
+export function passesStoryQualityFloor(quality: StoryQuality, targetCoverage: number) {
+  const publishableCoverage = Math.min(targetCoverage, 0.9);
+  return quality.score >= 80 && (quality.lexicalCoverage === null || quality.lexicalCoverage >= publishableCoverage);
 }
 
 function slug(value: string) {
@@ -1024,21 +1046,31 @@ export async function runStoryGeneration(options: StoryRunOptions) {
   const dictionary = openEcdict(options.ecdictPath);
   if (!dictionary) options.log(`未找到 ECDICT，跳过词频覆盖率检测：${options.ecdictPath}`);
   const lexical = dictionary
-    ? { lookup: (word: string) => dictionary.frequencyRank(word), allowedWords: lexicalAllowedWords(plan) }
+    ? {
+        lookup: (word: string) => dictionary.frequencyRank(word),
+        isFamiliar: (word: string) => dictionary.hasVocabularyTag(word, examVocabularyTags(options.examId)),
+        allowedWords: lexicalAllowedWords(plan),
+      }
     : undefined;
   try {
     for (let index = 0; index < options.episodes; index++) {
       let episode = await generateEpisode(options, plan, index, previousEpisode);
       let quality = assessStoryQuality(episode, options, index + 1, lexical);
-      for (let repairAttempt = 1; repairAttempt <= 3 && !passesQualityGate(quality, options.minLexicalCoverage); repairAttempt++) {
+      for (let repairAttempt = 1; repairAttempt <= 3 && !meetsQualityTarget(quality, options.minLexicalCoverage); repairAttempt++) {
         options.log(
           `[${index + 1}/${options.episodes}] 自动质量门禁触发，进行第 ${repairAttempt}/3 次定向修稿：${quality.issues.join("；")}`,
         );
         episode = await repairEpisode(options, plan, episode, index + 1, quality);
         quality = assessStoryQuality(episode, options, index + 1, lexical);
       }
-      if (!passesQualityGate(quality, options.minLexicalCoverage)) {
+      if (!passesStoryQualityFloor(quality, options.minLexicalCoverage)) {
         throw new Error(`第 ${index + 1} 集质量未达标：${quality.issues.join("；")}`);
+      }
+      if (!meetsQualityTarget(quality, options.minLexicalCoverage)) {
+        options.log(
+          `[${index + 1}/${options.episodes}] 高频词覆盖未达到 ${(options.minLexicalCoverage * 100).toFixed(0)}% 的优化目标，`
+          + `但已达到 90% 发布底线，保留少量可查目标词并继续。`,
+        );
       }
       generated.push(episode);
       qualities.push(quality);
