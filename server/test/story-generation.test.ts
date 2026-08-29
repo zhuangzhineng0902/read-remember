@@ -217,14 +217,8 @@ test("a completed checkpoint skips model calls and imports saved episodes", asyn
     issues: [],
   };
   const logs: string[] = [];
-  const setupDb = createDatabase(databasePath);
-  setupDb.prepare(
-    `INSERT INTO interest_categories(
-      id, name, subtitle, emoji, color, activity_prompt, story_prompt, active
-     ) VALUES ('custom-story', '定制故事', '用户自己的连续故事', '✨', '#55766D',
-       '预测下一集。', '根据用户灵感创作原创连续故事。', 1)`,
-  ).run();
-  setupDb.close();
+  createDatabase(databasePath).close();
+  const importedEpisodes: number[] = [];
   const options: StoryRunOptions = {
     databasePath,
     ecdictPath: path.join(directory, "missing-ecdict.sqlite"),
@@ -265,11 +259,28 @@ test("a completed checkpoint skips model calls and imports saved episodes", asyn
         { episode: episodeTwo, quality },
       ],
     },
+    onEpisodeImported: (episode) => {
+      importedEpisodes.push(episode.episodeNumber);
+      const checkpointDb = createDatabase(databasePath);
+      try {
+        const category = checkpointDb.prepare(
+          "SELECT active FROM interest_categories WHERE id = 'custom-story'",
+        ).get() as { active: number } | undefined;
+        assert.equal(category?.active, 1);
+        const imported = checkpointDb.prepare(
+          "SELECT COUNT(*) AS count FROM articles WHERE series_title = ?",
+        ).get(validPlan.seriesTitle) as { count: number };
+        assert.equal(imported.count, episode.episodeNumber);
+      } finally {
+        checkpointDb.close();
+      }
+    },
   };
   try {
     const result = await runStoryGeneration(options);
     assert.equal(result.generated, 2);
     assert.equal(result.imported, 2);
+    assert.deepEqual(importedEpisodes, [1, 2]);
     assert.match(logs.join(" "), /已从检查点恢复/);
     const db = createDatabase(databasePath);
     try {

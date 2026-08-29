@@ -345,6 +345,13 @@ export type StoryGenerationProgress = {
   percent: number;
 };
 
+export type StoryEpisodeImported = {
+  articleId: string;
+  episodeNumber: number;
+  totalEpisodes: number;
+  seriesTitle: string;
+};
+
 export type StoryRunOptions = {
   databasePath: string;
   ecdictPath: string;
@@ -380,6 +387,7 @@ export type StoryRunOptions = {
   onProgress?: (progress: StoryGenerationProgress) => void;
   checkpoint?: StoryGenerationCheckpoint | null;
   onCheckpoint?: (checkpoint: StoryGenerationCheckpoint) => void;
+  onEpisodeImported?: (episode: StoryEpisodeImported) => void;
 };
 
 export type StoryQuality = {
@@ -1264,6 +1272,98 @@ function slug(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
 }
 
+function ensureStoryInterestCategory(db: ReturnType<typeof createDatabase>, options: StoryRunOptions) {
+  const isCustomStory = options.interest === "custom-story";
+  const isKnownPublicInterest = storyInterestIds
+    .filter((interest) => interest !== "custom-story")
+    .includes(options.interest as Exclude<(typeof storyInterestIds)[number], "custom-story">);
+  if (isKnownPublicInterest) return;
+
+  db.prepare(
+    `INSERT INTO interest_categories(
+       id, name, subtitle, emoji, color, activity_prompt, story_prompt
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = excluded.name,
+       subtitle = excluded.subtitle,
+       emoji = excluded.emoji,
+       color = excluded.color,
+       activity_prompt = excluded.activity_prompt,
+       story_prompt = excluded.story_prompt,
+       active = 1,
+       updated_at = CURRENT_TIMESTAMP`,
+  ).run(
+    options.interest,
+    isCustomStory ? "定制故事" : options.customInterestName,
+    isCustomStory ? "用户自己的连续故事" : options.customInterestSubtitle,
+    isCustomStory ? "✨" : options.customInterestEmoji,
+    isCustomStory ? "#55766D" : options.customInterestColor,
+    isCustomStory ? "预测下一集，并说出支持预测的线索。" : options.customActivityPrompt,
+    isCustomStory ? "根据用户灵感创作原创、适龄、精彩的连续故事。" : options.customInterestPrompt,
+  );
+}
+
+function storySourceMetadata(options: StoryRunOptions, plan: SeriesPlan) {
+  const guide = storyGuideFor(options);
+  const classicSource = options.sourceMode === "classic"
+    ? classicSources[options.classicId as ClassicSourceId]
+    : null;
+  return {
+    seriesSlug: slug(plan.seriesTitle) || `${options.interest}-series`,
+    sourceName: classicSource
+      ? `拾词 AI 公版名著分级改写 · ${classicSource.title}`
+      : options.sourceMode === "favorite"
+        ? `拾词 AI 原创兴趣故事 · ${options.sourceTitle || guide.label}`
+        : `拾词 AI 原创连续故事 · ${guide.label}`,
+    licenseNote: classicSource
+      ? `基于公版原作 ${classicSource.title} 独立生成的分级重述；未复制任何商业简写本、现代译本或影视改编文本`
+      : options.sourceMode === "favorite"
+        ? "仅参考用户提供的题材偏好，角色、设定、语言与具体情节由模型原创，并经过第二遍审校"
+        : "由项目配置的生成模型原创生成，并经过第二遍故事质量审校",
+    eyebrow: classicSource ? "GRADED CLASSIC ADVENTURE" : "ORIGINAL SERIAL ADVENTURE",
+  };
+}
+
+function importStoryEpisode(
+  db: ReturnType<typeof createDatabase>,
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  episode: GeneratedStoryEpisode,
+  quality: StoryQuality,
+  index: number,
+) {
+  const metadata = storySourceMetadata(options, plan);
+  const [articleId] = importArticles(db, {
+    examId: options.examId,
+    sourceName: metadata.sourceName,
+    sourceUrl: null,
+    licenseNote: metadata.licenseNote,
+    rightsConfirmed: true,
+    articles: [{
+      externalId: `${options.importNamespace ? `${slug(options.importNamespace)}-` : ""}${options.interest}-${metadata.seriesSlug}-${index + 1}`,
+      year: new Date().getFullYear(),
+      title: episode.title,
+      eyebrow: metadata.eyebrow,
+      readMinutes: Math.max(3, Math.ceil(quality.wordCount / 95)),
+      difficulty: examGuide[options.examId].difficulty,
+      contentKind: "interest" as const,
+      interestId: options.interest as InterestId,
+      seriesTitle: plan.seriesTitle,
+      episodeNumber: index + 1,
+      paragraphs: episode.paragraphs,
+      questions: episode.questions as Question[],
+    }],
+  });
+  if (!articleId) throw new Error(`第 ${index + 1} 集入库后没有返回文章 ID`);
+  options.onEpisodeImported?.({
+    articleId,
+    episodeNumber: index + 1,
+    totalEpisodes: options.episodes,
+    seriesTitle: plan.seriesTitle,
+  });
+  return articleId;
+}
+
 export async function runStoryGeneration(options: StoryRunOptions) {
   if (options.dryRun) {
     options.log(buildSeriesPlanPrompt(options));
@@ -1306,17 +1406,31 @@ export async function runStoryGeneration(options: StoryRunOptions) {
     options.onCheckpoint?.({ version: 1, plan, episodes: [] });
     reportProgress(options, "drafting", `故事方案《${plan.seriesTitle}》已完成，正在生成第 1 集初稿`, 20);
   }
-  const dictionary = openEcdict(options.ecdictPath);
-  if (!dictionary) options.log(`未找到 ECDICT，跳过词频覆盖率检测：${options.ecdictPath}`);
-  const lexical = dictionary
-    ? {
-        lookup: (word: string) => dictionary.frequencyRank(word),
-        isFamiliar: (word: string) => dictionary.hasVocabularyTag(word, examVocabularyTags(options.examId)),
-        allowedWords: lexicalAllowedWords(plan),
-      }
-    : undefined;
+  const db = createDatabase(options.databasePath);
+  const articleIds: string[] = [];
   try {
-    for (let index = generated.length; index < options.episodes; index++) {
+    ensureStoryInterestCategory(db, options);
+    if (options.force) {
+      db.prepare(
+        `DELETE FROM articles WHERE exam_id = ? AND content_kind = 'interest'
+         AND interest_id = ? AND series_title = ?`,
+      ).run(options.examId, options.interest, plan.seriesTitle);
+    }
+    for (let index = 0; index < generated.length; index++) {
+      articleIds.push(importStoryEpisode(db, options, plan, generated[index], qualities[index], index));
+    }
+
+    const dictionary = openEcdict(options.ecdictPath);
+    if (!dictionary) options.log(`未找到 ECDICT，跳过词频覆盖率检测：${options.ecdictPath}`);
+    const lexical = dictionary
+      ? {
+          lookup: (word: string) => dictionary.frequencyRank(word),
+          isFamiliar: (word: string) => dictionary.hasVocabularyTag(word, examVocabularyTags(options.examId)),
+          allowedWords: lexicalAllowedWords(plan),
+        }
+      : undefined;
+    try {
+      for (let index = generated.length; index < options.episodes; index++) {
       let episode = await generateEpisode(options, plan, index, previousEpisode);
       let quality = assessStoryQuality(episode, options, index + 1, lexical);
       for (let repairAttempt = 1; repairAttempt <= 3 && !meetsQualityTarget(quality, options.minLexicalCoverage); repairAttempt++) {
@@ -1352,89 +1466,31 @@ export async function runStoryGeneration(options: StoryRunOptions) {
           quality: qualities[savedIndex],
         })),
       });
+      articleIds.push(importStoryEpisode(db, options, plan, episode, quality, index));
       reportProgress(
         options,
         index + 1 === options.episodes ? "saving" : "drafting",
         index + 1 === options.episodes
-          ? "全部章节已完成，正在保存到故事书架"
-          : `第 ${index + 1}/${options.episodes} 集已完成，准备生成下一集`,
+          ? "全部章节已上架，正在完成故事书架整理"
+          : index === 0
+            ? `第 1/${options.episodes} 集已上架，可以先读；正在准备下一集`
+            : `第 ${index + 1}/${options.episodes} 集已上架，准备生成下一集`,
         episodeProgress(options, index, 1),
       );
       const coverage = quality.lexicalCoverage === null ? "未检测词频" : `高频词覆盖 ${(quality.lexicalCoverage * 100).toFixed(1)}%`;
       options.log(`[${index + 1}/${options.episodes}] ${episode.title} · ${quality.wordCount} 词 · ${coverage} · 质量 ${quality.score}`);
+      }
+    } finally {
+      dictionary?.close();
     }
-  } finally {
-    dictionary?.close();
-  }
-
-  const db = createDatabase(options.databasePath);
-  reportProgress(options, "saving", "正在保存文章并解锁第一集", 96);
-  try {
-    const guide = storyGuideFor(options);
-    if (!storyInterestIds.includes(options.interest as (typeof storyInterestIds)[number])) {
-      db.prepare(
-        `INSERT INTO interest_categories(
-           id, name, subtitle, emoji, color, activity_prompt, story_prompt
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           name = excluded.name,
-           subtitle = excluded.subtitle,
-           emoji = excluded.emoji,
-           color = excluded.color,
-           activity_prompt = excluded.activity_prompt,
-           story_prompt = excluded.story_prompt,
-           active = 1,
-           updated_at = CURRENT_TIMESTAMP`,
-      ).run(
-        options.interest,
-        options.customInterestName,
-        options.customInterestSubtitle,
-        options.customInterestEmoji,
-        options.customInterestColor,
-        options.customActivityPrompt,
-        options.customInterestPrompt,
-      );
-    }
-    const seriesSlug = slug(plan.seriesTitle) || `${options.interest}-series`;
-    const classicSource = options.sourceMode === "classic" ? classicSources[options.classicId as ClassicSourceId] : null;
-    const sourceName = classicSource
-      ? `拾词 AI 公版名著分级改写 · ${classicSource.title}`
-      : options.sourceMode === "favorite"
-        ? `拾词 AI 原创兴趣故事 · ${options.sourceTitle || guide.label}`
-        : `拾词 AI 原创连续故事 · ${guide.label}`;
-    const licenseNote = classicSource
-      ? `基于公版原作 ${classicSource.title} 独立生成的分级重述；未复制任何商业简写本、现代译本或影视改编文本`
-      : options.sourceMode === "favorite"
-        ? "仅参考用户提供的题材偏好，角色、设定、语言与具体情节由模型原创，并经过第二遍审校"
-        : "由项目配置的生成模型原创生成，并经过第二遍故事质量审校";
-    if (options.force) {
-      db.prepare(
-        `DELETE FROM articles WHERE exam_id = ? AND content_kind = 'interest'
-         AND interest_id = ? AND series_title = ?`,
-      ).run(options.examId, options.interest, plan.seriesTitle);
-    }
-    const ids = importArticles(db, {
-      examId: options.examId,
-      sourceName,
-      sourceUrl: null,
-      licenseNote,
-      rightsConfirmed: true,
-      articles: generated.map((episode, index) => ({
-        externalId: `${options.importNamespace ? `${slug(options.importNamespace)}-` : ""}${options.interest}-${seriesSlug}-${index + 1}`,
-        year: new Date().getFullYear(),
-        title: episode.title,
-        eyebrow: classicSource ? "GRADED CLASSIC ADVENTURE" : "ORIGINAL SERIAL ADVENTURE",
-        readMinutes: Math.max(3, Math.ceil(qualities[index].wordCount / 95)),
-        difficulty: examGuide[options.examId].difficulty,
-        contentKind: "interest" as const,
-        interestId: options.interest as InterestId,
-        seriesTitle: plan.seriesTitle,
-        episodeNumber: index + 1,
-        paragraphs: episode.paragraphs,
-        questions: episode.questions as Question[],
-      })),
-    });
-    return { generated: generated.length, imported: ids.length, articleIds: ids, seriesTitle: plan.seriesTitle, qualities };
+    reportProgress(options, "saving", "全部章节已上架，正在完成故事书架整理", 96);
+    return {
+      generated: generated.length,
+      imported: articleIds.length,
+      articleIds,
+      seriesTitle: plan.seriesTitle,
+      qualities,
+    };
   } finally {
     db.close();
   }

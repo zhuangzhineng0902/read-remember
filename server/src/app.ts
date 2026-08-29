@@ -654,7 +654,7 @@ export function createApp(
           activity_prompt AS activityPrompt, story_prompt AS storyPrompt,
           CASE WHEN built_in = 1 THEN 1 ELSE 0 END AS builtIn
          FROM interest_categories
-         WHERE active = 1
+         WHERE active = 1 AND id <> 'custom-story'
          ORDER BY sort_order, created_at, id`,
       )
       .all();

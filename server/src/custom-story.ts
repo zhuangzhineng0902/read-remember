@@ -5,6 +5,7 @@ import {
   type ReaderStageId,
   type StoryGenerationCheckpoint,
   type StoryGenerationProgress,
+  type StoryEpisodeImported,
   type StoryRunOptions,
 } from "../scripts/generate-story-series";
 
@@ -129,6 +130,7 @@ export class CustomStoryService implements CustomStoryProvider {
         log: (message) => console.log(`[custom-story:${request.id}] ${message}`),
         onProgress: (progress) => this.saveProgress(request.id, progress),
         onCheckpoint: (saved) => this.saveCheckpoint(request.id, saved),
+        onEpisodeImported: (episode) => this.publishEpisode(request, episode),
       });
       if (!result.articleIds.length) throw new Error("生成结果中没有可用章节");
       const updateArticle = this.db.prepare(
@@ -174,6 +176,49 @@ export class CustomStoryService implements CustomStoryProvider {
         resumeMessage,
         request.id,
       );
+    }
+  }
+
+  private publishEpisode(
+    request: CustomStoryRequestRow,
+    episode: StoryEpisodeImported,
+  ) {
+    const updateArticle = this.db.prepare(
+      "UPDATE articles SET series_key = ? WHERE id = ?",
+    );
+    const deliver = this.db.prepare(
+      `INSERT OR IGNORE INTO interest_deliveries(user_id, article_id, delivery_date)
+       VALUES (?, ?, date('now'))`,
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      updateArticle.run(request.id, episode.articleId);
+      const previousCompleted = episode.episodeNumber > 1
+        ? this.db.prepare(
+            `SELECT 1
+             FROM articles previous
+             JOIN article_progress progress
+               ON progress.article_id = previous.id AND progress.user_id = ?
+             WHERE previous.series_key = ? AND previous.episode_number = ?
+             LIMIT 1`,
+          ).get(request.userId, request.id, episode.episodeNumber - 1)
+        : true;
+      if (episode.episodeNumber === 1 || previousCompleted) {
+        deliver.run(request.userId, episode.articleId);
+      }
+      const articleIds = (this.db.prepare(
+        `SELECT id FROM articles WHERE series_key = ?
+         ORDER BY episode_number, id`,
+      ).all(request.id) as Array<{ id: string }>).map((article) => article.id);
+      this.db.prepare(
+        `UPDATE custom_story_requests
+         SET series_title = ?, article_ids_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+      ).run(episode.seriesTitle, JSON.stringify(articleIds), request.id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
   }
 

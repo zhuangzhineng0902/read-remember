@@ -1840,13 +1840,13 @@ function CreateStoryScreen({
           {submitting ? <ActivityIndicator color="#FFFFFF" /> : <Sparkles size={19} color="#FFFFFF" />}
           <Text style={styles.storySubmitText}>{submitting ? "正在提交灵感…" : "开始创作我的故事"}</Text>
         </Pressable>
-        <Text style={styles.storySubmitHint}>高质量连续故事需要一些时间，离开本页也会继续创作。</Text>
+        <Text style={styles.storySubmitHint}>第一章完成后即可先读，其他章节会继续在后台创作。</Text>
       </View>
 
       <View style={styles.sectionHeading}>
         <View>
           <Text style={styles.sectionTitle}>我的故事书架</Text>
-          <Text style={styles.sectionSubtitle}>完成一章，点亮下一章</Text>
+          <Text style={styles.sectionSubtitle}>第一章生成完即可先读，完成一章点亮下一章</Text>
         </View>
         <View style={styles.countPill}><Text style={styles.countPillText}>{stories.length} 个系列</Text></View>
       </View>
@@ -1975,7 +1975,7 @@ function TodayScreen({
       interestFilter === "all" || article.interestId === interestFilter,
   );
   const homeCustomStories = customStories
-    .filter((story) => story.status !== "failed")
+    .filter((story) => story.status !== "failed" || story.articles.some((article) => article.unlocked))
     .slice(0, 3);
 
   return (
@@ -7845,7 +7845,7 @@ function AppContent() {
       ]);
       setAppNotice({
         title: "灵感已经送进故事工坊",
-        message: "可以离开本页，故事会在后台继续创作。完成后会自动出现在个人书架。",
+        message: "可以离开本页继续使用；第一章生成完成后会立即上架，其余章节仍在后台创作。",
       });
     } catch (error) {
       setAppNotice({
