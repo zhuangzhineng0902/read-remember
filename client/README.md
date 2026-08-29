@@ -26,6 +26,31 @@ npm install
 npm start
 ```
 
+### Expo Go 二维码
+
+手机与电脑连接同一局域网后，可以固定使用 `8081` 端口启动 Metro，并同时生成 Expo Go 二维码：
+
+```bash
+npm run start:qr
+```
+
+命令会在终端显示二维码，并把同一张二维码保存到 `client/.expo/expo-go-qr.png`。Expo Go 扫码后访问的地址格式为 `exp://<电脑局域网IP>:8081`；客户端会从这个地址自动推断 API 为 `http://<电脑局域网IP>:4000/api/v1`。
+
+如果 Metro 已经启动，只需要重新生成二维码：
+
+```bash
+npm run qr:expo
+```
+
+脚本默认优先检测 macOS 常用的 `en0`、`en1` 网卡，也支持手动指定 IP、端口或完整 Expo 地址：
+
+```bash
+npm run qr:expo -- --host 192.168.1.14 --port 8081
+npm run qr:expo -- --url exp://192.168.1.14:8081
+```
+
+若扫码后无法连接，请确认服务端已监听 `0.0.0.0:4000`、手机和电脑位于同一网络，并允许防火墙访问 Node/Expo。完整参数可运行 `npm run qr:expo -- --help` 查看。
+
 也可以直接运行：
 
 ```bash

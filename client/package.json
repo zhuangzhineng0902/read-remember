@@ -5,6 +5,9 @@
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
+    "start:lan": "expo start --lan --port 8081",
+    "start:qr": "node scripts/generate-expo-qr.mjs && expo start --lan --port 8081",
+    "qr:expo": "node scripts/generate-expo-qr.mjs",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
@@ -43,6 +46,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "qrcode": "^1.5.4",
     "typescript": "~5.9.2"
   }
 }
