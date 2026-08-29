@@ -205,3 +205,24 @@ test("model JSON parser ignores a second object or trailing commentary", () => {
   );
   assert.deepEqual(parseJson('说明：\n[1,{"ok":true}]\n完成'), [1, { ok: true }]);
 });
+
+test("model JSON parser skips regex examples before the real object", () => {
+  assert.deepEqual(
+    parseJson('targetWords 必须匹配 [a-z]。\n最终结果：\n{"title":"Bao","targetWords":["sky","gate"]}'),
+    { title: "Bao", targetWords: ["sky", "gate"] },
+  );
+});
+
+test("model JSON parser repairs common near-JSON output", () => {
+  assert.deepEqual(
+    parseJson("结果：{'title':'Bao','targetWords':['sky','gate',],}"),
+    { title: "Bao", targetWords: ["sky", "gate"] },
+  );
+});
+
+test("model JSON parser repairs the real object after an invalid regex fragment", () => {
+  assert.deepEqual(
+    parseJson("格式示例 [a-z]。结果：{'title':'Bao','targetWords':['sky','gate',],}"),
+    { title: "Bao", targetWords: ["sky", "gate"] },
+  );
+});

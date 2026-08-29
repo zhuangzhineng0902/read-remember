@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { jsonrepair } from "jsonrepair";
 import type { ExamId, InterestId, Question } from "../../client/src/types";
 import { createDatabase } from "../src/database";
 import { importArticles } from "../src/content-import";
@@ -442,42 +443,96 @@ function stripFence(value: string) {
   return value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
 }
 
-export function parseJson(value: string) {
-  const cleaned = stripFence(value);
-  try {
-    return JSON.parse(cleaned) as unknown;
-  } catch {
-    const objectStart = cleaned.indexOf("{");
-    const arrayStart = cleaned.indexOf("[");
-    const starts = [objectStart, arrayStart].filter((index) => index >= 0);
-    const start = starts.length ? Math.min(...starts) : -1;
-    if (start < 0) throw new Error("模型没有返回有效 JSON");
-    const stack: string[] = [];
-    let inString = false;
-    let escaped = false;
-    for (let index = start; index < cleaned.length; index++) {
-      const character = cleaned[index];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (character === "\\") escaped = true;
-        else if (character === '"') inString = false;
-        continue;
-      }
-      if (character === '"') {
-        inString = true;
-        continue;
-      }
-      if (character === "{" || character === "[") stack.push(character);
-      if (character === "}" || character === "]") {
-        const expected = character === "}" ? "{" : "[";
-        if (stack.pop() !== expected) break;
-        if (stack.length === 0) {
-          return JSON.parse(cleaned.slice(start, index + 1)) as unknown;
-        }
-      }
-    }
-    throw new Error("模型没有返回完整 JSON");
+export class ModelJsonParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ModelJsonParseError";
   }
+}
+
+function balancedJsonCandidate(value: string, start: number) {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index++) {
+    const character = value[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === "{" || character === "[") stack.push(character);
+    if (character === "}" || character === "]") {
+      const expected = character === "}" ? "{" : "[";
+      if (stack.pop() !== expected) return null;
+      if (stack.length === 0) return value.slice(start, index + 1);
+    }
+  }
+  return null;
+}
+
+function jsonCandidates(value: string) {
+  const candidates: string[] = [];
+  for (let index = 0; index < value.length; index++) {
+    if (value[index] !== "{" && value[index] !== "[") continue;
+    const candidate = balancedJsonCandidate(value, index);
+    if (candidate) candidates.push(candidate);
+  }
+  return [...new Set(candidates)];
+}
+
+function parsedJsonValues(value: string) {
+  const cleaned = stripFence(value);
+  const values: unknown[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: string, repair = false) => {
+    try {
+      const parsed = JSON.parse(repair ? jsonrepair(candidate) : candidate) as unknown;
+      const key = JSON.stringify(parsed);
+      if (!seen.has(key)) {
+        seen.add(key);
+        values.push(parsed);
+      }
+    } catch {}
+  };
+
+  add(cleaned);
+  const candidates = jsonCandidates(cleaned);
+  for (const candidate of candidates) add(candidate);
+
+  // 修复阶段优先尝试信息量更大的片段，可避免说明文字里的 [a-z]
+  // 被修成 ["a-z"] 后抢在真正的业务对象之前。
+  for (const candidate of [...candidates].sort((left, right) => right.length - left.length)) {
+    add(candidate, true);
+  }
+  add(cleaned, true);
+  return values;
+}
+
+export function parseJson(value: string) {
+  const values = parsedJsonValues(value);
+  if (values.length) return values[0];
+  const candidates = jsonCandidates(stripFence(value));
+  throw new ModelJsonParseError(
+    candidates.length
+      ? `模型返回了 ${candidates.length} 个类似 JSON 的片段，但都无法解析`
+      : "模型响应中没有完整 JSON 对象或数组",
+  );
+}
+
+function jsonParseFailure(value: string) {
+  const cleaned = stripFence(value);
+  const candidates = jsonCandidates(cleaned);
+  return new ModelJsonParseError(
+    candidates.length
+      ? `模型返回了 ${candidates.length} 个类似 JSON 的片段，但都无法解析`
+      : "模型响应中没有完整 JSON 对象或数组",
+  );
 }
 
 function endpoint(options: StoryRunOptions) {
@@ -485,7 +540,7 @@ function endpoint(options: StoryRunOptions) {
   return `${options.baseUrl.replace(/\/$/, "")}/${options.apiPath.replace(/^\//, "")}`;
 }
 
-async function callModel(options: StoryRunOptions, system: string, user: string, model = options.model, temperature = options.temperature) {
+async function callModelText(options: StoryRunOptions, system: string, user: string, model = options.model, temperature = options.temperature) {
   let lastError: unknown;
   for (let attempt = 1; attempt <= options.maxRetries; attempt++) {
     try {
@@ -512,7 +567,7 @@ async function callModel(options: StoryRunOptions, system: string, user: string,
       };
       const content = payload.choices?.[0]?.message?.content;
       if (!content) throw new Error("模型响应中没有文本内容");
-      return parseJson(content);
+      return content;
     } catch (error) {
       lastError = error;
       if (attempt < options.maxRetries) await new Promise((resolve) => setTimeout(resolve, attempt * 800));
@@ -530,17 +585,34 @@ async function callStructured<T>(
   temperature = options.temperature,
 ) {
   let prompt = user;
-  let lastError: z.ZodError | null = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const value = await callModel(options, system, prompt, model, temperature);
-    const parsed = schema.safeParse(value);
-    if (parsed.success) return parsed.data;
-    lastError = parsed.error;
-    const issues = parsed.error.issues
+  let lastError: z.ZodError | ModelJsonParseError | null = null;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const content = await callModelText(options, system, prompt, model, temperature);
+    const values = parsedJsonValues(content);
+    if (!values.length) {
+      lastError = jsonParseFailure(content);
+      options.log(`模型第 ${attempt} 次返回无法解析，正在要求其重新输出严格 JSON…`);
+      prompt = `${user}\n\n上一次响应无法作为 JSON 解析：${lastError.message}。请重新输出一份完整 JSON：只能有一个顶层对象，键名和字符串必须使用英文双引号，数组必须填真实值；禁止输出 Markdown、解释、正则示例（如 [a-z]）、JSON Schema、注释或第二个对象。`;
+      continue;
+    }
+
+    const attempts = values.map((value) => ({ value, result: schema.safeParse(value) }));
+    const valid = attempts.find((entry) => entry.result.success);
+    if (valid?.result.success) return valid.result.data;
+    const closest = attempts.reduce((best, entry) => {
+      const issueCount = entry.result.success ? 0 : entry.result.error.issues.length;
+      const bestIssueCount = best.result.success ? 0 : best.result.error.issues.length;
+      return issueCount < bestIssueCount ? entry : best;
+    });
+    if (closest.result.success) return closest.result.data;
+    lastError = closest.result.error;
+    const issues = closest.result.error.issues
       .slice(0, 12)
       .map((issue) => `${issue.path.join(".") || "root"}: ${issue.message}`)
       .join("；");
-    prompt = `${user}\n\n你上一次返回的 JSON 结构不合格：${issues}。请保留完整内容，补齐或修正这些字段，只返回一份完整合法 JSON。`;
+    const previousValue = JSON.stringify(closest.value).slice(0, 16_000);
+    options.log(`模型第 ${attempt} 次返回结构不完整，正在携带字段错误自动修正…`);
+    prompt = `${user}\n\n你上一次实际返回的是：\n${previousValue}\n\n结构校验错误：${issues}。请以这份实际返回为基础，补齐并修正所有字段。不要使用省略号或占位值；只返回一份完整合法 JSON。`;
   }
   throw lastError ?? new Error("模型没有返回符合结构的 JSON");
 }
