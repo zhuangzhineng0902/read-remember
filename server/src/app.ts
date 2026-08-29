@@ -872,6 +872,8 @@ export function createApp(
     series_title AS seriesTitle, error_message AS errorMessage,
     progress_stage AS progressStage, progress_message AS progressMessage,
     progress_percent AS progressPercent,
+    checkpoint_episode_count AS completedEpisodeCount,
+    CASE WHEN checkpoint_json <> '' THEN 1 ELSE 0 END AS resumeAvailable,
     created_at AS createdAt, updated_at AS updatedAt, completed_at AS completedAt
   `;
   type CustomStoryRow = {
@@ -891,6 +893,8 @@ export function createApp(
     progressStage: string;
     progressMessage: string;
     progressPercent: number;
+    completedEpisodeCount: number;
+    resumeAvailable: number;
     createdAt: string;
     updatedAt: string;
     completedAt: string | null;
@@ -923,6 +927,8 @@ export function createApp(
       progressStage: row.progressStage,
       progressMessage: row.progressMessage,
       progressPercent: row.progressPercent,
+      completedEpisodeCount: row.completedEpisodeCount,
+      resumeAvailable: Boolean(row.resumeAvailable),
       createdAt: sqliteTimestampToIso(row.createdAt),
       updatedAt: sqliteTimestampToIso(row.updatedAt),
       completedAt: row.completedAt ? sqliteTimestampToIso(row.completedAt) : null,
@@ -971,12 +977,19 @@ export function createApp(
     if (row.status !== "failed") {
       throw new ApiError(409, "CUSTOM_STORY_NOT_FAILED", "只有失败的故事可以重新生成");
     }
+    const resumeMessage = row.resumeAvailable
+      ? row.completedEpisodeCount
+        ? `等待从第 ${row.completedEpisodeCount + 1} 集继续创作`
+        : "等待从已保存的故事方案继续创作"
+      : "等待重新开始创作";
+    const resumePercent = row.resumeAvailable
+      ? Math.round(20 + (row.completedEpisodeCount / row.episodeCount) * 74)
+      : 0;
     db.prepare(
       `UPDATE custom_story_requests SET status = 'queued', error_message = '',
-       progress_stage = 'queued', progress_message = '等待重新开始创作',
-       progress_percent = 0,
+       progress_stage = 'queued', progress_message = ?, progress_percent = ?,
        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-    ).run(row.id);
+    ).run(resumeMessage, resumePercent, row.id);
     customStories.enqueue(row.id);
     const retried = db
       .prepare(`SELECT ${customStorySelect} FROM custom_story_requests WHERE id = ?`)

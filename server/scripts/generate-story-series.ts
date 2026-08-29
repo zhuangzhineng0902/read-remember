@@ -354,6 +354,8 @@ export type StoryRunOptions = {
   force: boolean;
   log: (message: string) => void;
   onProgress?: (progress: StoryGenerationProgress) => void;
+  checkpoint?: StoryGenerationCheckpoint | null;
+  onCheckpoint?: (checkpoint: StoryGenerationCheckpoint) => void;
 };
 
 export type StoryQuality = {
@@ -364,6 +366,31 @@ export type StoryQuality = {
   unfamiliarWords: string[];
   issues: string[];
 };
+
+const storyQualityCheckpointSchema = z.object({
+  score: z.number().min(0).max(100),
+  wordCount: z.number().int().nonnegative(),
+  averageSentenceWords: z.number().nonnegative(),
+  lexicalCoverage: z.number().min(0).max(1).nullable(),
+  unfamiliarWords: z.array(z.string()),
+  issues: z.array(z.string()),
+});
+
+export const storyGenerationCheckpointSchema = z.object({
+  version: z.literal(1),
+  plan: planSchema,
+  episodes: z.array(z.object({
+    episode: episodeSchema,
+    quality: storyQualityCheckpointSchema,
+  })).max(30),
+});
+
+export type StoryGenerationCheckpoint = z.infer<typeof storyGenerationCheckpointSchema>;
+
+export function parseStoryGenerationCheckpoint(value: unknown) {
+  const parsed = storyGenerationCheckpointSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 
 export type LexicalRankLookup = (word: string) => number | null;
 export type LexicalFamiliarityLookup = (word: string) => boolean;
@@ -436,7 +463,7 @@ const defaultOptions: Omit<StoryRunOptions, "log"> = {
   minLexicalCoverage: 0.95,
   temperature: 0.82,
   reviewTemperature: 0.25,
-  timeoutMs: 180_000,
+  timeoutMs: 600_000,
   maxRetries: 3,
   dryRun: false,
   force: false,
@@ -1107,12 +1134,40 @@ export async function runStoryGeneration(options: StoryRunOptions) {
   if (!options.baseUrl || !options.model) throw new Error("需要配置 baseUrl 和 model");
   const engagementBrief = loadStoryEngagementBrief(options.databasePath, options.interest, options.examId);
   options.log(engagementBrief);
-  const plan = await generatePlan(options, engagementBrief);
-  options.log(`系列策划完成：${plan.seriesTitle}`);
-  reportProgress(options, "drafting", `故事方案《${plan.seriesTitle}》已完成，正在生成第 1 集初稿`, 20);
-  const generated: GeneratedStoryEpisode[] = [];
-  const qualities: StoryQuality[] = [];
-  let previousEpisode: GeneratedStoryEpisode | null = null;
+  let restored = parseStoryGenerationCheckpoint(options.checkpoint);
+  if (restored) {
+    try {
+      validateSeriesPlan(restored.plan, options.episodes);
+      if (restored.episodes.length > options.episodes) throw new Error("检查点章节数超过任务集数");
+    } catch (error) {
+      options.log(`检查点无法继续，将重新生成：${error instanceof Error ? error.message : "内容不合法"}`);
+      restored = null;
+    }
+  }
+  const plan = restored?.plan ?? await generatePlan(options, engagementBrief);
+  const generated: GeneratedStoryEpisode[] = restored?.episodes.map((item) => item.episode) ?? [];
+  const qualities: StoryQuality[] = restored?.episodes.map((item) => item.quality) ?? [];
+  let previousEpisode: GeneratedStoryEpisode | null = generated.at(-1) ?? null;
+  if (restored) {
+    const nextEpisode = generated.length + 1;
+    options.log(`已从检查点恢复《${plan.seriesTitle}》和 ${generated.length} 集成稿。`);
+    reportProgress(
+      options,
+      generated.length >= options.episodes ? "saving" : "drafting",
+      generated.length >= options.episodes
+        ? `已恢复全部 ${options.episodes} 集，正在保存到故事书架`
+        : generated.length
+          ? `已恢复前 ${generated.length} 集，正在从第 ${nextEpisode} 集继续`
+          : `已恢复故事方案《${plan.seriesTitle}》，正在生成第 1 集初稿`,
+      generated.length >= options.episodes
+        ? 94
+        : episodeProgress(options, generated.length, 0),
+    );
+  } else {
+    options.log(`系列策划完成：${plan.seriesTitle}`);
+    options.onCheckpoint?.({ version: 1, plan, episodes: [] });
+    reportProgress(options, "drafting", `故事方案《${plan.seriesTitle}》已完成，正在生成第 1 集初稿`, 20);
+  }
   const dictionary = openEcdict(options.ecdictPath);
   if (!dictionary) options.log(`未找到 ECDICT，跳过词频覆盖率检测：${options.ecdictPath}`);
   const lexical = dictionary
@@ -1123,7 +1178,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       }
     : undefined;
   try {
-    for (let index = 0; index < options.episodes; index++) {
+    for (let index = generated.length; index < options.episodes; index++) {
       let episode = await generateEpisode(options, plan, index, previousEpisode);
       let quality = assessStoryQuality(episode, options, index + 1, lexical);
       for (let repairAttempt = 1; repairAttempt <= 3 && !meetsQualityTarget(quality, options.minLexicalCoverage); repairAttempt++) {
@@ -1151,6 +1206,14 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       generated.push(episode);
       qualities.push(quality);
       previousEpisode = episode;
+      options.onCheckpoint?.({
+        version: 1,
+        plan,
+        episodes: generated.map((savedEpisode, savedIndex) => ({
+          episode: savedEpisode,
+          quality: qualities[savedIndex],
+        })),
+      });
       reportProgress(
         options,
         index + 1 === options.episodes ? "saving" : "drafting",

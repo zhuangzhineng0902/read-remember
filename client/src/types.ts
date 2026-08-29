@@ -242,6 +242,8 @@ export type CustomStory = CustomStoryInput & {
   progressStage: CustomStoryProgressStage;
   progressMessage: string;
   progressPercent: number;
+  completedEpisodeCount: number;
+  resumeAvailable: boolean;
   seriesTitle: string;
   errorMessage: string;
   createdAt: string;

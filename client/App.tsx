@@ -1887,6 +1887,9 @@ function CreateStoryScreen({
               </View>
             </View>
           )}
+          {story.status === "failed" && story.resumeAvailable && (
+            <Text style={styles.storyResumeHint}>↻ {story.progressMessage}</Text>
+          )}
           {story.status === "failed" && (
             <View style={styles.storyFailureRow}>
               <Text style={[styles.storyError, styles.flexOne]}>{story.errorMessage || "生成失败，请稍后重新提交。"}</Text>
@@ -8361,6 +8364,7 @@ const styles = StyleSheet.create({
   storyProgressPercent: { color: colors.primary, fontSize: 10, fontWeight: "900" },
   storyProgressTrack: { height: 5, borderRadius: radius.pill, backgroundColor: "#DCEAE6", overflow: "hidden", marginTop: 9 },
   storyProgressFill: { height: "100%", borderRadius: radius.pill, backgroundColor: colors.primary },
+  storyResumeHint: { color: colors.primaryDark, fontSize: 11, lineHeight: 17, fontWeight: "700", marginTop: 12 },
   storyError: { color: "#A8443D", fontSize: 11, lineHeight: 17, marginTop: 12 },
   storyFailureRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   storyRetryButton: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 11, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.primarySoft, marginTop: 12 },

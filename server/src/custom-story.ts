@@ -1,7 +1,9 @@
 import type { AppDatabase } from "./database";
 import {
+  parseStoryGenerationCheckpoint,
   runStoryGeneration,
   type ReaderStageId,
+  type StoryGenerationCheckpoint,
   type StoryGenerationProgress,
   type StoryRunOptions,
 } from "../scripts/generate-story-series";
@@ -17,6 +19,8 @@ type CustomStoryRequestRow = {
   tone: string;
   episodeCount: number;
   readerStage: ReaderStageId;
+  checkpointJson: string;
+  checkpointEpisodeCount: number;
 };
 
 export type CustomStoryProvider = {
@@ -71,7 +75,9 @@ export class CustomStoryService implements CustomStoryProvider {
       .prepare(
         `SELECT id, user_id AS userId, exam_id AS examId, idea, characters,
           keywords_json AS keywordsJson, plot_notes AS plotNotes, tone,
-          episode_count AS episodeCount, reader_stage AS readerStage
+          episode_count AS episodeCount, reader_stage AS readerStage,
+          checkpoint_json AS checkpointJson,
+          checkpoint_episode_count AS checkpointEpisodeCount
          FROM custom_story_requests WHERE id = ?`,
       )
       .get(requestId) as CustomStoryRequestRow | undefined;
@@ -80,12 +86,22 @@ export class CustomStoryService implements CustomStoryProvider {
   private async generate(requestId: string) {
     const request = this.request(requestId);
     if (!request) return;
+    const checkpoint = this.parseCheckpoint(request.checkpointJson);
     this.db.prepare(
       `UPDATE custom_story_requests SET status = 'generating',
-       error_message = '', progress_stage = 'planning',
-       progress_message = '正在准备故事创作', progress_percent = 1,
+       error_message = '', progress_stage = ?, progress_message = ?,
+       progress_percent = ?,
        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-    ).run(requestId);
+    ).run(
+      checkpoint ? "drafting" : "planning",
+      checkpoint
+        ? request.checkpointEpisodeCount
+          ? `正在从第 ${request.checkpointEpisodeCount + 1} 集继续创作`
+          : "正在从已保存的故事方案继续创作"
+        : "正在准备故事创作",
+      checkpoint ? Math.round(20 + (request.checkpointEpisodeCount / request.episodeCount) * 74) : 1,
+      requestId,
+    );
     const keywords = JSON.parse(request.keywordsJson) as string[];
     const notes = [
       `用户的故事构想：${request.idea}`,
@@ -109,8 +125,10 @@ export class CustomStoryService implements CustomStoryProvider {
         importNamespace: `custom-${request.id}`,
         dryRun: false,
         force: false,
+        checkpoint,
         log: (message) => console.log(`[custom-story:${request.id}] ${message}`),
         onProgress: (progress) => this.saveProgress(request.id, progress),
+        onCheckpoint: (saved) => this.saveCheckpoint(request.id, saved),
       });
       if (!result.articleIds.length) throw new Error("生成结果中没有可用章节");
       const updateArticle = this.db.prepare(
@@ -128,7 +146,7 @@ export class CustomStoryService implements CustomStoryProvider {
           `UPDATE custom_story_requests SET status = 'completed', series_title = ?,
            article_ids_json = ?, completed_at = CURRENT_TIMESTAMP,
            progress_stage = 'completed', progress_message = '故事已完成，可以开始阅读',
-           progress_percent = 100,
+           progress_percent = 100, checkpoint_json = '', checkpoint_episode_count = 0,
            updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         ).run(result.seriesTitle, JSON.stringify(result.articleIds), request.id);
         this.db.exec("COMMIT");
@@ -137,12 +155,23 @@ export class CustomStoryService implements CustomStoryProvider {
         throw error;
       }
     } catch (error) {
+      const saved = this.db.prepare(
+        `SELECT checkpoint_json AS checkpointJson,
+          checkpoint_episode_count AS checkpointEpisodeCount
+         FROM custom_story_requests WHERE id = ?`,
+      ).get(request.id) as { checkpointJson: string; checkpointEpisodeCount: number } | undefined;
+      const resumeMessage = saved?.checkpointJson
+        ? saved.checkpointEpisodeCount
+          ? `已保存前 ${saved.checkpointEpisodeCount} 集，重试后将从第 ${saved.checkpointEpisodeCount + 1} 集继续`
+          : "故事方案已保存，重试后将从第一集继续"
+        : "生成遇到问题，可以重新尝试";
       this.db.prepare(
         `UPDATE custom_story_requests SET status = 'failed', error_message = ?,
-         progress_stage = 'failed', progress_message = '生成遇到问题，可以重新尝试',
+         progress_stage = 'failed', progress_message = ?,
          updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
       ).run(
         error instanceof Error ? error.message.slice(0, 1000) : "故事生成失败",
+        resumeMessage,
         request.id,
       );
     }
@@ -155,5 +184,28 @@ export class CustomStoryService implements CustomStoryProvider {
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ? AND status = 'generating'`,
     ).run(progress.stage, progress.message, progress.percent, requestId);
+  }
+
+  private saveCheckpoint(requestId: string, checkpoint: StoryGenerationCheckpoint) {
+    this.db.prepare(
+      `UPDATE custom_story_requests
+       SET checkpoint_json = ?, checkpoint_episode_count = ?, series_title = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'generating'`,
+    ).run(
+      JSON.stringify(checkpoint),
+      checkpoint.episodes.length,
+      checkpoint.plan.seriesTitle,
+      requestId,
+    );
+  }
+
+  private parseCheckpoint(value: string) {
+    if (!value) return null;
+    try {
+      return parseStoryGenerationCheckpoint(JSON.parse(value));
+    } catch {
+      return null;
+    }
   }
 }

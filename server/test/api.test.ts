@@ -399,6 +399,8 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(story.progressStage, "queued");
   assert.equal(story.progressMessage, "等待开始创作");
   assert.equal(story.progressPercent, 0);
+  assert.equal(story.completedEpisodeCount, 0);
+  assert.equal(story.resumeAvailable, false);
   assert.equal(story.episodeCount, 3);
   assert.deepEqual(story.keywords, ["星图", "机关", "猫"]);
   assert.deepEqual(enqueuedCustomStories, [story.id]);

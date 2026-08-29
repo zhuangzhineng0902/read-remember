@@ -5,8 +5,10 @@ import {
   buildSeriesPlanPrompt,
   loadStoryEngagementBrief,
   parseJson,
+  parseStoryGenerationCheckpoint,
   passesStoryQualityFloor,
   resolveReaderProfile,
+  storyGenerationCheckpointSchema,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
   type SeriesPlan,
@@ -137,12 +139,12 @@ const validPlan: SeriesPlan = {
     characterArcs: [
       { name: "Mia", wants: "独自解谜", fear: "判断错误", voice: "先描述证据", growth: "学会及时分享不完整的发现" },
       { name: "Ben", wants: "马上修好机器", fear: "失去作用", voice: "短句并提出行动", growth: "学会先检查再动手" },
-      { name: "Pip", wants: "证明问题有趣", fear: "被忽视", voice: "用轻松问题推进思考", growth: "把玩笑变成有用观察" },
+      { name: "Pip", wants: "证明问题有趣", fear: "害怕被忽视", voice: "用轻松问题推进思考", growth: "把玩笑变成有用观察" },
     ],
   },
   clueLedger: [
     { id: "C1", clue: "铜屑在北门", introducedIn: 1, misdirection: "像是钥匙损坏", usedIn: 1, payoffIn: 2, payoff: "铜屑来自潮位齿轮" },
-    { id: "C2", clue: "广播慢一分钟", introducedIn: 1, misdirection: "像是播音员失误", usedIn: 2, payoffIn: 2, payoff: "广播连接主时钟" },
+    { id: "C2", clue: "广播慢一分钟", introducedIn: 1, misdirection: "像是播音员失误", usedIn: 2, payoffIn: 2, payoff: "广播系统连接着港口主时钟" },
   ],
   episodes: [1, 2].map((number) => ({
     number,
@@ -207,6 +209,22 @@ test("story quality measures actual frequency coverage", () => {
   );
   assert.equal(qualityWithNewWord.lexicalCoverage, 1);
   assert.deepEqual(qualityWithNewWord.unfamiliarWords, []);
+
+  const checkpointValue = {
+    version: 1,
+    plan: validPlan,
+    episodes: [{ episode, quality: qualityWithNewWord }],
+  } as const;
+  const checkpointResult = storyGenerationCheckpointSchema.safeParse(checkpointValue);
+  assert.equal(
+    checkpointResult.success,
+    true,
+    checkpointResult.success ? "" : JSON.stringify(checkpointResult.error.issues),
+  );
+  const checkpoint = parseStoryGenerationCheckpoint(checkpointValue);
+  assert.equal(checkpoint?.plan.seriesTitle, validPlan.seriesTitle);
+  assert.equal(checkpoint?.episodes.length, 1);
+  assert.equal(parseStoryGenerationCheckpoint({ version: 2 }), null);
 });
 
 test("story quality keeps 95 percent as a target but publishes above the 90 percent floor", () => {
