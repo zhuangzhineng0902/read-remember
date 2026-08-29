@@ -870,6 +870,8 @@ export function createApp(
     keywords_json AS keywordsJson, plot_notes AS plotNotes, tone,
     episode_count AS episodeCount, reader_stage AS readerStage,
     series_title AS seriesTitle, error_message AS errorMessage,
+    progress_stage AS progressStage, progress_message AS progressMessage,
+    progress_percent AS progressPercent,
     created_at AS createdAt, updated_at AS updatedAt, completed_at AS completedAt
   `;
   type CustomStoryRow = {
@@ -886,6 +888,9 @@ export function createApp(
     readerStage: string;
     seriesTitle: string;
     errorMessage: string;
+    progressStage: string;
+    progressMessage: string;
+    progressPercent: number;
     createdAt: string;
     updatedAt: string;
     completedAt: string | null;
@@ -915,6 +920,9 @@ export function createApp(
       readerStage: row.readerStage,
       seriesTitle: row.seriesTitle,
       errorMessage: row.errorMessage,
+      progressStage: row.progressStage,
+      progressMessage: row.progressMessage,
+      progressPercent: row.progressPercent,
       createdAt: sqliteTimestampToIso(row.createdAt),
       updatedAt: sqliteTimestampToIso(row.updatedAt),
       completedAt: row.completedAt ? sqliteTimestampToIso(row.completedAt) : null,
@@ -965,6 +973,8 @@ export function createApp(
     }
     db.prepare(
       `UPDATE custom_story_requests SET status = 'queued', error_message = '',
+       progress_stage = 'queued', progress_message = '等待重新开始创作',
+       progress_percent = 0,
        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
     ).run(row.id);
     customStories.enqueue(row.id);

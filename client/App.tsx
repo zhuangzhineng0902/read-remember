@@ -1869,6 +1869,24 @@ function CreateStoryScreen({
               <Text style={styles.storyStatusText}>{story.status === "queued" ? "排队中" : story.status === "generating" ? "创作中" : story.status === "completed" ? "已完成" : "失败"}</Text>
             </View>
           </View>
+          {(story.status === "queued" || story.status === "generating") && (
+            <View style={styles.storyProgressBlock}>
+              <View style={styles.storyProgressHeading}>
+                <Text style={styles.storyProgressMessage}>
+                  {story.progressMessage || (story.status === "queued" ? "等待开始创作" : "故事工坊正在创作中")}
+                </Text>
+                <Text style={styles.storyProgressPercent}>{Math.max(0, Math.min(100, story.progressPercent || 0))}%</Text>
+              </View>
+              <View style={styles.storyProgressTrack}>
+                <View
+                  style={[
+                    styles.storyProgressFill,
+                    { width: `${Math.max(2, Math.min(100, story.progressPercent || 0))}%` as `${number}%` },
+                  ]}
+                />
+              </View>
+            </View>
+          )}
           {story.status === "failed" && (
             <View style={styles.storyFailureRow}>
               <Text style={[styles.storyError, styles.flexOne]}>{story.errorMessage || "生成失败，请稍后重新提交。"}</Text>
@@ -2065,7 +2083,7 @@ function TodayScreen({
                     <Text numberOfLines={1} style={styles.customHomeMeta}>
                       {activeArticle
                         ? `第 ${activeArticle.episodeNumber} 章 · ${activeArticle.title}`
-                        : story.status === "queued" ? "灵感已排队，等待开始创作" : "故事工坊正在创作中"}
+                        : story.progressMessage || (story.status === "queued" ? "灵感已排队，等待开始创作" : "故事工坊正在创作中")}
                     </Text>
                   </View>
                   {activeArticle ? <ChevronRight size={18} color={colors.primary} /> : <ActivityIndicator size="small" color={colors.primary} />}
@@ -8337,6 +8355,12 @@ const styles = StyleSheet.create({
   storyStatusDone: { backgroundColor: "#E6F5E8" },
   storyStatusFailed: { backgroundColor: "#FBE9E8" },
   storyStatusText: { color: colors.primaryDark, fontSize: 10, fontWeight: "800" },
+  storyProgressBlock: { marginTop: 13, padding: 11, borderRadius: 13, backgroundColor: "#F2F7F5" },
+  storyProgressHeading: { flexDirection: "row", alignItems: "center", gap: 10 },
+  storyProgressMessage: { flex: 1, color: colors.ink, fontSize: 11, lineHeight: 17, fontWeight: "700" },
+  storyProgressPercent: { color: colors.primary, fontSize: 10, fontWeight: "900" },
+  storyProgressTrack: { height: 5, borderRadius: radius.pill, backgroundColor: "#DCEAE6", overflow: "hidden", marginTop: 9 },
+  storyProgressFill: { height: "100%", borderRadius: radius.pill, backgroundColor: colors.primary },
   storyError: { color: "#A8443D", fontSize: 11, lineHeight: 17, marginTop: 12 },
   storyFailureRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   storyRetryButton: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 11, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.primarySoft, marginTop: 12 },

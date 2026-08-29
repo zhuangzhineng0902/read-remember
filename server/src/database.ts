@@ -133,6 +133,9 @@ export function createDatabase(filename: string): AppDatabase {
       series_title TEXT NOT NULL DEFAULT '',
       article_ids_json TEXT NOT NULL DEFAULT '[]',
       error_message TEXT NOT NULL DEFAULT '',
+      progress_stage TEXT NOT NULL DEFAULT 'queued',
+      progress_message TEXT NOT NULL DEFAULT '等待开始创作',
+      progress_percent INTEGER NOT NULL DEFAULT 0 CHECK(progress_percent BETWEEN 0 AND 100),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       completed_at TEXT
@@ -414,6 +417,17 @@ export function createDatabase(filename: string): AppDatabase {
   ensureColumn("interest_categories", "built_in", "built_in INTEGER NOT NULL DEFAULT 0");
   ensureColumn("interest_categories", "active", "active INTEGER NOT NULL DEFAULT 1");
   ensureColumn("interest_categories", "sort_order", "sort_order INTEGER NOT NULL DEFAULT 1000");
+  ensureColumn("custom_story_requests", "progress_stage", "progress_stage TEXT NOT NULL DEFAULT 'queued'");
+  ensureColumn(
+    "custom_story_requests",
+    "progress_message",
+    "progress_message TEXT NOT NULL DEFAULT '等待开始创作'",
+  );
+  ensureColumn(
+    "custom_story_requests",
+    "progress_percent",
+    "progress_percent INTEGER NOT NULL DEFAULT 0",
+  );
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_articles_interest
     ON articles(content_kind, interest_id, exam_id);

@@ -396,6 +396,9 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(created.status, 202);
   const story = (await created.json()).data;
   assert.equal(story.status, "queued");
+  assert.equal(story.progressStage, "queued");
+  assert.equal(story.progressMessage, "等待开始创作");
+  assert.equal(story.progressPercent, 0);
   assert.equal(story.episodeCount, 3);
   assert.deepEqual(story.keywords, ["星图", "机关", "猫"]);
   assert.deepEqual(enqueuedCustomStories, [story.id]);
@@ -421,7 +424,10 @@ test("registered users can queue and inspect a private custom story", async () =
     method: "POST",
   });
   assert.equal(retried.status, 202);
-  assert.equal((await retried.json()).data.status, "queued");
+  const retriedStory = (await retried.json()).data;
+  assert.equal(retriedStory.status, "queued");
+  assert.equal(retriedStory.progressMessage, "等待重新开始创作");
+  assert.equal(retriedStory.progressPercent, 0);
   assert.deepEqual(enqueuedCustomStories, [story.id, story.id]);
 });
 

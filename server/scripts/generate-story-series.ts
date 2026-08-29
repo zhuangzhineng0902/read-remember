@@ -302,6 +302,25 @@ export type GeneratedStoryEpisode = z.infer<typeof episodeSchema>;
 
 type StoryConfigFile = Partial<StoryRunOptions>;
 
+export type StoryGenerationProgressStage =
+  | "queued"
+  | "planning"
+  | "selecting_plan"
+  | "drafting"
+  | "reviewing"
+  | "editing"
+  | "quality_check"
+  | "repairing"
+  | "saving"
+  | "completed"
+  | "failed";
+
+export type StoryGenerationProgress = {
+  stage: StoryGenerationProgressStage;
+  message: string;
+  percent: number;
+};
+
 export type StoryRunOptions = {
   databasePath: string;
   ecdictPath: string;
@@ -334,6 +353,7 @@ export type StoryRunOptions = {
   dryRun: boolean;
   force: boolean;
   log: (message: string) => void;
+  onProgress?: (progress: StoryGenerationProgress) => void;
 };
 
 export type StoryQuality = {
@@ -347,6 +367,23 @@ export type StoryQuality = {
 
 export type LexicalRankLookup = (word: string) => number | null;
 export type LexicalFamiliarityLookup = (word: string) => boolean;
+
+function reportProgress(
+  options: StoryRunOptions,
+  stage: StoryGenerationProgressStage,
+  message: string,
+  percent: number,
+) {
+  options.onProgress?.({
+    stage,
+    message,
+    percent: Math.max(0, Math.min(100, Math.round(percent))),
+  });
+}
+
+function episodeProgress(options: StoryRunOptions, index: number, fraction: number) {
+  return 20 + ((index + fraction) / options.episodes) * 74;
+}
 
 const examGuide: Record<
   ExamId,
@@ -929,6 +966,12 @@ export function loadStoryEngagementBrief(
 
 async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
   const basePrompt = `${buildSeriesPlanPrompt(options)}\n\n真实使用反馈（仅供策划）：${engagementBrief}`;
+  reportProgress(
+    options,
+    "planning",
+    `正在生成 ${options.planCandidates} 套候选故事方案`,
+    4,
+  );
   options.log(`正在并行生成 ${options.planCandidates} 套候选季纲…`);
   const candidates = await Promise.all(
     Array.from({ length: options.planCandidates }, async (_, index) => {
@@ -941,6 +984,7 @@ async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
       return validateSeriesPlan(value, options.episodes);
     }),
   );
+  reportProgress(options, "selecting_plan", "候选方案已完成，正在选择最终故事主线", 14);
   const selection = await callStructured(
     options,
     planSchema,
@@ -958,11 +1002,24 @@ async function generateEpisode(
   index: number,
   previousEpisode: GeneratedStoryEpisode | null,
 ) {
+  const episodeNumber = index + 1;
+  reportProgress(
+    options,
+    "drafting",
+    `正在生成第 ${episodeNumber}/${options.episodes} 集初稿`,
+    episodeProgress(options, index, 0),
+  );
   const draft = await callStructured(
     options,
     episodeSchema,
     "你只输出合法 JSON。你是擅长悬念、幽默、伙伴感与分级英语的儿童故事作家。",
     episodePrompt(options, plan, index, previousEpisode),
+  );
+  reportProgress(
+    options,
+    "reviewing",
+    `第 ${episodeNumber} 集初稿已完成，正在质量评审`,
+    episodeProgress(options, index, 0.3),
   );
   const critique = await callStructured(
     options,
@@ -972,6 +1029,12 @@ async function generateEpisode(
     options.reviewModel || options.model,
     options.reviewTemperature,
   );
+  reportProgress(
+    options,
+    "editing",
+    `第 ${episodeNumber} 集质量评审已完成，正在编辑润色`,
+    episodeProgress(options, index, 0.55),
+  );
   const reviewed = await callStructured(
     options,
     episodeSchema,
@@ -979,6 +1042,12 @@ async function generateEpisode(
     reviewPrompt(options, plan, draft, critique, index + 1, previousEpisode),
     options.reviewModel || options.model,
     options.reviewTemperature,
+  );
+  reportProgress(
+    options,
+    "quality_check",
+    `第 ${episodeNumber} 集编辑稿已完成，正在自动质量检查`,
+    episodeProgress(options, index, 0.8),
   );
   return reviewed;
 }
@@ -1040,6 +1109,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
   options.log(engagementBrief);
   const plan = await generatePlan(options, engagementBrief);
   options.log(`系列策划完成：${plan.seriesTitle}`);
+  reportProgress(options, "drafting", `故事方案《${plan.seriesTitle}》已完成，正在生成第 1 集初稿`, 20);
   const generated: GeneratedStoryEpisode[] = [];
   const qualities: StoryQuality[] = [];
   let previousEpisode: GeneratedStoryEpisode | null = null;
@@ -1057,6 +1127,12 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       let episode = await generateEpisode(options, plan, index, previousEpisode);
       let quality = assessStoryQuality(episode, options, index + 1, lexical);
       for (let repairAttempt = 1; repairAttempt <= 3 && !meetsQualityTarget(quality, options.minLexicalCoverage); repairAttempt++) {
+        reportProgress(
+          options,
+          "repairing",
+          `第 ${index + 1} 集正在进行第 ${repairAttempt}/3 次定向修稿`,
+          episodeProgress(options, index, 0.88),
+        );
         options.log(
           `[${index + 1}/${options.episodes}] 自动质量门禁触发，进行第 ${repairAttempt}/3 次定向修稿：${quality.issues.join("；")}`,
         );
@@ -1075,6 +1151,14 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       generated.push(episode);
       qualities.push(quality);
       previousEpisode = episode;
+      reportProgress(
+        options,
+        index + 1 === options.episodes ? "saving" : "drafting",
+        index + 1 === options.episodes
+          ? "全部章节已完成，正在保存到故事书架"
+          : `第 ${index + 1}/${options.episodes} 集已完成，准备生成下一集`,
+        episodeProgress(options, index, 1),
+      );
       const coverage = quality.lexicalCoverage === null ? "未检测词频" : `高频词覆盖 ${(quality.lexicalCoverage * 100).toFixed(1)}%`;
       options.log(`[${index + 1}/${options.episodes}] ${episode.title} · ${quality.wordCount} 词 · ${coverage} · 质量 ${quality.score}`);
     }
@@ -1083,6 +1167,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
   }
 
   const db = createDatabase(options.databasePath);
+  reportProgress(options, "saving", "正在保存文章并解锁第一集", 96);
   try {
     const guide = storyGuideFor(options);
     if (!storyInterestIds.includes(options.interest as (typeof storyInterestIds)[number])) {

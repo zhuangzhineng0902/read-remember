@@ -212,6 +212,19 @@ export type CustomStoryReaderStage =
   | "stage5"
   | "stage6";
 
+export type CustomStoryProgressStage =
+  | "queued"
+  | "planning"
+  | "selecting_plan"
+  | "drafting"
+  | "reviewing"
+  | "editing"
+  | "quality_check"
+  | "repairing"
+  | "saving"
+  | "completed"
+  | "failed";
+
 export type CustomStoryInput = {
   idea: string;
   characters: string;
@@ -226,6 +239,9 @@ export type CustomStory = CustomStoryInput & {
   id: string;
   examId: ExamId;
   status: "queued" | "generating" | "completed" | "failed";
+  progressStage: CustomStoryProgressStage;
+  progressMessage: string;
+  progressPercent: number;
   seriesTitle: string;
   errorMessage: string;
   createdAt: string;

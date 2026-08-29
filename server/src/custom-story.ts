@@ -2,6 +2,7 @@ import type { AppDatabase } from "./database";
 import {
   runStoryGeneration,
   type ReaderStageId,
+  type StoryGenerationProgress,
   type StoryRunOptions,
 } from "../scripts/generate-story-series";
 
@@ -53,6 +54,7 @@ export class CustomStoryService implements CustomStoryProvider {
       .all() as Array<{ id: string }>;
     this.db.prepare(
       `UPDATE custom_story_requests SET status = 'queued',
+       progress_stage = 'queued', progress_message = '服务已重启，等待继续创作',
        updated_at = CURRENT_TIMESTAMP WHERE status = 'generating'`,
     ).run();
     for (const row of rows) this.enqueue(row.id);
@@ -80,7 +82,9 @@ export class CustomStoryService implements CustomStoryProvider {
     if (!request) return;
     this.db.prepare(
       `UPDATE custom_story_requests SET status = 'generating',
-       error_message = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+       error_message = '', progress_stage = 'planning',
+       progress_message = '正在准备故事创作', progress_percent = 1,
+       updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
     ).run(requestId);
     const keywords = JSON.parse(request.keywordsJson) as string[];
     const notes = [
@@ -106,6 +110,7 @@ export class CustomStoryService implements CustomStoryProvider {
         dryRun: false,
         force: false,
         log: (message) => console.log(`[custom-story:${request.id}] ${message}`),
+        onProgress: (progress) => this.saveProgress(request.id, progress),
       });
       if (!result.articleIds.length) throw new Error("生成结果中没有可用章节");
       const updateArticle = this.db.prepare(
@@ -122,6 +127,8 @@ export class CustomStoryService implements CustomStoryProvider {
         this.db.prepare(
           `UPDATE custom_story_requests SET status = 'completed', series_title = ?,
            article_ids_json = ?, completed_at = CURRENT_TIMESTAMP,
+           progress_stage = 'completed', progress_message = '故事已完成，可以开始阅读',
+           progress_percent = 100,
            updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         ).run(result.seriesTitle, JSON.stringify(result.articleIds), request.id);
         this.db.exec("COMMIT");
@@ -132,11 +139,21 @@ export class CustomStoryService implements CustomStoryProvider {
     } catch (error) {
       this.db.prepare(
         `UPDATE custom_story_requests SET status = 'failed', error_message = ?,
+         progress_stage = 'failed', progress_message = '生成遇到问题，可以重新尝试',
          updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
       ).run(
         error instanceof Error ? error.message.slice(0, 1000) : "故事生成失败",
         request.id,
       );
     }
+  }
+
+  private saveProgress(requestId: string, progress: StoryGenerationProgress) {
+    this.db.prepare(
+      `UPDATE custom_story_requests
+       SET progress_stage = ?, progress_message = ?, progress_percent = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'generating'`,
+    ).run(progress.stage, progress.message, progress.percent, requestId);
   }
 }
