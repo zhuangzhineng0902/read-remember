@@ -7,12 +7,14 @@ import {
   assessStoryQuality,
   buildSeriesPlanPrompt,
   loadStoryEngagementBrief,
+  normalizeTargetWords,
   parseJson,
   parseStoryGenerationCheckpoint,
   passesStoryQualityFloor,
   resolveReaderProfile,
   runStoryGeneration,
   storyGenerationCheckpointSchema,
+  structuredJsonValues,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
   type SeriesPlan,
@@ -381,5 +383,60 @@ test("model JSON parser repairs the real object after an invalid regex fragment"
   assert.deepEqual(
     parseJson("格式示例 [a-z]。结果：{'title':'Bao','targetWords':['sky','gate',],}"),
     { title: "Bao", targetWords: ["sky", "gate"] },
+  );
+});
+
+test("structured JSON parser unwraps arrays and common response envelopes", () => {
+  const arrayValues = structuredJsonValues('[{"title":"Episode One","paragraphs":[]}]');
+  assert.equal(
+    arrayValues.some(
+      (value) => !Array.isArray(value) && typeof value === "object" && value !== null
+        && (value as { title?: string }).title === "Episode One",
+    ),
+    true,
+  );
+  const wrappedValues = structuredJsonValues(
+    '{"data":[{"title":"Episode Two","paragraphs":[]}]}',
+  );
+  assert.equal(
+    wrappedValues.some(
+      (value) => !Array.isArray(value) && typeof value === "object" && value !== null
+        && (value as { title?: string }).title === "Episode Two",
+    ),
+    true,
+  );
+  const splitObjectValues = structuredJsonValues(
+    '[{"title":"Episode Three"},{"paragraphs":["one","two","three"]}]',
+  );
+  assert.equal(
+    splitObjectValues.some(
+      (value) => !Array.isArray(value) && typeof value === "object" && value !== null
+        && (value as { title?: string; paragraphs?: string[] }).title === "Episode Three"
+        && (value as { paragraphs?: string[] }).paragraphs?.length === 3,
+    ),
+    true,
+  );
+  const stringValues = structuredJsonValues(
+    '["{\\"title\\":\\"Episode Four\\",\\"paragraphs\\":[]}"]',
+  );
+  assert.equal(
+    stringValues.some(
+      (value) => !Array.isArray(value) && typeof value === "object" && value !== null
+        && (value as { title?: string }).title === "Episode Four",
+    ),
+    true,
+  );
+});
+
+test("target word normalization accepts model labels and explanations", () => {
+  assert.deepEqual(
+    normalizeTargetWords([
+      "1. energy blade（能量刃）",
+      "to rush - 冲过去",
+      { word: "GLOW: to shine softly" },
+      "teamwork",
+      "[a-z]",
+    ]),
+    ["blade", "rush", "glow", "teamwork"],
   );
 });

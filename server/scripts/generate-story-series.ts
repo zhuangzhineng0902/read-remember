@@ -274,10 +274,34 @@ const questionSchema = z.object({
   explanation: z.string().trim().min(4).max(1000),
 });
 
+export function normalizeTargetWords(value: unknown) {
+  if (!Array.isArray(value)) return value;
+  const stopWords = new Set(["a", "an", "the", "to"]);
+  const normalized = value.flatMap((item) => {
+    const raw = typeof item === "string"
+      ? item
+      : item && typeof item === "object"
+        ? String((item as Record<string, unknown>).word ?? (item as Record<string, unknown>).term ?? "")
+        : "";
+    if (!raw || /\[a-z\]/i.test(raw)) return [];
+    const head = raw
+      .replace(/^\s*(?:\d+|[-*])[\s.)、-]*/, "")
+      .split(/[:：=\/(（]|(?:\s+[—–-]\s+)/, 1)[0];
+    const words = head.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? [];
+    const meaningful = words.filter((word) => !stopWords.has(word.toLowerCase()));
+    const selected = meaningful.at(-1) ?? words.at(-1);
+    return selected ? [selected.toLowerCase()] : [];
+  });
+  return [...new Set(normalized)].slice(0, 10);
+}
+
 const episodeSchema = z.object({
   title: z.string().trim().min(3).max(160),
   paragraphs: z.array(z.string().trim().min(30).max(3000)).min(3).max(6),
-  targetWords: z.array(z.string().trim().regex(/^[a-z][a-z'-]*$/i)).min(4).max(10),
+  targetWords: z.preprocess(
+    normalizeTargetWords,
+    z.array(z.string().trim().regex(/^[a-z][a-z'-]*$/i)).min(4).max(10),
+  ),
   continuitySummary: z.string().trim().min(20).max(1200),
   storyState: z.object({
     characterPositions: z.array(z.string().trim().min(4).max(240)).min(1).max(12),
@@ -579,6 +603,83 @@ function parsedJsonValues(value: string) {
   return values;
 }
 
+export function structuredJsonValues(value: string) {
+  const expanded: unknown[] = [];
+  const seen = new Set<string>();
+  const queue = parsedJsonValues(value).map((item) => ({ item, depth: 0 }));
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current) break;
+    let key: string | undefined;
+    try {
+      key = JSON.stringify(current.item);
+    } catch {
+      continue;
+    }
+    if (key === undefined || seen.has(key)) continue;
+    seen.add(key);
+    expanded.push(current.item);
+    if (current.depth >= 3) continue;
+    if (Array.isArray(current.item)) {
+      const array = current.item;
+      if (array.every((item) => typeof item === "string")) {
+        queue.push({ item: array.join(""), depth: current.depth + 1 });
+      }
+      const pairs = array.filter(
+        (item): item is [string, unknown] => Array.isArray(item) && item.length === 2 && typeof item[0] === "string",
+      );
+      if (pairs.length === array.length && pairs.length) {
+        queue.push({ item: Object.fromEntries(pairs), depth: current.depth + 1 });
+      }
+      if (
+        array.length >= 2
+        && array.length % 2 === 0
+        && array.every((item, index) => index % 2 === 1 || typeof item === "string")
+      ) {
+        const flatPairs = Array.from({ length: array.length / 2 }, (_, index) => [
+          array[index * 2] as string,
+          array[index * 2 + 1],
+        ] as const);
+        queue.push({ item: Object.fromEntries(flatPairs), depth: current.depth + 1 });
+      }
+      const objects = array.filter(
+        (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item),
+      );
+      if (objects.length) {
+        queue.push({ item: Object.assign({}, ...objects), depth: current.depth + 1 });
+        for (const keyName of ["key", "field", "name"] as const) {
+          const keyed = objects.filter(
+            (item) => typeof item[keyName] === "string" && "value" in item,
+          );
+          if (keyed.length === objects.length) {
+            queue.push({
+              item: Object.fromEntries(keyed.map((item) => [item[keyName] as string, item.value])),
+              depth: current.depth + 1,
+            });
+          }
+        }
+      }
+      for (const item of array) queue.push({ item, depth: current.depth + 1 });
+      continue;
+    }
+    if (typeof current.item === "string") {
+      const nested = current.item.trim();
+      if (nested.startsWith("{") || nested.startsWith("[") || nested.startsWith("```")) {
+        for (const item of parsedJsonValues(nested)) {
+          queue.push({ item, depth: current.depth + 1 });
+        }
+      }
+      continue;
+    }
+    if (!current.item || typeof current.item !== "object") continue;
+    const record = current.item as Record<string, unknown>;
+    for (const wrapper of ["data", "result", "output", "response", "content"]) {
+      if (wrapper in record) queue.push({ item: record[wrapper], depth: current.depth + 1 });
+    }
+  }
+  return expanded;
+}
+
 export function parseJson(value: string) {
   const values = parsedJsonValues(value);
   if (values.length) return values[0];
@@ -598,6 +699,16 @@ function jsonParseFailure(value: string) {
       ? `模型返回了 ${candidates.length} 个类似 JSON 的片段，但都无法解析`
       : "模型响应中没有完整 JSON 对象或数组",
   );
+}
+
+function structuredValueShape(value: unknown): string {
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (value === null) return "null";
+  if (typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>);
+    return `object{${keys.slice(0, 8).join(",")}${keys.length > 8 ? ",…" : ""}}`;
+  }
+  return typeof value;
 }
 
 function endpoint(options: StoryRunOptions) {
@@ -651,9 +762,24 @@ async function callStructured<T>(
 ) {
   let prompt = user;
   let lastError: z.ZodError | ModelJsonParseError | null = null;
+  let lastShape = "无候选";
   for (let attempt = 1; attempt <= 4; attempt++) {
-    const content = await callModelText(options, system, prompt, model, temperature);
-    const values = parsedJsonValues(content);
+    const correctionModel = attempt === 1 ? model : options.reviewModel || model;
+    const correctionTemperature = attempt === 1
+      ? temperature
+      : Math.min(temperature, options.reviewTemperature, 0.2);
+    if (attempt === 2 && correctionModel !== model) {
+      options.log(`结构校验未通过，切换到审稿模型 ${correctionModel} 进行格式纠正…`);
+    }
+    const content = await callModelText(
+      options,
+      system,
+      prompt,
+      correctionModel,
+      correctionTemperature,
+    );
+    const values = structuredJsonValues(content);
+    lastShape = values.slice(0, 8).map(structuredValueShape).join(" → ") || "无候选";
     if (!values.length) {
       lastError = jsonParseFailure(content);
       options.log(`模型第 ${attempt} 次返回无法解析，正在要求其重新输出严格 JSON…`);
@@ -664,7 +790,11 @@ async function callStructured<T>(
     const attempts = values.map((value) => ({ value, result: schema.safeParse(value) }));
     const valid = attempts.find((entry) => entry.result.success);
     if (valid?.result.success) return valid.result.data;
-    const closest = attempts.reduce((best, entry) => {
+    const objectAttempts = attempts.filter(
+      (entry) => Boolean(entry.value) && typeof entry.value === "object" && !Array.isArray(entry.value),
+    );
+    const closestPool = objectAttempts.length ? objectAttempts : attempts;
+    const closest = closestPool.reduce((best, entry) => {
       const issueCount = entry.result.success ? 0 : entry.result.error.issues.length;
       const bestIssueCount = best.result.success ? 0 : best.result.error.issues.length;
       return issueCount < bestIssueCount ? entry : best;
@@ -677,9 +807,17 @@ async function callStructured<T>(
       .join("；");
     const previousValue = JSON.stringify(closest.value).slice(0, 16_000);
     options.log(`模型第 ${attempt} 次返回结构不完整，正在携带字段错误自动修正…`);
-    prompt = `${user}\n\n你上一次实际返回的是：\n${previousValue}\n\n结构校验错误：${issues}。请以这份实际返回为基础，补齐并修正所有字段。不要使用省略号或占位值；只返回一份完整合法 JSON。`;
+    const rootReminder = Array.isArray(closest.value)
+      ? "最外层类型错误：第一个非空字符必须是 {，最后一个非空字符必须是 }；禁止用 [ 和 ] 包住结果。"
+      : "最外层必须保持为一个 JSON 对象。";
+    prompt = `${user}\n\n你上一次实际返回的是：\n${previousValue}\n\n结构校验错误：${issues}。${rootReminder} 请以这份实际返回为基础，补齐并修正所有字段。不要使用省略号或占位值；只返回一份完整合法 JSON 对象。`;
   }
-  throw lastError ?? new Error("模型没有返回符合结构的 JSON");
+  if (lastError) {
+    throw new Error(
+      `模型连续 4 次未返回所需对象结构（候选形状：${lastShape}）：${lastError.message}`,
+    );
+  }
+  throw new Error("模型没有返回符合结构的 JSON");
 }
 
 function sourceBrief(
