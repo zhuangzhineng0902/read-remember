@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   assessStoryQuality,
+  buildNarrativeCraftBrief,
   buildSeriesPlanPrompt,
   loadStoryEngagementBrief,
   normalizeTargetWords,
@@ -41,6 +42,22 @@ test("classic story prompt uses a public-domain source and controlled reader sta
   assert.match(prompt, /故事圣经/);
   assert.match(prompt, /线索账本/);
   assert.match(prompt, /目标→阻碍→角色作出艰难选择→产生后果→出现新问题/);
+  assert.match(prompt, /首稿写作技法蓝图/);
+  assert.match(prompt, /不复制原句/);
+});
+
+test("custom stories select public-domain craft references from the submitted theme", () => {
+  const brief = buildNarrativeCraftBrief({
+    interest: "custom-story",
+    sourceMode: "favorite",
+    classicId: "",
+    sourceTitle: "A funny portal adventure",
+    sourceNotes: "穿越到仙侠和机甲世界，伙伴一起破解线索",
+  }, 1);
+  assert.match(brief, /Alice's Adventures in Wonderland/);
+  assert.match(brief, /Treasure Island/);
+  assert.match(brief, /The Early Sherlock Holmes Stories/);
+  assert.match(brief, /感官定位.*人物反应.*可见后果/);
 });
 
 test("favorite story prompt keeps the appeal while requiring new expression", () => {
@@ -188,9 +205,30 @@ function checkpointEpisode(title: string): GeneratedStoryEpisode {
       items: ["Mia 和 Ben 共同保管铜钥匙"],
       relationshipChanges: ["两人开始主动分享观察结果"],
     },
+    qualityEvidence: {
+      idiomaticPhrase: "stood together",
+      sensoryQuote: "heard a strange sound inside",
+      causalLinks: [
+        {
+          causeQuote: "heard a strange sound inside",
+          effectQuote: "They shared the brass key",
+        },
+        {
+          causeQuote: "They shared the brass key",
+          effectQuote: "A new light moved under the floor",
+        },
+      ],
+      clueEvidence: [
+        {
+          clueId: "C1",
+          action: "plant",
+          evidenceQuote: "A new light moved under the floor",
+        },
+      ],
+    },
     questions: [
-      { prompt: "What did the friends share?", options: ["A brass key", "A boat", "A meal", "A map"], answer: 0, explanation: "原文说他们共同使用铜钥匙。" },
-      { prompt: "Why will they continue?", options: ["They saw a moving light", "They lost a book", "They heard music", "They felt tired"], answer: 0, explanation: "地板下移动的光形成了新的问题。" },
+      { prompt: "What did the friends share?", options: ["A brass key", "A boat", "A meal", "A map"], answer: 0, explanation: "原文说他们共同使用铜钥匙。", skill: "detail", evidenceQuote: "They shared the brass key" },
+      { prompt: "Why will they continue?", options: ["They saw a moving light", "They lost a book", "They heard music", "They felt tired"], answer: 0, explanation: "地板下移动的光形成了新的问题。", skill: "inference", evidenceQuote: "A new light moved under the floor" },
     ],
   };
 }
@@ -215,6 +253,7 @@ test("a completed checkpoint skips model calls and imports saved episodes", asyn
     lexicalCoverage: 0.98,
     unfamiliarWords: [],
     issues: [],
+    blockingIssues: [],
   };
   const logs: string[] = [];
   createDatabase(databasePath).close();
@@ -310,9 +349,20 @@ test("story quality measures actual frequency coverage", () => {
       items: ["Ben 拿着工具箱"],
       relationshipChanges: ["Mia 开始主动分享发现"],
     },
+    qualityEvidence: {
+      idiomaticPhrase: "helped together",
+      sensoryQuote: "near the xylophonic gate",
+      causalLinks: [
+        { causeQuote: "The cat and dog", effectQuote: "helped together" },
+        { causeQuote: "helped together", effectQuote: "xylophonic gate" },
+      ],
+      clueEvidence: [
+        { clueId: "C1", action: "plant", evidenceQuote: "near the xylophonic gate" },
+      ],
+    },
     questions: [
-      { prompt: "Where did the team stand?", options: ["Near the gate", "On a boat", "At school", "At home"], answer: 0, explanation: "原文说他们在门边。" },
-      { prompt: "Why did they work together?", options: ["To check the gate", "To cook", "To sleep", "To leave"], answer: 0, explanation: "他们共同检查异常。" },
+      { prompt: "Where did the team stand?", options: ["Near the gate", "On a boat", "At school", "At home"], answer: 0, explanation: "原文说他们在门边。", skill: "detail", evidenceQuote: "near the xylophonic gate" },
+      { prompt: "Why did they work together?", options: ["To check the gate", "To cook", "To sleep", "To leave"], answer: 0, explanation: "他们共同检查异常。", skill: "inference", evidenceQuote: "The cat and dog helped together" },
     ],
   };
   const quality = assessStoryQuality(
@@ -352,6 +402,20 @@ test("story quality measures actual frequency coverage", () => {
   assert.equal(parseStoryGenerationCheckpoint({ version: 2 }), null);
 });
 
+test("story quality blocks mixed Chinese and questions without source evidence", () => {
+  const episode = checkpointEpisode("The Broken Map");
+  episode.paragraphs[0] += " 小心!";
+  episode.questions[1].evidenceQuote = "An old map showed them a hidden tunnel";
+  const quality = assessStoryQuality(
+    episode,
+    { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 },
+    1,
+  );
+  assert.match(quality.blockingIssues.join(" "), /夹杂中文/);
+  assert.match(quality.blockingIssues.join(" "), /第 2 题的原文证据不存在/);
+  assert.equal(passesStoryQualityFloor(quality, 0.95), false);
+});
+
 test("story quality keeps 95 percent as a target but publishes above the 90 percent floor", () => {
   const baseQuality = {
     score: 88,
@@ -360,6 +424,7 @@ test("story quality keeps 95 percent as a target but publishes above the 90 perc
     lexicalCoverage: 0.913,
     unfamiliarWords: ["blade", "dull"],
     issues: ["高频词覆盖率不足"],
+    blockingIssues: [],
   };
   assert.equal(passesStoryQualityFloor(baseQuality, 0.95), true);
   assert.equal(

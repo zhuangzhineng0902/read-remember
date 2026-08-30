@@ -107,6 +107,123 @@ const classicSources: Record<
   },
 };
 
+const publicDomainCraftReferences = {
+  alice: {
+    title: "Alice's Adventures in Wonderland",
+    lessons: [
+      "让陌生世界的规则通过角色亲眼看到的后果显现，不先写大段设定说明",
+      "用一个具体、奇怪但容易想象的细节制造开场疑问",
+      "让幽默来自角色认真应对荒诞规则，而不是旁白解释笑点",
+    ],
+  },
+  "treasure-island": {
+    title: "Treasure Island",
+    lessons: [
+      "先给读者一个普通物件或动作，再让它逐渐显出危险含义",
+      "场景目标清楚：人物知道此刻要找什么、躲开什么、必须在何时前完成",
+      "用可见动作和选择表现信任变化，不直接宣布谁可靠",
+    ],
+  },
+  "secret-garden": {
+    title: "The Secret Garden",
+    lessons: [
+      "用风、泥土、植物气味、温度和细小声音建立空间感",
+      "让环境细节同时反映人物情绪，并成为后续发现的线索",
+      "场景转换前先给人物一个明确原因和身体行动，避免突然跳转",
+    ],
+  },
+  "sherlock-holmes": {
+    title: "The Early Sherlock Holmes Stories",
+    lessons: [
+      "先公平展示可观察线索，再允许人物误判，最后用同一证据解释真相",
+      "把推理拆成观察、猜测、验证三步，读者能跟着人物一起想",
+      "答案不能依赖结尾突然出现的人、物件或背景知识",
+    ],
+  },
+  "wizard-of-oz": {
+    title: "The Wonderful Wizard of Oz",
+    lessons: [
+      "保持旅程目标简单明确，让不同伙伴用互补能力解决同一个障碍",
+      "每个场景先解决一个眼前问题，再自然打开下一段旅程",
+      "角色成长通过行动证明，少用抽象的价值观总结",
+    ],
+  },
+  "tom-sawyer": {
+    title: "The Adventures of Tom Sawyer",
+    lessons: [
+      "笑点来自角色性格、误判和计划产生的实际后果",
+      "儿童角色先行动再反思，但每次冒险必须保留清楚的因果链",
+      "对话要短、带目的，并和说话时的动作交替出现",
+    ],
+  },
+  aesop: {
+    title: "Aesop's Fables",
+    lessons: [
+      "用少量角色和一个核心冲突保持叙事清楚",
+      "选择立刻产生可见后果，让低龄读者无需额外解释也能理解",
+      "不在结尾说教，让人物承受的结果自然表达主题",
+    ],
+  },
+  "around-the-world": {
+    title: "Around the World in Eighty Days",
+    lessons: [
+      "用时间、路线和资源限制保持紧张感，但每一步变化都交代原因",
+      "把较大的旅程拆成可以独立理解的小目标",
+      "反转改变计划但不改变既有规则，使意外仍然合乎逻辑",
+    ],
+  },
+} as const;
+
+type CraftReferenceId = keyof typeof publicDomainCraftReferences;
+
+const interestCraftReferences: Record<string, CraftReferenceId[]> = {
+  military: ["treasure-island", "around-the-world", "sherlock-holmes"],
+  art: ["secret-garden", "alice", "tom-sawyer"],
+  science: ["sherlock-holmes", "around-the-world", "secret-garden"],
+  why: ["sherlock-holmes", "aesop", "secret-garden"],
+  fantasy: ["alice", "wizard-of-oz", "secret-garden"],
+  mecha: ["treasure-island", "wizard-of-oz", "around-the-world"],
+  cultivation: ["wizard-of-oz", "alice", "sherlock-holmes"],
+  tiger: ["tom-sawyer", "aesop", "treasure-island"],
+  cat: ["sherlock-holmes", "secret-garden", "tom-sawyer"],
+  "custom-story": ["alice", "secret-garden", "sherlock-holmes", "wizard-of-oz"],
+};
+
+export function buildNarrativeCraftBrief(
+  options: Pick<StoryRunOptions, "interest" | "sourceMode" | "classicId" | "sourceTitle" | "sourceNotes">,
+  episodeNumber?: number,
+) {
+  const sourceText = `${options.sourceTitle} ${options.sourceNotes}`.toLowerCase();
+  const selected: CraftReferenceId[] = [];
+  const add = (id: CraftReferenceId) => {
+    if (!selected.includes(id)) selected.push(id);
+  };
+  if (options.sourceMode === "classic" && options.classicId in publicDomainCraftReferences) {
+    add(options.classicId as CraftReferenceId);
+  }
+  add("secret-garden");
+  if (/谜|侦探|线索|密码|mystery|detective|clue|code/.test(sourceText)) add("sherlock-holmes");
+  if (/穿越|异世界|魔法|奇幻|仙|fantasy|magic|portal/.test(sourceText)) add("alice");
+  if (/机甲|军事|太空|战术|mecha|space|military/.test(sourceText)) add("treasure-island");
+  if (/幽默|搞笑|逗比|动物|funny|humor|animal/.test(sourceText)) add("tom-sawyer");
+  for (const id of interestCraftReferences[options.interest] ?? interestCraftReferences["custom-story"]) add(id);
+  if (episodeNumber && episodeNumber > 1) add("sherlock-holmes");
+
+  const references = selected.slice(0, 4).map((id) => {
+    const reference = publicDomainCraftReferences[id];
+    return `- 《${reference.title}》可借鉴的技法：${reference.lessons.join("；")}。`;
+  });
+  return `首稿写作技法蓝图（只学习叙事方法，不复制原句、专名、标志性场景或具体情节，也不模仿任何商业分级改写本）：
+${references.join("\n")}
+
+分级读物通用写法：
+- 一个自然段完成一个清楚的小推进：感官定位 → 人物反应 → 目标或选择 → 可见后果。
+- 先用高频具体词写清谁在哪里、想做什么，再加入少量新词；新词通过动作和上下文显义，并保持固定叫法。
+- 对话与动作交替，避免连续台词；场景或说话者变化时重新点明人物名字，减少含混代词。
+- 伏笔第一次出现时像普通细节，第二次改变人物判断，回收时用同一细节解释答案。
+- 首稿完成后先做无声自检：逐段写出“因为 X，所以人物做 Y，结果 Z”；如果写不出，就在输出前重写该段。`;
+}
+
 const readerStages = {
   starter: { label: "Starter", headwords: 250, cefr: "A1", maxNewWords: 4 },
   stage1: { label: "Stage 1", headwords: 400, cefr: "A1-A2", maxNewWords: 5 },
@@ -272,6 +389,22 @@ const questionSchema = z.object({
   options: z.array(z.string().trim().min(1).max(500)).length(4),
   answer: z.number().int().min(0).max(3),
   explanation: z.string().trim().min(4).max(1000),
+  skill: z.enum(["detail", "inference", "cause_effect"]),
+  evidenceQuote: z.string().trim().min(8).max(300),
+});
+
+const qualityEvidenceSchema = z.object({
+  idiomaticPhrase: z.string().trim().min(3).max(100),
+  sensoryQuote: z.string().trim().min(8).max(300),
+  causalLinks: z.array(z.object({
+    causeQuote: z.string().trim().min(8).max(300),
+    effectQuote: z.string().trim().min(8).max(300),
+  })).min(2).max(5),
+  clueEvidence: z.array(z.object({
+    clueId: z.string().trim().regex(/^C\d+$/),
+    action: z.enum(["plant", "use", "payoff"]),
+    evidenceQuote: z.string().trim().min(8).max(300),
+  })).min(1).max(8),
 });
 
 export function normalizeTargetWords(value: unknown) {
@@ -310,6 +443,11 @@ const episodeSchema = z.object({
     items: z.array(z.string().trim().min(2).max(200)).max(16),
     relationshipChanges: z.array(z.string().trim().min(4).max(240)).max(12),
   }),
+  qualityEvidence: qualityEvidenceSchema,
+  questions: z.array(questionSchema).min(2).max(3),
+});
+
+const groundedQuestionSetSchema = z.object({
   questions: z.array(questionSchema).min(2).max(3),
 });
 
@@ -397,6 +535,7 @@ export type StoryQuality = {
   lexicalCoverage: number | null;
   unfamiliarWords: string[];
   issues: string[];
+  blockingIssues: string[];
 };
 
 const storyQualityCheckpointSchema = z.object({
@@ -406,6 +545,7 @@ const storyQualityCheckpointSchema = z.object({
   lexicalCoverage: z.number().min(0).max(1).nullable(),
   unfamiliarWords: z.array(z.string()),
   issues: z.array(z.string()),
+  blockingIssues: z.array(z.string()).default([]),
 });
 
 export const storyGenerationCheckpointSchema = z.object({
@@ -876,6 +1016,7 @@ export function buildSeriesPlanPrompt(
 读者：${level.audience}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
+${buildNarrativeCraftBrief(options)}
 
 硬性质量标准：
 1. 每集开头两句内出现异常事件、具体目标或好笑的麻烦，不做背景说明堆砌。
@@ -885,11 +1026,14 @@ ${gradedReadingBrief(options)}
 5. 每集结尾解决当前小目标，同时留下明确而公平的新悬念，让读者想立刻看下一集。
 6. 整季有主谜题、角色成长和线索回收；笑点来自人物性格，不靠网络热梗。
 7. 严格遵守上面的选材模式：公版名著可忠实简化原作；其余模式不得使用现有影视、动漫、小说或游戏的受保护表达。
+8. 场景不能写成事件清单。每集选一个主要场景，用角色能看到、听到、闻到、尝到或触到的具体细节让空间可感，并用清楚的因果过渡连接行动。
+9. 英文正文和题目必须是自然、地道、适龄的英语，不得夹杂中文。每集自然放入一个从语境可理解的常用英语表达，不堆砌俚语或生硬直译中文。
 
 每套策划还必须完成：
 - 故事圣经：3-8 条不可随意改变的世界规则；固定人物、地点和物件的英文称呼；每位主要角色的欲望、恐惧、说话特征和整季成长。
 - 线索账本：每条线索用 C1、C2……编号，明确在哪一集埋下、误导、使用和回收；埋下不得晚于使用，最后一集前回收主线线索。
 - 每集按“目标→阻碍→角色作出艰难选择→产生后果→出现新问题”构成因果链，不能只罗列事件。
+- 每集最多推进 2-3 个主要事件；人物换地点、获得信息或改变计划时必须写出原因。伏笔先以不起眼但可记住的感官细节出现，后续回收时让读者能回想起原文证据。
 
 只返回一套策划 JSON，不要附加说明：
 {"seriesTitle":"英文系列名","premise":"中文策划说明","cast":[{"name":"英文名","role":"中文角色作用","strength":"优点","flaw":"缺点"}],"seasonMystery":"中文主谜题","storyBible":{"worldRules":["中文"],"fixedTerms":[{"concept":"中文概念","english":"固定英文称呼"}],"characterArcs":[{"name":"英文名","wants":"中文","fear":"中文","voice":"中文","growth":"中文"}]},"clueLedger":[{"id":"C1","clue":"中文","introducedIn":1,"misdirection":"中文","usedIn":2,"payoffIn":3,"payoff":"中文"}],"episodes":[{"number":1,"title":"英文标题","openingHook":"中文","goal":"中文","obstacle":"中文","choice":"中文","consequence":"中文","newQuestion":"中文","problem":"中文","clue":"中文","teamworkTurn":"中文","emotionalBeat":"中文","cliffhanger":"中文"}]}`;
@@ -917,25 +1061,30 @@ function episodePrompt(
 本集必须处理的线索账本：${JSON.stringify(relevantClues)}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
+${buildNarrativeCraftBrief(options, beat.number)}
 
 语言控制：
 - 正文 ${range[0]}-${range[1]} 个英文词，3-5 个自然段。
+- title、paragraphs、题干、选项和原文证据只能使用英语，严禁出现任何中文汉字；中文只允许出现在 continuitySummary、storyState 和 explanation。
 - 面向${level.audience}，优先使用约 ${readerProfile.headwords} 词档的核心高频词；只设置 4-${readerProfile.maxNewWords} 个可从语境猜出的 targetWords。
 - 平均句长不超过约 ${level.maxSentenceWords} 词；关键动作使用短句。
-- 对话简短自然，幽默不影响情节，禁止解释词汇表式写法。
+- 对话简短自然，使用英语母语者在该场景中会说的表达；自然加入一个适龄常用表达（例如请求、犹豫、安慰或承认错误），通过上下文让意思清楚，禁止堆砌俚语或直译中文成语。
 - 不为追求“文学感”频繁替换同义词；相同事物尽量沿用相同称呼，让孩子凭上下文建立词义。
 
 叙事控制：
 - 前两句必须形成钩子。
-- 严格写出本集“目标→阻碍→选择→后果→新问题”的因果链；选择必须有代价，后果必须由角色选择引起。
-- 线索先出现、后使用；合作必须改变结果；结尾必须是公平悬念。
+- 每段围绕一个清楚的小目标推进，最多包含 2-3 个主要事件；用 because、so、but、when、after 等自然关系或明确动作写清“为什么发生”和“因此发生什么”，不能像提纲一样连续罗列事件。
+- 至少写入两种五感中的具体细节，用声音、光线、气味、味道、温度、触感或身体反应帮助读者看懂人物在哪里、危险从哪来；感官描写必须服务线索或情绪，不能堆形容词。
+- 严格写出本集“目标→阻碍→选择→后果→新问题”的因果链；选择必须有代价，后果必须由角色选择引起。人物换地点、拿到物件或知道新信息时必须交代来源。
+- 线索先以自然细节出现，之后才能使用或回收；合作必须改变结果；结尾必须是公平悬念。按 clueLedger 准确标注本集是 plant、use 还是 payoff。
 - 遵守 storyBible 的固定称呼、人物声音和世界规则，不得让角色忘记已知事实或无故获得物件。
 - 文章本身要精彩，不要用“这告诉我们团队合作很重要”之类说教句。
-- 出 2 道四选一题：一道具体线索题，一道推断/人物选择题。错误项必须可信但能由原文排除。
-- explanation 使用中文并指出原文依据。
+- 出 2 道四选一题：至少一道 detail 线索题和一道 inference 或 cause_effect 题。选项中不要加 A)、B) 等编号；错误项必须可信但能由原文排除。
+- 每题 evidenceQuote 必须逐字复制正文中真实存在的一小段英文原文，不得概括、改写或发明情节。题目、唯一正确选项和中文 explanation 都必须能由该证据推出；推断题也必须有明确文本基础。
+- qualityEvidence 不是额外创作内容，只用于自检：所有 quote 必须逐字复制 paragraphs。idiomaticPhrase 是正文中的地道表达；sensoryQuote 是感官描写；每个 causalLinks 的 causeQuote 必须出现在 effectQuote 之前；clueEvidence 必须覆盖本集线索动作。
 
 只返回 JSON：
-{"title":"英文标题","paragraphs":["..."],"targetWords":["..."],"continuitySummary":"中文，供下一集保持连续性","storyState":{"characterPositions":["中文：人物当前位置及状态"],"knownFacts":["中文：角色已经确认的事实"],"unresolvedQuestions":["中文：尚未解决的问题"],"items":["中文：物件及持有人"],"relationshipChanges":["中文：本集发生的关系变化"]},"questions":[{"prompt":"...","options":["A text","B text","C text","D text"],"answer":0,"explanation":"中文"}]}`;
+{"title":"English title","paragraphs":["English only..."],"targetWords":["word"],"continuitySummary":"中文，供下一集保持连续性","storyState":{"characterPositions":["中文：人物当前位置及状态"],"knownFacts":["中文：角色已经确认的事实"],"unresolvedQuestions":["中文：尚未解决的问题"],"items":["中文：物件及持有人"],"relationshipChanges":["中文：本集发生的关系变化"]},"qualityEvidence":{"idiomaticPhrase":"exact English phrase from paragraphs","sensoryQuote":"exact English quote from paragraphs","causalLinks":[{"causeQuote":"exact earlier quote","effectQuote":"exact later quote"}],"clueEvidence":[{"clueId":"C1","action":"plant","evidenceQuote":"exact English quote"}]},"questions":[{"prompt":"English question","options":["option one","option two","option three","option four"],"answer":0,"explanation":"中文，只依据 evidenceQuote 解释","skill":"detail","evidenceQuote":"exact English quote from paragraphs"}]}`;
 }
 
 function critiquePrompt(
@@ -952,12 +1101,13 @@ function critiquePrompt(
 第 ${episodeNumber} 集待审稿：${JSON.stringify(episode)}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
+${buildNarrativeCraftBrief(options, episodeNumber)}
 
 四个视角分别按 0-10 分审查：
-1. plot：目标、阻碍、选择、后果是否构成因果链；线索是否公平；解法是否靠前文准备。
-2. childAppeal：前两句钩子、自然笑点、具体冒险、伙伴互动和结尾悬念是否真能让孩子想读下一集。
-3. gradedLanguage：句子、词汇、指代是否适龄；是否有不必要的难词、抽象解释和同义词漂移。
-4. continuity：是否遵守故事圣经、线索账本和上一集人物/物件/已知事实状态。
+1. plot：逐段追踪目标、阻碍、选择、后果，检查每次移动、发现和计划改变是否有原因；线索是否先埋后用、后续解释是否回收前文，而不是事件清单或突然跳转。
+2. childAppeal：前两句钩子、自然笑点、具体冒险、伙伴互动、至少两种服务剧情的五感描写和结尾悬念是否真能让孩子想读下一集。
+3. gradedLanguage：正文和题目是否纯英文且自然地道；句子、词汇、指代是否适龄；是否有中式英语、不必要难词、碎片句、抽象解释和同义词漂移。
+4. continuity：是否遵守故事圣经、线索账本和上一集人物/物件/已知事实状态；逐题核对 evidenceQuote 确实存在于正文，问题、正确选项和解释都能由原文推出，禁止补写正文没有的地图、对话、动机或动作。
 
 只返回 JSON：
 {"plot":{"score":8,"issues":["中文问题"]},"childAppeal":{"score":8,"issues":["中文问题"]},"gradedLanguage":{"score":8,"issues":["中文问题"]},"continuity":{"score":8,"issues":["中文问题"]},"rewritePriorities":["按重要性排序的中文修改动作"]}`;
@@ -981,10 +1131,45 @@ function reviewPrompt(
 四维审稿意见：${JSON.stringify(critique)}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
+${buildNarrativeCraftBrief(options, episodeNumber)}
 
-按 rewritePriorities 逐项定向修复，并检查：开头钩子、人物声音、自然幽默、线索公平、团队合作的因果作用、情绪变化、悬念、连续性、选材边界、选择题唯一正确性。正文保持 ${range[0]}-${range[1]} 词、3-5 段，语言适合${level.audience}，平均句长约不超过 ${level.maxSentenceWords} 词。删除说教、空泛形容、突然出现的解法、不必要难词和为了变化而使用的生僻同义词。必须更新 storyState，准确反映重写后的结局。
+按 rewritePriorities 逐项定向修复，并检查：开头钩子、人物声音、自然地道的英语、服务剧情的五感描写、清楚的逐段因果、线索先埋后收、团队合作的因果作用、情绪变化、悬念、连续性、选材边界、选择题唯一正确性。正文保持 ${range[0]}-${range[1]} 词、3-5 段，语言适合${level.audience}，平均句长约不超过 ${level.maxSentenceWords} 词。title、paragraphs、题干、选项和所有 quote 必须纯英文，不得出现中文。删除说教、事件清单、空泛形容、突然出现的解法、无来源的信息、不必要难词和为了变化而使用的生僻同义词。每题 evidenceQuote 必须逐字存在于最终正文，且足以支持正确答案；重写正文后必须同步更新 qualityEvidence、questions、continuitySummary 和 storyState。
 
 返回与原稿完全相同结构的 JSON，不要附加评论。`;
+}
+
+async function groundQuestions(
+  options: StoryRunOptions,
+  episode: GeneratedStoryEpisode,
+  episodeNumber: number,
+) {
+  const result = await callStructured(
+    options,
+    groundedQuestionSetSchema,
+    "你只输出合法 JSON。你是英语分级阅读题目终审，只能依据给出的最终正文命题，绝不补写正文没有的信息。",
+    `这是第 ${episodeNumber} 集最终英文正文：\n${JSON.stringify(episode.paragraphs)}\n\n待核验题目：\n${JSON.stringify(episode.questions)}\n\n请逐题重新核验并在必要时重写。硬性要求：\n1. 保留 2 道四选一题，至少一道 detail，一道 inference 或 cause_effect。\n2. 每题 evidenceQuote 必须逐字复制上面 paragraphs 中连续存在的 3-25 个英文词，不能概括、改变时态或发明地图、动作、对话、动机。\n3. prompt、options、evidenceQuote 只能使用自然英语；选项不带 A/B/C/D 编号。\n4. 正确选项必须由 evidenceQuote 和正文上下文唯一推出；推断题只允许一步合理推断。\n5. 中文 explanation 先引用 evidenceQuote 的含义，再说明为什么正确选项成立；不得引用故事季纲、storyState 或正文外知识。\n6. 四个选项语法形式一致、长度接近；错误项可信但能被正文排除。\n\n只返回：{"questions":[{"prompt":"English question","options":["...","...","...","..."],"answer":0,"explanation":"中文解释","skill":"detail","evidenceQuote":"exact English quote"}]}`,
+    options.reviewModel || options.model,
+    0.1,
+  );
+  return result.questions;
+}
+
+const cjkPattern = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const sensoryPattern = /\b(?:bright|dim|dark|glow(?:ed|ing)?|light|shadow|flash(?:ed|ing)?|spark(?:ed|ing)?|red|blue|green|silver|golden|hear(?:d|ing)?|sound(?:ed)?|voice|whisper(?:ed|ing)?|shout(?:ed|ing)?|ring|rang|echo(?:ed|ing)?|buzz(?:ed|ing)?|hum(?:med|ming)?|crack(?:ed|ing)?|rustle(?:d|ing)?|silent|silence|smell(?:ed|ing)?|scent|odor|air|smoke|dust|sweet|bitter|sour|salty|taste(?:d|ing)?|warm|hot|cold|cool|rough|smooth|soft|hard|wet|dry|sticky|sharp|heavy|light|hurt|pain|shiver(?:ed|ing)?|tremble(?:d|ing)?|heartbeat|breath)\b/i;
+
+function normalizedEvidence(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function evidenceLocation(text: string, quote: string) {
+  return normalizedEvidence(text).indexOf(normalizedEvidence(quote));
 }
 
 export function assessStoryQuality(
@@ -996,6 +1181,7 @@ export function assessStoryQuality(
     isFamiliar?: LexicalFamiliarityLookup;
     allowedWords?: string[];
   },
+  plan?: SeriesPlan,
 ): StoryQuality {
   const level = examGuide[options.examId];
   const readerProfile = resolveReaderProfile(options);
@@ -1005,21 +1191,118 @@ export function assessStoryQuality(
   const sentences = text.split(/[.!?]+/).map((item) => item.trim()).filter(Boolean);
   const averageSentenceWords = sentences.length ? words.length / sentences.length : words.length;
   const issues: string[] = [];
+  const blockingIssues: string[] = [];
+  const block = (issue: string) => {
+    issues.push(issue);
+    blockingIssues.push(issue);
+  };
   let lexicalCoverage: number | null = null;
   let unfamiliarWords: string[] = [];
-  if (words.length < range[0]) issues.push(`正文过短：${words.length} < ${range[0]}`);
-  if (words.length > range[1]) issues.push(`正文过长：${words.length} > ${range[1]}`);
-  if (averageSentenceWords > level.maxSentenceWords + 2) issues.push(`平均句长过高：${averageSentenceWords.toFixed(1)}`);
-  if (!/[“”"']/.test(text)) issues.push("缺少自然对话或人物声音");
-  if (!/(together|friend|team|shared|helped|agreed|asked)/i.test(text)) issues.push("团队合作在正文中不够明确");
+  if (words.length < range[0]) block(`正文过短：${words.length} < ${range[0]}`);
+  if (words.length > range[1]) block(`正文过长：${words.length} > ${range[1]}`);
+  if (averageSentenceWords > level.maxSentenceWords + 2) block(`平均句长过高：${averageSentenceWords.toFixed(1)}`);
+  const sentenceWordCounts = sentences.map(
+    (sentence) => sentence.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0,
+  );
+  const fragmentRatio = sentenceWordCounts.length
+    ? sentenceWordCounts.filter((count) => count > 0 && count <= 4).length / sentenceWordCounts.length
+    : 1;
+  if (fragmentRatio > 0.3) block(`碎片化短句过多：${(fragmentRatio * 100).toFixed(0)}% 的句子不超过 4 词`);
+  if (!/[“”"']/.test(text)) block("缺少自然对话或人物声音");
+  if (!/(together|friend|team|shared|helped|agreed|asked)/i.test(text)) block("团队合作在正文中不够明确");
+  const englishOnlyFields = [
+    episode.title,
+    ...episode.paragraphs,
+    episode.qualityEvidence.idiomaticPhrase,
+    episode.qualityEvidence.sensoryQuote,
+    ...episode.qualityEvidence.causalLinks.flatMap((link) => [link.causeQuote, link.effectQuote]),
+    ...episode.qualityEvidence.clueEvidence.map((clue) => clue.evidenceQuote),
+    ...episode.questions.flatMap((question) => [question.prompt, ...question.options, question.evidenceQuote]),
+  ];
+  if (englishOnlyFields.some((field) => cjkPattern.test(field))) {
+    block("英文正文、题目或证据中夹杂中文或其他中日韩文字");
+  }
   if (episode.targetWords.length < 4 || episode.targetWords.length > readerProfile.maxNewWords) {
-    issues.push(`目标词数量应为 4-${readerProfile.maxNewWords} 个`);
+    block(`目标词数量应为 4-${readerProfile.maxNewWords} 个`);
   }
   const missingTargetWords = episode.targetWords.filter(
     (word) => !new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text),
   );
-  if (missingTargetWords.length) issues.push(`目标词未出现在正文：${missingTargetWords.join(", ")}`);
-  if (episode.questions.some((question) => question.options.length !== 4 || question.answer > 3)) issues.push("题目选项或答案索引不合法");
+  if (missingTargetWords.length) block(`目标词未出现在正文：${missingTargetWords.join(", ")}`);
+  if (episode.questions.some((question) => question.options.length !== 4 || question.answer > 3)) block("题目选项或答案索引不合法");
+
+  const idiomaticPhraseWords = episode.qualityEvidence.idiomaticPhrase.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? [];
+  if (idiomaticPhraseWords.length < 2 || evidenceLocation(text, episode.qualityEvidence.idiomaticPhrase) < 0) {
+    block("地道英语表达未逐字出现在正文，或表达过短");
+  }
+  if (
+    evidenceLocation(text, episode.qualityEvidence.sensoryQuote) < 0
+    || !sensoryPattern.test(episode.qualityEvidence.sensoryQuote)
+  ) {
+    block("五感描写证据未逐字出现在正文，或缺少具体声音、光线、气味、味道、温度或触感");
+  }
+  for (const [index, link] of episode.qualityEvidence.causalLinks.entries()) {
+    const causeLocation = evidenceLocation(text, link.causeQuote);
+    const effectLocation = evidenceLocation(text, link.effectQuote);
+    if (causeLocation < 0 || effectLocation < 0) {
+      block(`第 ${index + 1} 组因果证据未逐字出现在正文`);
+    } else if (causeLocation >= effectLocation) {
+      block(`第 ${index + 1} 组因果顺序不清：原因必须先于结果出现`);
+    }
+  }
+  for (const clue of episode.qualityEvidence.clueEvidence) {
+    if (evidenceLocation(text, clue.evidenceQuote) < 0) {
+      block(`线索 ${clue.clueId} 的 ${clue.action} 证据未逐字出现在正文`);
+    }
+  }
+  if (plan) {
+    for (const evidence of episode.qualityEvidence.clueEvidence) {
+      const plannedClue = plan.clueLedger.find((clue) => clue.id === evidence.clueId);
+      const expectedEpisode = plannedClue
+        ? evidence.action === "plant"
+          ? plannedClue.introducedIn
+          : evidence.action === "use"
+            ? plannedClue.usedIn
+            : plannedClue.payoffIn
+        : null;
+      if (!plannedClue) {
+        block(`线索证据引用了季纲中不存在的 ${evidence.clueId}`);
+      } else if (expectedEpisode !== episodeNumber) {
+        block(`线索 ${evidence.clueId} 的 ${evidence.action} 应发生在第 ${expectedEpisode} 集，而不是第 ${episodeNumber} 集`);
+      }
+    }
+    const requiredClueActions = plan.clueLedger.flatMap((clue) => [
+      ...(clue.introducedIn === episodeNumber ? [{ clueId: clue.id, action: "plant" as const }] : []),
+      ...(clue.usedIn === episodeNumber ? [{ clueId: clue.id, action: "use" as const }] : []),
+      ...(clue.payoffIn === episodeNumber ? [{ clueId: clue.id, action: "payoff" as const }] : []),
+    ]);
+    for (const required of requiredClueActions) {
+      if (!episode.qualityEvidence.clueEvidence.some(
+        (clue) => clue.clueId === required.clueId && clue.action === required.action,
+      )) {
+        block(`线索 ${required.clueId} 缺少 ${required.action} 原文证据`);
+      }
+    }
+  }
+  const questionSkills = new Set(episode.questions.map((question) => question.skill));
+  if (!questionSkills.has("detail")) block("题目缺少一道人物、动作或线索细节题");
+  if (!questionSkills.has("inference") && !questionSkills.has("cause_effect")) {
+    block("题目缺少一道有原文依据的推断或因果题");
+  }
+  for (const [index, question] of episode.questions.entries()) {
+    if (evidenceLocation(text, question.evidenceQuote) < 0) {
+      block(`第 ${index + 1} 题的原文证据不存在于正文`);
+    }
+    if ((question.evidenceQuote.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? []).length < 3) {
+      block(`第 ${index + 1} 题的原文证据过短，无法支撑答案`);
+    }
+    if (question.options.some((option) => /^\s*[A-D][).:：]\s*/i.test(option))) {
+      block(`第 ${index + 1} 题选项不应重复包含 A/B/C/D 编号`);
+    }
+    if (new Set(question.options.map((option) => normalizedEvidence(option))).size !== question.options.length) {
+      block(`第 ${index + 1} 题包含重复选项`);
+    }
+  }
   if (lexical && words.length) {
     // 每集明确选出的目标词就是允许孩子少量查阅的新词，不应反过来被
     // 高频词门禁判为超纲；人物名和固定世界术语同样由调用方加入白名单。
@@ -1061,6 +1344,7 @@ export function assessStoryQuality(
     lexicalCoverage: lexicalCoverage === null ? null : Number(lexicalCoverage.toFixed(3)),
     unfamiliarWords,
     issues,
+    blockingIssues,
   };
 }
 
@@ -1082,6 +1366,16 @@ export function validateSeriesPlan(plan: SeriesPlan, expectedEpisodes: number) {
     }
     if (clue.payoffIn > expectedEpisodes) {
       throw new Error(`线索 ${clue.id} 在系列结束后才回收`);
+    }
+  }
+  if (!plan.clueLedger.some((clue) => clue.introducedIn < clue.payoffIn)) {
+    throw new Error("至少一条主线伏笔必须在前一集埋下，并在后续集回收解释");
+  }
+  for (const episodeNumber of expectedNumbers) {
+    if (!plan.clueLedger.some(
+      (clue) => [clue.introducedIn, clue.usedIn, clue.payoffIn].includes(episodeNumber),
+    )) {
+      throw new Error(`第 ${episodeNumber} 集没有对应的线索埋设、使用或回收动作`);
     }
   }
   return plan;
@@ -1218,11 +1512,19 @@ async function generateEpisode(
   );
   reportProgress(
     options,
+    "reviewing",
+    `第 ${episodeNumber} 集故事稿已完成，正在逐题核验原文证据`,
+    episodeProgress(options, index, 0.72),
+  );
+  const questions = await groundQuestions(options, reviewed, episodeNumber);
+  const grounded = { ...reviewed, questions };
+  reportProgress(
+    options,
     "quality_check",
     `第 ${episodeNumber} 集编辑稿已完成，正在自动质量检查`,
     episodeProgress(options, index, 0.8),
   );
-  return reviewed;
+  return grounded;
 }
 
 async function repairEpisode(
@@ -1238,7 +1540,7 @@ async function repairEpisode(
     options,
     episodeSchema,
     "你只输出合法 JSON。你是分级阅读终审编辑，只修复自动质量检测指出的问题，并保持精彩情节和原有结构。",
-    `整季策划：${JSON.stringify(plan)}\n待修稿：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词（除 targetWords、人物专名和固定术语外，逐个换成更常见表达）：${quality.unfamiliarWords.join(", ")}\n\n正文必须保持 ${range[0]}-${range[1]} 词。targetWords 中的每个词必须以完整单词实际出现在正文中；不要引入新的生僻同义词。不要删除关键线索、角色选择的后果或结尾悬念。修改后同步更新 continuitySummary、storyState 和题目。返回与待修稿相同结构的完整 JSON。`,
+    `整季策划：${JSON.stringify(plan)}\n待修稿：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词（除 targetWords、人物专名和固定术语外，逐个换成更常见表达）：${quality.unfamiliarWords.join(", ")}\n\n正文必须保持 ${range[0]}-${range[1]} 词。title、paragraphs、题干、选项和所有 quote 必须是纯英文，彻底删除其中的中文。targetWords 中的每个词必须以完整单词实际出现在正文中；不要引入新的生僻同义词。把跳跃的事件改成读者可跟随的因果链，用服务线索或情绪的五感细节连接场景，并自然保留一个适龄地道表达。不要删除关键线索、角色选择的后果或结尾悬念。每个 qualityEvidence 和 question.evidenceQuote 都必须逐字复制修改后 paragraphs 中真实存在的文本；每题只能使用正文明确提供的事实和动机。修改后同步更新 qualityEvidence、continuitySummary、storyState 和题目。返回与待修稿相同结构的完整 JSON。`,
     options.reviewModel || options.model,
     0.1,
   );
@@ -1260,12 +1562,16 @@ function examVocabularyTags(examId: ExamId) {
 }
 
 function meetsQualityTarget(quality: StoryQuality, targetCoverage: number) {
-  return quality.score >= 80 && (quality.lexicalCoverage === null || quality.lexicalCoverage >= targetCoverage);
+  return quality.blockingIssues.length === 0
+    && quality.score >= 80
+    && (quality.lexicalCoverage === null || quality.lexicalCoverage >= targetCoverage);
 }
 
 export function passesStoryQualityFloor(quality: StoryQuality, targetCoverage: number) {
   const publishableCoverage = Math.min(targetCoverage, 0.9);
-  return quality.score >= 80 && (quality.lexicalCoverage === null || quality.lexicalCoverage >= publishableCoverage);
+  return quality.blockingIssues.length === 0
+    && quality.score >= 80
+    && (quality.lexicalCoverage === null || quality.lexicalCoverage >= publishableCoverage);
 }
 
 function slug(value: string) {
@@ -1351,7 +1657,12 @@ function importStoryEpisode(
       seriesTitle: plan.seriesTitle,
       episodeNumber: index + 1,
       paragraphs: episode.paragraphs,
-      questions: episode.questions as Question[],
+      questions: episode.questions.map(({ prompt, options, answer, explanation }) => ({
+        prompt,
+        options,
+        answer,
+        explanation,
+      })) as Question[],
     }],
   });
   if (!articleId) throw new Error(`第 ${index + 1} 集入库后没有返回文章 ID`);
@@ -1432,7 +1743,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
     try {
       for (let index = generated.length; index < options.episodes; index++) {
       let episode = await generateEpisode(options, plan, index, previousEpisode);
-      let quality = assessStoryQuality(episode, options, index + 1, lexical);
+      let quality = assessStoryQuality(episode, options, index + 1, lexical, plan);
       for (let repairAttempt = 1; repairAttempt <= 3 && !meetsQualityTarget(quality, options.minLexicalCoverage); repairAttempt++) {
         reportProgress(
           options,
@@ -1444,7 +1755,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
           `[${index + 1}/${options.episodes}] 自动质量门禁触发，进行第 ${repairAttempt}/3 次定向修稿：${quality.issues.join("；")}`,
         );
         episode = await repairEpisode(options, plan, episode, index + 1, quality);
-        quality = assessStoryQuality(episode, options, index + 1, lexical);
+        quality = assessStoryQuality(episode, options, index + 1, lexical, plan);
       }
       if (!passesStoryQualityFloor(quality, options.minLexicalCoverage)) {
         throw new Error(`第 ${index + 1} 集质量未达标：${quality.issues.join("；")}`);

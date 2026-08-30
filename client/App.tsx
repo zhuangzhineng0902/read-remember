@@ -186,6 +186,9 @@ const readerTone = {
 const clampTimerMinutes = (value: number) =>
   Math.max(1, Math.min(180, Math.round(value || 1)));
 
+const defaultArticleTimerMinutes = (readMinutes: number) =>
+  clampTimerMinutes(Math.max(8, readMinutes));
+
 const formatCountdown = (seconds: number) => {
   const safe = Math.max(0, seconds);
   const minutes = Math.floor(safe / 60);
@@ -3222,15 +3225,15 @@ function ReaderScreen({
   const [wordCardHeight, setWordCardHeight] = useState(0);
   const [timerSettings, setTimerSettings] = useState<ArticleTimerSettings>(() => ({
     enabled: true,
-    durationMinutes: clampTimerMinutes(article.readMinutes),
+    durationMinutes: defaultArticleTimerMinutes(article.readMinutes),
     reminderStyle: "mecha-blade",
   }));
   const [timerMinutesInput, setTimerMinutesInput] = useState(
-    String(clampTimerMinutes(article.readMinutes)),
+    String(defaultArticleTimerMinutes(article.readMinutes)),
   );
   const [timerReady, setTimerReady] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState(
-    clampTimerMinutes(article.readMinutes) * 60,
+    defaultArticleTimerMinutes(article.readMinutes) * 60,
   );
   const [timeUpVisible, setTimeUpVisible] = useState(false);
   const [articleTranslation, setArticleTranslation] = useState<
@@ -3494,7 +3497,7 @@ function ReaderScreen({
     storage.getArticleTimerSettings(userId, article.id).then((saved) => {
       if (!active) return;
       const durationMinutes = clampTimerMinutes(
-        saved?.durationMinutes ?? article.readMinutes,
+        saved?.durationMinutes ?? defaultArticleTimerMinutes(article.readMinutes),
       );
       const next: ArticleTimerSettings = {
         enabled: saved?.enabled ?? true,
