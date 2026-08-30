@@ -21,6 +21,7 @@ import {
   runStoryGeneration,
   selectBestStoryCritique,
   semanticQualityIssues,
+  structureModelForAttempt,
   storyGenerationCheckpointSchema,
   structuredJsonValues,
   validateSeriesPlan,
@@ -338,6 +339,7 @@ test("a completed checkpoint skips model calls and imports saved episodes", asyn
     apiKey: "",
     model: "unused",
     reviewModel: "unused",
+    structureRepairModel: "unused",
     interest: "custom-story",
     customInterestName: "定制故事",
     customInterestSubtitle: "用户自己的连续故事",
@@ -591,6 +593,18 @@ test("model JSON parser ignores a second object or trailing commentary", () => {
     { title: "first", note: "brace } inside" },
   );
   assert.deepEqual(parseJson('说明：\n[1,{"ok":true}]\n完成'), [1, { ok: true }]);
+});
+
+test("JSON structure correction alternates between M2.7 and M3", () => {
+  const models = {
+    model: "MiniMax-M2.7",
+    reviewModel: "MiniMax-M3",
+    structureRepairModel: "MiniMax-M3",
+  };
+  assert.equal(structureModelForAttempt(models, "MiniMax-M2.7", 1), "MiniMax-M2.7");
+  assert.equal(structureModelForAttempt(models, "MiniMax-M2.7", 2), "MiniMax-M3");
+  assert.equal(structureModelForAttempt(models, "MiniMax-M3", 1), "MiniMax-M3");
+  assert.equal(structureModelForAttempt(models, "MiniMax-M3", 2), "MiniMax-M2.7");
 });
 
 test("streaming model responses are assembled even when the provider reports a token boundary", async () => {

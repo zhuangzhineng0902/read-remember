@@ -557,6 +557,7 @@ export type StoryRunOptions = {
   apiKey: string;
   model: string;
   reviewModel: string;
+  structureRepairModel: string;
   interest: StoryInterestId;
   customInterestName: string;
   customInterestSubtitle: string;
@@ -717,6 +718,7 @@ const defaultOptions: Omit<StoryRunOptions, "log"> = {
   apiKey: "",
   model: "",
   reviewModel: "",
+  structureRepairModel: "",
   interest: "tiger",
   customInterestName: "",
   customInterestSubtitle: "",
@@ -776,6 +778,7 @@ const helpText = `
   --api-key <key>
   --model <name>
   --review-model <name>   第二遍故事编辑模型，默认与生成模型相同
+  --structure-repair-model <name> JSON 结构纠错优先模型；与原模型不同时自动切换
   --episode-candidates <1-3>  每集并行生成的首稿数量，默认 3；随后一次批量四维评审
   --timeout-ms <ms>       单次模型网络请求超时，默认 120000
   --rewrite-timeout-ms <ms> 完整正文重写超时，默认 480000
@@ -1011,6 +1014,21 @@ class ModelHttpError extends Error {
   }
 }
 
+export function structureModelForAttempt(
+  options: Pick<StoryRunOptions, "model" | "reviewModel" | "structureRepairModel">,
+  initialModel: string,
+  attempt: number,
+) {
+  const sequence = [
+    initialModel,
+    options.structureRepairModel,
+    initialModel === options.model ? options.reviewModel : options.model,
+    options.reviewModel,
+    options.model,
+  ].filter((candidate, index, candidates) => Boolean(candidate) && candidates.indexOf(candidate) === index);
+  return sequence[(Math.max(1, attempt) - 1) % sequence.length] || initialModel;
+}
+
 function modelContentText(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
@@ -1227,11 +1245,7 @@ async function callStructured<T>(
   let lastShape = "无候选";
   const structureRetries = policy.structureRetries ?? options.structureRetries;
   for (let attempt = 1; attempt <= structureRetries; attempt++) {
-    const correctionModel = attempt === 1
-      ? model
-      : model === options.reviewModel && options.model
-        ? options.model
-        : model;
+    const correctionModel = structureModelForAttempt(options, model, attempt);
     const correctionTemperature = attempt === 1
       ? temperature
       : Math.min(temperature, options.reviewTemperature, 0.2);
@@ -1252,7 +1266,7 @@ async function callStructured<T>(
         lastError = error;
         options.log(
           `模型内容输出 ${attempt}/${structureRetries} 为空，`
-          + `下一次使用 ${model === options.reviewModel && options.model ? options.model : correctionModel} 重新输出紧凑 JSON…`,
+          + `下一次切换到 ${structureModelForAttempt(options, model, attempt + 1)} 重新输出紧凑 JSON…`,
         );
         prompt = `${user}\n\n上一次响应只产生了推理或空增量，没有生成最终 JSON。请缩短内部分析，直接返回一份字段完整、内容精炼的 JSON 对象；不要输出 Markdown、解释或第二个对象。`;
         continue;
@@ -1265,7 +1279,8 @@ async function callStructured<T>(
       lastError = jsonParseFailure(content);
       if (attempt < structureRetries) {
         options.log(
-          `模型结构输出 ${attempt}/${structureRetries} 无法解析，正在要求其重新输出严格 JSON…`,
+          `模型结构输出 ${attempt}/${structureRetries} 无法解析，下一次切换到 `
+          + `${structureModelForAttempt(options, model, attempt + 1)} 重新输出严格 JSON…`,
         );
       }
       prompt = `${user}\n\n上一次响应无法作为 JSON 解析：${lastError.message}。请重新输出一份完整 JSON：只能有一个顶层对象，键名和字符串必须使用英文双引号，数组必须填真实值；禁止输出 Markdown、解释、正则示例（如 [a-z]）、JSON Schema、注释或第二个对象。`;
@@ -1312,7 +1327,8 @@ async function callStructured<T>(
     const previousValue = JSON.stringify(closest.value).slice(0, 16_000);
     if (attempt < structureRetries) {
       options.log(
-        `模型结构输出 ${attempt}/${structureRetries} 不完整，正在携带字段错误自动修正：${issues}`,
+        `模型结构输出 ${attempt}/${structureRetries} 不完整，下一次切换到 `
+        + `${structureModelForAttempt(options, model, attempt + 1)} 并携带字段错误自动修正：${issues}`,
       );
     }
     const rootReminder = Array.isArray(closest.value)
@@ -2881,6 +2897,9 @@ export function storyOptionsFromCli(argv = process.argv.slice(2)): StoryRunOptio
     apiKey: String(from("api-key", "STORY_API_KEY", "apiKey") ?? ""),
     model: String(from("model", "STORY_MODEL", "model") ?? ""),
     reviewModel: String(from("review-model", "STORY_REVIEW_MODEL", "reviewModel") ?? ""),
+    structureRepairModel: String(
+      from("structure-repair-model", "STORY_STRUCTURE_REPAIR_MODEL", "structureRepairModel") ?? "",
+    ),
     interest: interest as StoryInterestId,
     customInterestName,
     customInterestSubtitle,

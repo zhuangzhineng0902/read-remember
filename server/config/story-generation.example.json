@@ -6,6 +6,7 @@
   "apiKey": "",
   "model": "your-model",
   "reviewModel": "your-model",
+  "structureRepairModel": "your-stronger-model",
   "interest": "tiger",
   "customInterestName": "",
   "customInterestSubtitle": "",
