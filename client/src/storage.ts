@@ -23,6 +23,7 @@ const KEYS = {
   readingProgress: "rr:reading-progress",
   articleAnswers: "rr:article-answers",
   articleTimers: "rr:article-timers",
+  readerTimerDefaults: "rr:reader-timer-defaults",
   readerHintSeen: "rr:reader-hint-seen",
   learningSettings: "rr:learning-settings",
   interests: "rr:interests",
@@ -121,6 +122,21 @@ export const storage = {
     );
     settings[`${userId}:${articleId}`] = value;
     await AsyncStorage.setItem(KEYS.articleTimers, JSON.stringify(settings));
+  },
+  async getReaderTimerDefaults(userId: string) {
+    const settings = await readJson<Record<string, ArticleTimerSettings>>(
+      KEYS.readerTimerDefaults,
+      {},
+    );
+    return settings[userId] ?? null;
+  },
+  async setReaderTimerDefaults(userId: string, value: ArticleTimerSettings) {
+    const settings = await readJson<Record<string, ArticleTimerSettings>>(
+      KEYS.readerTimerDefaults,
+      {},
+    );
+    settings[userId] = value;
+    await AsyncStorage.setItem(KEYS.readerTimerDefaults, JSON.stringify(settings));
   },
   async getReaderHintSeen() {
     return (await AsyncStorage.getItem(KEYS.readerHintSeen)) === "true";

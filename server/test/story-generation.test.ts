@@ -12,13 +12,17 @@ import {
   parseJson,
   parseStoryGenerationCheckpoint,
   passesStoryQualityFloor,
+  repeatedNarrativeIssues,
   resolveReaderProfile,
   runStoryGeneration,
+  selectBestStoryCritique,
+  semanticQualityIssues,
   storyGenerationCheckpointSchema,
   structuredJsonValues,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
   type SeriesPlan,
+  type StoryCritique,
   type StoryRunOptions,
 } from "../scripts/generate-story-series";
 import { createDatabase } from "../src/database";
@@ -44,6 +48,8 @@ test("classic story prompt uses a public-domain source and controlled reader sta
   assert.match(prompt, /目标→阻碍→角色作出艰难选择→产生后果→出现新问题/);
   assert.match(prompt, /首稿写作技法蓝图/);
   assert.match(prompt, /不复制原句/);
+  assert.match(prompt, /独立任务合同/);
+  assert.match(prompt, /mustNotRepeat/);
 });
 
 test("custom stories select public-domain craft references from the submitted theme", () => {
@@ -174,6 +180,10 @@ const validPlan: SeriesPlan = {
   episodes: [1, 2].map((number) => ({
     number,
     title: `Clock ${number}`,
+    episodeMission: number === 1 ? "确认异常钟声来自哪一座钟塔" : "利用第一集线索阻止错误潮位信号",
+    newInformation: [number === 1 ? "铜屑与北门钟塔有关" : "铜屑实际来自潮位齿轮"],
+    irreversibleChange: number === 1 ? "伙伴进入钟塔并共享第一条证据" : "潮位齿轮被修复并暴露改动者的痕迹",
+    mustNotRepeat: [number === 1 ? "不要提前解释铜屑的真正来源" : "不要再次把发现北门铜屑作为主要悬念"],
     openingHook: "钟声在没有人触碰时突然响起。",
     goal: "伙伴们要找到错误时间的来源。",
     obstacle: "三座时钟给出互相冲突的证据。",
@@ -225,6 +235,12 @@ function checkpointEpisode(title: string): GeneratedStoryEpisode {
           evidenceQuote: "A new light moved under the floor",
         },
       ],
+      progression: {
+        obstacleQuote: "heard a strange sound inside",
+        choiceQuote: "They shared the brass key",
+        consequenceQuote: "found a safe path through the tower",
+        newInformationQuote: "A new light moved under the floor",
+      },
     },
     questions: [
       { prompt: "What did the friends share?", options: ["A brass key", "A boat", "A meal", "A map"], answer: 0, explanation: "原文说他们共同使用铜钥匙。", skill: "detail", evidenceQuote: "They shared the brass key" },
@@ -239,6 +255,38 @@ test("series plan validator enforces clue chronology", () => {
   invalid.clueLedger[0].introducedIn = 2;
   invalid.clueLedger[0].usedIn = 1;
   assert.throws(() => validateSeriesPlan(invalid, 2), /顺序不合法/);
+});
+
+const strongCritique: StoryCritique = {
+  plot: { score: 9, issues: [] },
+  childAppeal: { score: 9, issues: [] },
+  gradedLanguage: { score: 8.5, issues: [] },
+  continuity: { score: 9, issues: [] },
+  rewritePriorities: ["保持当前清晰推进"],
+};
+
+test("semantic quality gate rejects a weaker later episode", () => {
+  const weak = structuredClone(strongCritique);
+  weak.plot.score = 7.5;
+  weak.childAppeal.score = 7;
+  assert.match(semanticQualityIssues(weak, strongCritique).join(" "), /剧情逻辑/);
+  assert.match(semanticQualityIssues(weak, strongCritique).join(" "), /比第一集低/);
+  assert.deepEqual(semanticQualityIssues(strongCritique, strongCritique), []);
+});
+
+test("candidate selection favors plot and child appeal quality", () => {
+  const flatter = structuredClone(strongCritique);
+  flatter.plot.score = 8;
+  flatter.childAppeal.score = 7.5;
+  flatter.gradedLanguage.score = 10;
+  assert.equal(selectBestStoryCritique([flatter, strongCritique]), 1);
+});
+
+test("cross-episode detector blocks near-duplicate narrative sentences", () => {
+  const previous = checkpointEpisode("First");
+  const repeated = checkpointEpisode("Second");
+  repeated.paragraphs[0] = "Inside the old clock tower, Mia and Ben stood together and heard a strange sound.";
+  assert.match(repeatedNarrativeIssues(repeated, previous).join(" "), /近似重复上一集/);
 });
 
 test("a completed checkpoint skips model calls and imports saved episodes", async () => {
@@ -282,6 +330,7 @@ test("a completed checkpoint skips model calls and imports saved episodes", asyn
     episodes: 2,
     importNamespace: "checkpoint-test",
     planCandidates: 3,
+    episodeCandidates: 2,
     minLexicalCoverage: 0.95,
     temperature: 0.8,
     reviewTemperature: 0.2,
@@ -359,6 +408,12 @@ test("story quality measures actual frequency coverage", () => {
       clueEvidence: [
         { clueId: "C1", action: "plant", evidenceQuote: "near the xylophonic gate" },
       ],
+      progression: {
+        obstacleQuote: "The cat and dog",
+        choiceQuote: "dog helped together",
+        consequenceQuote: "near the xylophonic gate",
+        newInformationQuote: "xylophonic gate",
+      },
     },
     questions: [
       { prompt: "Where did the team stand?", options: ["Near the gate", "On a boat", "At school", "At home"], answer: 0, explanation: "原文说他们在门边。", skill: "detail", evidenceQuote: "near the xylophonic gate" },

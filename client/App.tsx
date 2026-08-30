@@ -3494,8 +3494,12 @@ function ReaderScreen({
   useEffect(() => {
     let active = true;
     setTimerReady(false);
-    storage.getArticleTimerSettings(userId, article.id).then((saved) => {
+    Promise.all([
+      storage.getArticleTimerSettings(userId, article.id),
+      storage.getReaderTimerDefaults(userId),
+    ]).then(([articleSettings, rememberedDefaults]) => {
       if (!active) return;
+      const saved = articleSettings ?? rememberedDefaults;
       const durationMinutes = clampTimerMinutes(
         saved?.durationMinutes ?? defaultArticleTimerMinutes(article.readMinutes),
       );
@@ -3667,7 +3671,10 @@ function ReaderScreen({
 
   const saveTimerSettings = (next: ArticleTimerSettings) => {
     setTimerSettings(next);
-    void storage.setArticleTimerSettings(userId, article.id, next);
+    void Promise.all([
+      storage.setArticleTimerSettings(userId, article.id, next),
+      storage.setReaderTimerDefaults(userId, next),
+    ]);
   };
 
   const setTimerDuration = (value: number) => {
@@ -5322,7 +5329,7 @@ function ReaderScreen({
             <View>
               <Text style={styles.readerSettingsTitle}>阅读设置</Text>
               <Text style={styles.readerSettingsSubtitle}>
-                排版应用到所有文章，限时仅应用当前文章
+                排版、限时和提醒风格会自动记住
               </Text>
             </View>
             <Pressable
