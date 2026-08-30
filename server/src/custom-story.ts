@@ -38,6 +38,14 @@ const toneGuides: Record<string, string> = {
   fantasy: "奇幻规则清晰，能力有代价，不能用突然出现的魔法解决问题",
 };
 
+const checkpointStageLabels: Record<string, string> = {
+  draft_selected: "候选初稿",
+  edited: "编辑稿",
+  mechanical_repaired: "结构与词汇修稿",
+  semantic_reviewed: "语义评审",
+  semantic_rewritten: "剧情修稿",
+};
+
 export class CustomStoryService implements CustomStoryProvider {
   private queue = Promise.resolve();
 
@@ -96,7 +104,9 @@ export class CustomStoryService implements CustomStoryProvider {
     ).run(
       checkpoint ? "drafting" : "planning",
       checkpoint
-        ? request.checkpointEpisodeCount
+        ? checkpoint.activeEpisode
+          ? `正在从第 ${checkpoint.activeEpisode.index + 1} 集的${checkpointStageLabels[checkpoint.activeEpisode.stage] ?? "已保存阶段"}继续创作`
+          : request.checkpointEpisodeCount
           ? `正在从第 ${request.checkpointEpisodeCount + 1} 集继续创作`
           : "正在从已保存的故事方案继续创作"
         : "正在准备故事创作",
@@ -162,9 +172,14 @@ export class CustomStoryService implements CustomStoryProvider {
           checkpoint_episode_count AS checkpointEpisodeCount
          FROM custom_story_requests WHERE id = ?`,
       ).get(request.id) as { checkpointJson: string; checkpointEpisodeCount: number } | undefined;
-      const resumeMessage = saved?.checkpointJson
-        ? saved.checkpointEpisodeCount
-          ? `已保存前 ${saved.checkpointEpisodeCount} 集，重试后将从第 ${saved.checkpointEpisodeCount + 1} 集继续`
+      const savedCheckpoint = saved?.checkpointJson
+        ? this.parseCheckpoint(saved.checkpointJson)
+        : null;
+      const resumeMessage = savedCheckpoint
+        ? savedCheckpoint.activeEpisode
+          ? `已保存第 ${savedCheckpoint.activeEpisode.index + 1} 集的${checkpointStageLabels[savedCheckpoint.activeEpisode.stage] ?? "阶段成果"}，重试后将从这里继续`
+          : (saved?.checkpointEpisodeCount ?? 0) > 0
+          ? `已保存前 ${saved?.checkpointEpisodeCount} 集，重试后将从第 ${(saved?.checkpointEpisodeCount ?? 0) + 1} 集继续`
           : "故事方案已保存，重试后将从第一集继续"
         : "生成遇到问题，可以重新尝试";
       this.db.prepare(

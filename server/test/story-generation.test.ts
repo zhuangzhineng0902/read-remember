@@ -7,10 +7,14 @@ import {
   assessStoryQuality,
   buildNarrativeCraftBrief,
   buildSeriesPlanPrompt,
+  fragmentSentenceRatio,
   loadStoryEngagementBrief,
+  mergeEpisodeStructure,
+  normalizeContinuitySummary,
   normalizeTargetWords,
   parseJson,
   parseStoryGenerationCheckpoint,
+  readStreamingModelContent,
   passesStoryQualityFloor,
   repeatedNarrativeIssues,
   resolveReaderProfile,
@@ -257,6 +261,26 @@ test("series plan validator enforces clue chronology", () => {
   assert.throws(() => validateSeriesPlan(invalid, 2), /顺序不合法/);
 });
 
+test("a complete rewritten narrative can be preserved while missing metadata is filled separately", () => {
+  const complete = checkpointEpisode("The Saved Rewrite");
+  const narrativeOnly = {
+    title: complete.title,
+    paragraphs: [...complete.paragraphs, '"Run!"', '"Now!"', '"Together!"', '"Go!"'],
+  };
+  const metadata = {
+    targetWords: complete.targetWords,
+    continuitySummary: complete.continuitySummary,
+    storyState: complete.storyState,
+    qualityEvidence: complete.qualityEvidence,
+  };
+
+  assert.deepEqual(mergeEpisodeStructure(narrativeOnly, metadata), {
+    ...narrativeOnly,
+    ...metadata,
+  });
+  assert.equal(mergeEpisodeStructure(narrativeOnly, { targetWords: [] }), null);
+});
+
 const strongCritique: StoryCritique = {
   plot: { score: 9, issues: [] },
   childAppeal: { score: 9, issues: [] },
@@ -335,7 +359,9 @@ test("a completed checkpoint skips model calls and imports saved episodes", asyn
     temperature: 0.8,
     reviewTemperature: 0.2,
     timeoutMs: 50,
-    maxRetries: 1,
+    rewriteTimeoutMs: 480_000,
+    networkRetries: 1,
+    structureRetries: 1,
     dryRun: false,
     force: false,
     log: (message) => logs.push(message),
@@ -452,9 +478,37 @@ test("story quality measures actual frequency coverage", () => {
     checkpointResult.success ? "" : JSON.stringify(checkpointResult.error.issues),
   );
   const checkpoint = parseStoryGenerationCheckpoint(checkpointValue);
+  assert.equal(checkpoint?.version, 2);
   assert.equal(checkpoint?.plan.seriesTitle, validPlan.seriesTitle);
   assert.equal(checkpoint?.episodes.length, 1);
   assert.equal(parseStoryGenerationCheckpoint({ version: 2 }), null);
+});
+
+test("an in-progress episode checkpoint resumes from its exact generation stage", () => {
+  const episode = checkpointEpisode("Saved Draft");
+  const { questions: _questions, ...content } = episode;
+  const quality = assessStoryQuality(
+    content,
+    { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 },
+    1,
+  );
+  const checkpoint = parseStoryGenerationCheckpoint({
+    version: 2,
+    plan: validPlan,
+    episodes: [],
+    activeEpisode: {
+      index: 0,
+      stage: "mechanical_repaired",
+      episode: content,
+      quality,
+      fullRewriteCount: 2,
+      mechanicalRepairUsed: true,
+      semanticRewriteUsed: false,
+    },
+  });
+  assert.equal(checkpoint?.activeEpisode?.stage, "mechanical_repaired");
+  assert.equal(checkpoint?.activeEpisode?.fullRewriteCount, 2);
+  assert.equal(checkpoint?.activeEpisode?.episode.title, "Saved Draft");
 });
 
 test("story quality blocks mixed Chinese and questions without source evidence", () => {
@@ -469,6 +523,49 @@ test("story quality blocks mixed Chinese and questions without source evidence",
   assert.match(quality.blockingIssues.join(" "), /夹杂中文/);
   assert.match(quality.blockingIssues.join(" "), /第 2 题的原文证据不存在/);
   assert.equal(passesStoryQualityFloor(quality, 0.95), false);
+});
+
+test("story content can pass through quality checks before questions are generated", () => {
+  const { questions: _questions, ...content } = checkpointEpisode("Question Later");
+  const quality = assessStoryQuality(
+    content,
+    { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 },
+    1,
+  );
+  assert.doesNotMatch(quality.issues.join(" "), /题目|选项|答案/);
+});
+
+test("a draft with one causal link is checkpointable and deferred to the final quality repair", () => {
+  const { questions: _questions, ...content } = checkpointEpisode("One Link Draft");
+  content.qualityEvidence.causalLinks = content.qualityEvidence.causalLinks.slice(0, 1);
+  const quality = assessStoryQuality(
+    content,
+    { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 },
+    1,
+  );
+  assert.match(quality.blockingIssues.join(" "), /因果证据不足/);
+  const checkpoint = parseStoryGenerationCheckpoint({
+    version: 2,
+    plan: validPlan,
+    episodes: [],
+    activeEpisode: {
+      index: 0,
+      stage: "draft_selected",
+      episode: content,
+      quality,
+      fullRewriteCount: 0,
+      mechanicalRepairUsed: false,
+      semanticRewriteUsed: false,
+    },
+  });
+  assert.equal(checkpoint?.activeEpisode?.episode.qualityEvidence.causalLinks.length, 1);
+});
+
+test("short quoted dialogue is excluded from the fragment sentence ratio", () => {
+  const withDialogue = "'Wait!' Mia ran quickly toward the open tower door. 'Look!' Ben followed her without slowing down.";
+  const withNarrativeFragments = "'Wait!' Mia ran. 'Look!' Ben stopped beside the door.";
+  assert.equal(fragmentSentenceRatio(withDialogue), 0);
+  assert.ok(fragmentSentenceRatio(withNarrativeFragments) > 0);
 });
 
 test("story quality keeps 95 percent as a target but publishes above the 90 percent floor", () => {
@@ -494,6 +591,49 @@ test("model JSON parser ignores a second object or trailing commentary", () => {
     { title: "first", note: "brace } inside" },
   );
   assert.deepEqual(parseJson('说明：\n[1,{"ok":true}]\n完成'), [1, { ok: true }]);
+});
+
+test("streaming model responses are assembled even when the provider reports a token boundary", async () => {
+  const response = new Response([
+    'data: {"choices":[{"delta":{"content":"{\\"ok\\":"},"finish_reason":null}]}',
+    "",
+    'data: {"choices":[{"delta":{"content":"true}"},"finish_reason":"length"}]}',
+    "",
+  ].join("\n"), { headers: { "content-type": "text/event-stream" } });
+  assert.equal(
+    await readStreamingModelContent(
+      response as unknown as Parameters<typeof readStreamingModelContent>[0],
+    ),
+    '{"ok":true}',
+  );
+});
+
+test("streaming model responses accept array text blocks", async () => {
+  const response = new Response(
+    'data: {"choices":[{"delta":{"content":[{"type":"text","text":"{\\"ok\\":true}"}]},"finish_reason":"stop"}]}\n\n',
+    { headers: { "content-type": "text/event-stream" } },
+  );
+  assert.equal(
+    await readStreamingModelContent(
+      response as unknown as Parameters<typeof readStreamingModelContent>[0],
+    ),
+    '{"ok":true}',
+  );
+});
+
+test("reasoning-only streaming responses report finish and diagnostic details", async () => {
+  const response = new Response([
+    'data: {"choices":[{"delta":{"reasoning_content":"still thinking"},"finish_reason":null}]}',
+    "",
+    'data: {"choices":[{"delta":{},"finish_reason":"length"}],"base_resp":{"status_code":0,"status_msg":""}}',
+    "",
+  ].join("\n"), { headers: { "content-type": "text/event-stream" } });
+  await assert.rejects(
+    readStreamingModelContent(
+      response as unknown as Parameters<typeof readStreamingModelContent>[0],
+    ),
+    /没有文本内容.*finish=length.*reasoningChars=14/,
+  );
 });
 
 test("model JSON parser skips regex examples before the real object", () => {
@@ -570,4 +710,34 @@ test("target word normalization accepts model labels and explanations", () => {
     ]),
     ["blade", "rush", "glow", "teamwork"],
   );
+});
+
+test("overlong continuity summaries are clipped locally instead of regenerating the episode", () => {
+  const longSummary = `${"人物仍在钟塔，已经确认铜钥匙属于旧机器，但地板下的蓝光来源尚未解决。".repeat(80)}结尾`;
+  const normalized = normalizeContinuitySummary(longSummary);
+  assert.equal(typeof normalized, "string");
+  assert.ok((normalized as string).length <= 1200);
+  assert.match(normalized as string, /[。；]$/);
+});
+
+test("one-character item placeholders are removed locally", () => {
+  const episode = checkpointEpisode("Clean State");
+  episode.storyState.items = ["A", "铜钥匙由 Mia 保管"];
+  const parsed = storyGenerationCheckpointSchema.parse({
+    version: 1,
+    plan: validPlan,
+    episodes: [{
+      episode,
+      quality: {
+        score: 100,
+        wordCount: 220,
+        averageSentenceWords: 10,
+        lexicalCoverage: 0.98,
+        unfamiliarWords: [],
+        issues: [],
+        blockingIssues: [],
+      },
+    }],
+  });
+  assert.deepEqual(parsed.episodes[0].episode.storyState.items, ["铜钥匙由 Mia 保管"]);
 });
