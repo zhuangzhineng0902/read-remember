@@ -990,6 +990,7 @@ type ModelCallPolicy = {
   networkRetries?: number;
   structureRetries?: number;
   maxCompletionTokens?: number;
+  disableThinking?: boolean;
   recoverPartial?: (value: unknown, issues: string) => Promise<unknown | null>;
 };
 
@@ -1018,7 +1019,11 @@ export function structureModelForAttempt(
   options: Pick<StoryRunOptions, "model" | "reviewModel" | "structureRepairModel">,
   initialModel: string,
   attempt: number,
+  keepRepairModel = false,
 ) {
+  if (keepRepairModel && attempt > 1 && options.structureRepairModel) {
+    return options.structureRepairModel;
+  }
   const sequence = [
     initialModel,
     options.structureRepairModel,
@@ -1178,6 +1183,7 @@ async function callModelText(
   timeoutMs = options.timeoutMs,
   networkRetries = options.networkRetries,
   maxCompletionTokens: number = modelTokenBudgets.episode,
+  disableThinking = false,
 ) {
   let lastError: unknown;
   for (let attempt = 1; attempt <= networkRetries; attempt++) {
@@ -1196,6 +1202,7 @@ async function callModelText(
           stream: true,
           stream_options: { include_usage: true },
           reasoning_split: true,
+          ...(disableThinking ? { thinking: { type: "disabled" } } : {}),
           max_completion_tokens: maxCompletionTokens,
           messages: [
             { role: "system", content: system },
@@ -1245,7 +1252,12 @@ async function callStructured<T>(
   let lastShape = "无候选";
   const structureRetries = policy.structureRetries ?? options.structureRetries;
   for (let attempt = 1; attempt <= structureRetries; attempt++) {
-    const correctionModel = structureModelForAttempt(options, model, attempt);
+    const correctionModel = structureModelForAttempt(
+      options,
+      model,
+      attempt,
+      policy.disableThinking,
+    );
     const correctionTemperature = attempt === 1
       ? temperature
       : Math.min(temperature, options.reviewTemperature, 0.2);
@@ -1260,13 +1272,14 @@ async function callStructured<T>(
         policy.timeoutMs ?? options.timeoutMs,
         policy.networkRetries ?? options.networkRetries,
         policy.maxCompletionTokens ?? modelTokenBudgets.episode,
+        policy.disableThinking || attempt > 1,
       );
     } catch (error) {
       if (error instanceof ModelContentError && error.retryableAsStructure && attempt < structureRetries) {
         lastError = error;
         options.log(
           `模型内容输出 ${attempt}/${structureRetries} 为空，`
-          + `下一次切换到 ${structureModelForAttempt(options, model, attempt + 1)} 重新输出紧凑 JSON…`,
+          + `下一次切换到 ${structureModelForAttempt(options, model, attempt + 1, policy.disableThinking)} 重新输出紧凑 JSON…`,
         );
         prompt = `${user}\n\n上一次响应只产生了推理或空增量，没有生成最终 JSON。请缩短内部分析，直接返回一份字段完整、内容精炼的 JSON 对象；不要输出 Markdown、解释或第二个对象。`;
         continue;
@@ -1280,7 +1293,7 @@ async function callStructured<T>(
       if (attempt < structureRetries) {
         options.log(
           `模型结构输出 ${attempt}/${structureRetries} 无法解析，下一次切换到 `
-          + `${structureModelForAttempt(options, model, attempt + 1)} 重新输出严格 JSON…`,
+          + `${structureModelForAttempt(options, model, attempt + 1, policy.disableThinking)} 重新输出严格 JSON…`,
         );
       }
       prompt = `${user}\n\n上一次响应无法作为 JSON 解析：${lastError.message}。请重新输出一份完整 JSON：只能有一个顶层对象，键名和字符串必须使用英文双引号，数组必须填真实值；禁止输出 Markdown、解释、正则示例（如 [a-z]）、JSON Schema、注释或第二个对象。`;
@@ -1328,7 +1341,7 @@ async function callStructured<T>(
     if (attempt < structureRetries) {
       options.log(
         `模型结构输出 ${attempt}/${structureRetries} 不完整，下一次切换到 `
-        + `${structureModelForAttempt(options, model, attempt + 1)} 并携带字段错误自动修正：${issues}`,
+        + `${structureModelForAttempt(options, model, attempt + 1, policy.disableThinking)} 并携带字段错误自动修正：${issues}`,
       );
     }
     const rootReminder = Array.isArray(closest.value)
@@ -1383,13 +1396,14 @@ async function callEpisodeContent(
             + "storyState 使用中文字符串数组；qualityEvidence 的所有英文 quote 必须逐字存在于 paragraphs，因果和 progression 顺序必须与正文一致，"
             + "clueEvidence 只能使用本集策划上下文中的线索编号。本次禁止返回 title、paragraphs、questions。\n\n"
             + "只返回：{\"targetWords\":[\"word\"],\"continuitySummary\":\"中文\",\"storyState\":{\"characterPositions\":[\"中文\"],\"knownFacts\":[\"中文\"],\"unresolvedQuestions\":[\"中文\"],\"items\":[\"中文\"],\"relationshipChanges\":[\"中文\"]},\"qualityEvidence\":{\"idiomaticPhrase\":\"exact quote\",\"sensoryQuote\":\"exact quote\",\"causalLinks\":[{\"causeQuote\":\"exact earlier quote\",\"effectQuote\":\"exact later quote\"}],\"clueEvidence\":[{\"clueId\":\"C1\",\"action\":\"plant\",\"evidenceQuote\":\"exact quote\"}],\"progression\":{\"obstacleQuote\":\"exact quote\",\"choiceQuote\":\"exact quote\",\"consequenceQuote\":\"exact quote\",\"newInformationQuote\":\"exact quote\"}}}",
-          options.model,
+          options.structureRepairModel || options.reviewModel || options.model,
           Math.min(options.reviewTemperature, 0.15),
           {
             timeoutMs: options.timeoutMs,
             networkRetries: options.networkRetries,
             structureRetries: options.structureRetries,
             maxCompletionTokens: 4096,
+            disableThinking: true,
           },
         );
         const merged = mergeEpisodeStructure(narrative.data, metadata);
@@ -1634,9 +1648,9 @@ async function groundQuestions(
     groundedQuestionSetSchema,
     "你只输出合法 JSON。你是英语分级阅读题目终审，只能依据给出的最终正文命题，绝不补写正文没有的信息。",
     `这是第 ${episodeNumber} 集已经通过全部正文质量门禁的最终英文正文：\n${JSON.stringify(episode.paragraphs)}\n\n现在首次为它生成题目。硬性要求：\n1. 只生成 2 道四选一题：一道 detail，一道 inference 或 cause_effect。\n2. 每题 evidenceQuote 必须逐字复制上面 paragraphs 中连续存在的 3-25 个英文词，不能概括、改变时态或发明地图、动作、对话、动机。\n3. prompt、options、evidenceQuote 只能使用自然英语；选项不带 A/B/C/D 编号。\n4. 正确选项必须由 evidenceQuote 和正文上下文唯一推出；推断题只允许一步合理推断。\n5. 中文 explanation 先说明 evidenceQuote 的含义，再解释为什么正确选项成立；不得引用故事季纲、storyState 或正文外知识。\n6. 四个选项语法形式一致、长度接近；错误项可信但能被正文排除。\n\n只返回：{"questions":[{"prompt":"English question","options":["...","...","...","..."],"answer":0,"explanation":"中文解释","skill":"detail","evidenceQuote":"exact English quote"}]}`,
-    options.reviewModel || options.model,
+    options.structureRepairModel || options.reviewModel || options.model,
     0.1,
-    { maxCompletionTokens: modelTokenBudgets.questions },
+    { maxCompletionTokens: modelTokenBudgets.questions, disableThinking: true },
   );
   return result.questions;
 }

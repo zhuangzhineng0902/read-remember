@@ -222,7 +222,7 @@ npm run generate:story-series -- --config config/story-generation.json
 
 `continuitySummary` 只是下一集使用的轻量承接摘要，提示要求模型控制在 80-300 个中文字符，只保留结尾状态、关键发现和未解问题。结构上限为 1200 个字符；若模型仍偶发超长，程序会在本地按中文句末安全裁剪，不会因此重新生成整篇文章。
 
-短句比例检查只统计叙述句，`"Wait!"`、`'Look!'` 等不超过 4 个词的带引号短对话不会被误判为碎片句。模型网络请求与 JSON 结构纠错使用独立预算：普通请求默认最多等待 120 秒，完整正文重写单独允许 480 秒且每次只进行 1 次网络尝试。请求使用流式响应，并通过 Undici dispatcher 把响应头和响应体时限设置为业务超时再加 30 秒，避免 480 秒重写被 HTTP 客户端默认的 300 秒响应头时限提前截断。季纲、正文、批量评审和题目分别使用 10240、8192、8192 和 2048 的输出 Token 上限；模型在 Token 边界结束时会先解析已经收到的完整内容。若流式响应只有推理而没有最终正文，不会再当成网络问题重复相同请求，而会记录 finish reason、事件数、推理字符和业务状态，并切换到基础模型做一次紧凑 JSON 结构恢复。网络、HTTP 状态、内容响应和结构错误分别处理。可通过 `timeoutMs`、`rewriteTimeoutMs`、`networkRetries` 和 `structureRetries` 调整时间与重试预算。
+短句比例检查只统计叙述句，`"Wait!"`、`'Look!'` 等不超过 4 个词的带引号短对话不会被误判为碎片句。模型网络请求与 JSON 结构纠错使用独立预算：普通请求默认最多等待 120 秒，完整正文重写单独允许 480 秒且每次只进行 1 次网络尝试。请求使用流式响应，并通过 Undici dispatcher 把响应头和响应体时限设置为业务超时再加 30 秒，避免 480 秒重写被 HTTP 客户端默认的 300 秒响应头时限提前截断。季纲、正文、批量评审和题目分别使用 10240、8192、8192 和 2048 的输出 Token 上限；模型在 Token 边界结束时会先解析已经收到的完整内容。若流式响应只有推理而没有最终正文，不会再当成网络问题重复相同请求，而会记录 finish reason、事件数、推理字符和业务状态。网络错误仍由同一模型按短预算重试；只有空内容、JSON 无法解析或字段结构错误进入下一次结构尝试时，才优先切到 `structureRepairModel`。当前配置形成 `MiniMax-M2.7 → MiniMax-M3` 的纠错路径，而原请求已经使用 M3 时会反向切回 M2.7，避免单一模型的同类失败重复发生。阅读题和缺失元数据补齐从第一次请求起就固定使用 M3 无思考模式；其他结构纠错轮次也会发送 `thinking: {"type":"disabled"}`，让模型直接整理 JSON，而不是再次把输出额度消耗在长推理上。可通过 `timeoutMs`、`rewriteTimeoutMs`、`networkRetries`、`structureRetries` 和 `structureRepairModel` 调整时间、重试及纠错模型。
 
 题目不再混在初稿或全文修稿 JSON 中。初稿会先按最终自动门禁静默自检词数、叙述短句比例、目标词、因果顺序和逐字证据；正文依次通过结构词汇门禁与独立语义终审后，再单独生成 2 道题并核验原文证据。这样全文重写返回更小，正文改变时也不需要反复重写题目。90%-95% 之间的词汇覆盖只记录为优化提示，不再单独触发全文重写。
 
@@ -269,7 +269,7 @@ npm run generate:story-series -- --source-mode favorite --source-title "魔法�
 npm run generate:story-series -- --interest tiger --exam middle --episodes 6 --dry-run
 ```
 
-常用参数还包括 `--model`、`--review-model`、`--base-url`、`--api-key`、`--database`、`--plan-candidates`、`--episode-candidates` 和 `--force`。首稿温度默认是 `0.65`，每集候选数默认是 `3`，可在 `1-3` 之间调整。详细说明可运行 `npm run generate:story-series -- --help`。
+常用参数还包括 `--model`、`--review-model`、`--structure-repair-model`、`--base-url`、`--api-key`、`--database`、`--plan-candidates`、`--episode-candidates` 和 `--force`。首稿温度默认是 `0.65`，每集候选数默认是 `3`，可在 `1-3` 之间调整。详细说明可运行 `npm run generate:story-series -- --help`。
 
 ### 用户定制故事
 
