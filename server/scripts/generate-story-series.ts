@@ -1019,9 +1019,8 @@ export function structureModelForAttempt(
   options: Pick<StoryRunOptions, "model" | "reviewModel" | "structureRepairModel">,
   initialModel: string,
   attempt: number,
-  keepRepairModel = false,
 ) {
-  if (keepRepairModel && attempt > 1 && options.structureRepairModel) {
+  if (attempt > 1 && options.structureRepairModel) {
     return options.structureRepairModel;
   }
   const sequence = [
@@ -1226,7 +1225,9 @@ async function callModelText(
       const retryableHttp = !(error instanceof ModelHttpError) || error.retryable;
       const willRetry = !contentFailure && retryableHttp && attempt < networkRetries;
       options.log(
-        `${contentFailure ? "模型内容响应异常" : `模型网络请求 ${attempt}/${networkRetries} 失败`}：${modelRequestError(error)}`
+        `${contentFailure ? "模型内容响应异常" : `模型网络请求 ${attempt}/${networkRetries} 失败`}`
+        + `（model=${model}，thinking=${disableThinking ? "disabled" : "enabled"}，maxTokens=${maxCompletionTokens}）：`
+        + `${modelRequestError(error)}`
         + (willRetry ? "；正在重试…" : ""),
       );
       if (contentFailure || !retryableHttp) throw error;
@@ -1256,7 +1257,6 @@ async function callStructured<T>(
       options,
       model,
       attempt,
-      policy.disableThinking,
     );
     const correctionTemperature = attempt === 1
       ? temperature
@@ -1279,7 +1279,7 @@ async function callStructured<T>(
         lastError = error;
         options.log(
           `模型内容输出 ${attempt}/${structureRetries} 为空，`
-          + `下一次切换到 ${structureModelForAttempt(options, model, attempt + 1, policy.disableThinking)} 重新输出紧凑 JSON…`,
+          + `下一次切换到 ${structureModelForAttempt(options, model, attempt + 1)} 重新输出紧凑 JSON…`,
         );
         prompt = `${user}\n\n上一次响应只产生了推理或空增量，没有生成最终 JSON。请缩短内部分析，直接返回一份字段完整、内容精炼的 JSON 对象；不要输出 Markdown、解释或第二个对象。`;
         continue;
@@ -1293,7 +1293,7 @@ async function callStructured<T>(
       if (attempt < structureRetries) {
         options.log(
           `模型结构输出 ${attempt}/${structureRetries} 无法解析，下一次切换到 `
-          + `${structureModelForAttempt(options, model, attempt + 1, policy.disableThinking)} 重新输出严格 JSON…`,
+          + `${structureModelForAttempt(options, model, attempt + 1)} 重新输出严格 JSON…`,
         );
       }
       prompt = `${user}\n\n上一次响应无法作为 JSON 解析：${lastError.message}。请重新输出一份完整 JSON：只能有一个顶层对象，键名和字符串必须使用英文双引号，数组必须填真实值；禁止输出 Markdown、解释、正则示例（如 [a-z]）、JSON Schema、注释或第二个对象。`;
@@ -1341,7 +1341,7 @@ async function callStructured<T>(
     if (attempt < structureRetries) {
       options.log(
         `模型结构输出 ${attempt}/${structureRetries} 不完整，下一次切换到 `
-        + `${structureModelForAttempt(options, model, attempt + 1, policy.disableThinking)} 并携带字段错误自动修正：${issues}`,
+        + `${structureModelForAttempt(options, model, attempt + 1)} 并携带字段错误自动修正：${issues}`,
       );
     }
     const rootReminder = Array.isArray(closest.value)
@@ -2262,6 +2262,7 @@ async function repairEpisode(
       networkRetries: 1,
       structureRetries: 1,
       maxCompletionTokens: modelTokenBudgets.episode,
+      disableThinking: true,
     },
   );
 }
@@ -2614,6 +2615,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
               networkRetries: 1,
               structureRetries: 1,
               maxCompletionTokens: modelTokenBudgets.episode,
+              disableThinking: true,
             },
           );
           fullRewriteCount += 1;

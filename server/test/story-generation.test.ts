@@ -604,8 +604,7 @@ test("JSON structure correction alternates between M2.7 and M3", () => {
   assert.equal(structureModelForAttempt(models, "MiniMax-M2.7", 1), "MiniMax-M2.7");
   assert.equal(structureModelForAttempt(models, "MiniMax-M2.7", 2), "MiniMax-M3");
   assert.equal(structureModelForAttempt(models, "MiniMax-M3", 1), "MiniMax-M3");
-  assert.equal(structureModelForAttempt(models, "MiniMax-M3", 2), "MiniMax-M2.7");
-  assert.equal(structureModelForAttempt(models, "MiniMax-M3", 2, true), "MiniMax-M3");
+  assert.equal(structureModelForAttempt(models, "MiniMax-M3", 2), "MiniMax-M3");
 });
 
 test("streaming model responses are assembled even when the provider reports a token boundary", async () => {
