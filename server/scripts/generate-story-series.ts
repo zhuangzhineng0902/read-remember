@@ -2248,13 +2248,22 @@ async function repairEpisode(
   const relevantClues = plan.clueLedger.filter(
     (clue) => [clue.introducedIn, clue.usedIn, clue.payoffIn].includes(episodeNumber),
   );
+  const requiredClueActions = relevantClues.flatMap((clue) => [
+    ...(clue.introducedIn === episodeNumber ? [{ clueId: clue.id, action: "plant" as const }] : []),
+    ...(clue.usedIn === episodeNumber ? [{ clueId: clue.id, action: "use" as const }] : []),
+    ...(clue.payoffIn === episodeNumber ? [{ clueId: clue.id, action: "payoff" as const }] : []),
+  ]);
+  const preferredWordRange: [number, number] = [
+    Math.max(range[0], range[1] - 20),
+    range[1] - 8,
+  ];
   return callEpisodeContent(
     options,
     plan,
     episodeNumber,
     previousEpisode,
     "你只输出合法 JSON。你是分级阅读终审编辑，只修复自动质量检测指出的问题，并保持精彩情节和原有结构。",
-    `故事圣经：${JSON.stringify(plan.storyBible)}\n本集独立任务合同：${JSON.stringify(beat)}\n本集相关线索：${JSON.stringify(relevantClues)}\n上一集结构化状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n待修正文：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词（除 targetWords、人物专名和固定术语外，逐个换成更常见表达）：${quality.unfamiliarWords.join(", ")}\n\n正文必须保持 ${range[0]}-${range[1]} 词。title、paragraphs 和所有 quote 必须是纯英文，彻底删除其中的中文。targetWords 中的每个词必须以完整单词实际出现在正文中；不要引入新的生僻同义词。把跳跃的事件改成读者可跟随的因果链，用服务线索或情绪的五感细节连接场景，并自然保留一个适龄地道表达。不要重复上一集的主要动作或解释，必须完成本集 episodeMission、newInformation 和 irreversibleChange。不要删除关键线索、角色选择的后果或结尾悬念。每个 qualityEvidence（包括 progression）都必须逐字复制修改后 paragraphs 中真实存在的文本。修改后同步更新 qualityEvidence、continuitySummary 和 storyState。continuitySummary 必须是 80-300 个中文字符，只记录结尾状态、关键发现和未解问题，绝不能超过 1200 个字符。本阶段不要生成 questions。返回与待修正文相同结构的完整 JSON。`,
+    `故事圣经：${JSON.stringify(plan.storyBible)}\n本集独立任务合同：${JSON.stringify(beat)}\n本集相关线索：${JSON.stringify(relevantClues)}\n本集必须且只能提供的线索动作：${JSON.stringify(requiredClueActions)}\n上一集结构化状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n待修正文：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词（除 targetWords、人物专名和固定术语外，逐个换成更常见表达）：${quality.unfamiliarWords.join(", ")}\n\n正文硬范围是 ${range[0]}-${range[1]} 词；为避免再次越界，静默计数并把最终正文控制在 ${preferredWordRange[0]}-${preferredWordRange[1]} 词。title、paragraphs 和所有 quote 必须是纯英文，彻底删除其中的中文。targetWords 中的每个词必须以完整单词实际出现在正文中；不要引入新的生僻同义词。把跳跃的事件改成读者可跟随的因果链，用服务线索或情绪的五感细节连接场景，并自然保留一个适龄地道表达。不要重复上一集的主要动作或解释，必须完成本集 episodeMission、newInformation 和 irreversibleChange。不要删除关键线索、角色选择的后果或结尾悬念。clueEvidence 必须逐项且只覆盖“本集必须且只能提供的线索动作”：前集已经 plant 的线索本集只能标 use/payoff；如果某个线索动作还没有对应英文句，先把该线索自然写入正文，再逐字复制 evidenceQuote。每个 qualityEvidence（包括 progression 和 causalLinks）都必须逐字复制修改后 paragraphs 中真实存在的文本。修改后同步更新 qualityEvidence、continuitySummary 和 storyState。continuitySummary 必须是 80-300 个中文字符，只记录结尾状态、关键发现和未解问题，绝不能超过 1200 个字符。本阶段不要生成 questions。返回与待修正文相同结构的完整 JSON。`,
     options.reviewModel || options.model,
     0.1,
     {
@@ -2513,7 +2522,40 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       for (let index = generated.length; index < options.episodes; index++) {
         const episodeNumber = index + 1;
         const episodePrevious = previousEpisode;
-        const savedActive = activeEpisode?.index === index ? activeEpisode : undefined;
+        let savedActive = activeEpisode?.index === index ? activeEpisode : undefined;
+        if (savedActive) {
+          const exhaustedQuality = assessStoryQuality(
+            savedActive.episode,
+            options,
+            episodeNumber,
+            lexical,
+            plan,
+            episodePrevious,
+          );
+          const exhaustedBaseline = index > 0 ? semanticReviews[0] : null;
+          const exhaustedSemanticIssues = savedActive.semanticReview
+            ? semanticQualityIssues(savedActive.semanticReview, exhaustedBaseline)
+            : [];
+          const rejectedAfterRepair = savedActive.stage === "semantic_reviewed"
+            && exhaustedSemanticIssues.length > 0
+            && (savedActive.semanticRewriteUsed || savedActive.mechanicalRepairUsed);
+          const exhaustedRewriteBudget = savedActive.fullRewriteCount >= 2
+            && (
+              !passesStoryQualityFloor(exhaustedQuality, options.minLexicalCoverage)
+              || exhaustedSemanticIssues.length > 0
+            );
+          if (
+            rejectedAfterRepair
+            || exhaustedRewriteBudget
+          ) {
+            options.log(
+              `[${episodeNumber}/${options.episodes}] 已保存稿修复后仍未通过质量门禁，`
+              + "保留前面已完成章节，丢弃本集坏稿并重新生成 3 份候选。",
+            );
+            savedActive = undefined;
+            saveCheckpoint();
+          }
+        }
         let episode: GeneratedStoryContent;
         let quality: StoryQuality;
         let critique: StoryCritique | undefined;
@@ -2654,12 +2696,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
           throw new Error(`第 ${episodeNumber} 集语义质量未达标：${semanticIssues.join("；")}`);
         }
 
-        if (!passesStoryQualityFloor(quality, options.minLexicalCoverage) && !mechanicalRepairUsed) {
-          if (fullRewriteCount >= 2) {
-            throw new Error(
-              `第 ${episodeNumber} 集已用完 2 次完整重写预算，最终结构与词汇仍未达标：${quality.issues.join("；")}`,
-            );
-          }
+        while (!passesStoryQualityFloor(quality, options.minLexicalCoverage) && fullRewriteCount < 2) {
           reportProgress(
             options,
             "repairing",
