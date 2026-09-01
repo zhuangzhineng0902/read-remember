@@ -1,17 +1,29 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { z } from "zod";
 import {
   assessStoryQuality,
+  buildDiscardedDraftLessons,
   buildNarrativeCraftBrief,
+  buildEpisodeWritingContract,
   buildSeriesPlanPrompt,
+  callStructured,
+  creativeDraftModelPolicy,
   fragmentSentenceRatio,
+  isStrictStoryCritique,
+  isStoryCritiqueImprovement,
   loadStoryEngagementBrief,
   mergeEpisodeStructure,
+  normalizeCandidateCritiqueBatch,
   normalizeContinuitySummary,
+  normalizeEpisodeNarrative,
+  normalizePlanningArtifact,
   normalizeTargetWords,
+  narrativePreflightIssues,
   parseJson,
   parseStoryGenerationCheckpoint,
   readStreamingModelContent,
@@ -20,6 +32,9 @@ import {
   resolveReaderProfile,
   runStoryGeneration,
   selectBestStoryCritique,
+  selectDraftLessonsForPrompt,
+  semanticPlanningModelPolicy,
+  semanticRewriteModelPolicy,
   semanticQualityIssues,
   structureModelForAttempt,
   storyGenerationCheckpointSchema,
@@ -31,6 +46,7 @@ import {
   type StoryRunOptions,
 } from "../scripts/generate-story-series";
 import { createDatabase } from "../src/database";
+import { isRecoverableStoryQualityFailure } from "../src/custom-story";
 
 test("classic story prompt uses a public-domain source and controlled reader stage", () => {
   const prompt = buildSeriesPlanPrompt({
@@ -282,6 +298,30 @@ test("a complete rewritten narrative can be preserved while missing metadata is 
   assert.equal(mergeEpisodeStructure(narrativeOnly, { targetWords: [] }), null);
 });
 
+test("a complete one-paragraph narrative is split locally instead of regenerated", () => {
+  const complete = checkpointEpisode("The One Paragraph Draft");
+  const singleParagraph = complete.paragraphs.join(" ");
+  const normalized = normalizeEpisodeNarrative({
+    title: complete.title,
+    paragraphs: [singleParagraph],
+  }) as { title: string; paragraphs: string[] };
+
+  assert.equal(normalized.title, complete.title);
+  assert.ok(normalized.paragraphs.length >= 3);
+  assert.ok(normalized.paragraphs.length <= 5);
+  const originalWords = singleParagraph.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g);
+  const normalizedWords = normalized.paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g);
+  assert.deepEqual(normalizedWords, originalWords);
+
+  const metadata = {
+    targetWords: complete.targetWords,
+    continuitySummary: complete.continuitySummary,
+    storyState: complete.storyState,
+    qualityEvidence: complete.qualityEvidence,
+  };
+  assert.ok(mergeEpisodeStructure({ title: complete.title, paragraphs: [singleParagraph] }, metadata));
+});
+
 const strongCritique: StoryCritique = {
   plot: { score: 9, issues: [] },
   childAppeal: { score: 9, issues: [] },
@@ -290,6 +330,59 @@ const strongCritique: StoryCritique = {
   rewritePriorities: ["保持当前清晰推进"],
 };
 
+test("candidate critique batches preserve a single top-level review for targeted recovery", () => {
+  const singleReview = {
+    candidateIndex: "1",
+    ...strongCritique,
+  };
+
+  assert.deepEqual(normalizeCandidateCritiqueBatch(singleReview), {
+    reviews: [singleReview],
+  });
+});
+
+test("candidate critique batches normalize arrays and candidate-index keyed objects", () => {
+  const first = { candidateIndex: 0, ...strongCritique };
+  const third = { candidateIndex: 2, ...strongCritique };
+
+  assert.deepEqual(normalizeCandidateCritiqueBatch([first, third]), {
+    reviews: [first, third],
+  });
+  assert.deepEqual(normalizeCandidateCritiqueBatch({
+    0: strongCritique,
+    2: strongCritique,
+  }), {
+    reviews: [first, third],
+  });
+});
+
+test("transient planning artifacts accept richer objects and array-shaped section lists", () => {
+  const rich = {
+    unifiedCausalSpine: ["goal", "choice", "consequence"],
+    cluePlanting: { source: 1, strength: "fair clue" },
+    sensoryPalette: ["cold stone", "soft hum"],
+  };
+  assert.deepEqual(normalizePlanningArtifact(rich), rich);
+  assert.deepEqual(normalizePlanningArtifact([[{ source: 0 }, { source: 2 }]]), {
+    sections: [{ source: 0 }, { source: 2 }],
+  });
+});
+
+test("saved quality failures are eligible for bounded automatic story continuation", () => {
+  assert.equal(
+    isRecoverableStoryQualityFailure("第 2 集语义质量未达标：连续性 6.0 < 7", true),
+    true,
+  );
+  assert.equal(
+    isRecoverableStoryQualityFailure("第 2 集语义质量未达标：连续性 6.0 < 7", false),
+    false,
+  );
+  assert.equal(
+    isRecoverableStoryQualityFailure("数据库写入失败", true),
+    false,
+  );
+});
+
 test("semantic quality gate rejects a weaker later episode", () => {
   const weak = structuredClone(strongCritique);
   weak.plot.score = 7.5;
@@ -297,6 +390,136 @@ test("semantic quality gate rejects a weaker later episode", () => {
   assert.match(semanticQualityIssues(weak, strongCritique).join(" "), /剧情逻辑/);
   assert.match(semanticQualityIssues(weak, strongCritique).join(" "), /比第一集低/);
   assert.deepEqual(semanticQualityIssues(strongCritique, strongCritique), []);
+});
+
+test("strict candidate gating requires every dimension to reach eight", () => {
+  const weak = structuredClone(strongCritique);
+  weak.continuity.score = 7.9;
+  assert.equal(isStrictStoryCritique(strongCritique), true);
+  assert.equal(isStrictStoryCritique(weak), false);
+});
+
+test("an optimized story is adopted only when it remains strict and improves the average", () => {
+  const improved = structuredClone(strongCritique);
+  improved.plot.score = 9.5;
+  const equal = structuredClone(strongCritique);
+  const regressed = structuredClone(improved);
+  regressed.continuity.score = 7.5;
+
+  assert.equal(isStoryCritiqueImprovement(improved, strongCritique), true);
+  assert.equal(isStoryCritiqueImprovement(equal, strongCritique), false);
+  assert.equal(isStoryCritiqueImprovement(regressed, strongCritique), false);
+});
+
+test("narrative preflight rejects bad length, paragraph count, and mixed Chinese before model review", () => {
+  const issues = narrativePreflightIssues(
+    { examId: "middle", readerStage: "stage1" },
+    validPlan,
+    1,
+    { title: "A 门", paragraphs: ["Too short."] },
+  );
+  assert.ok(issues.some((issue) => /恰好 4 段/.test(issue)));
+  assert.ok(issues.some((issue) => /正文词数/.test(issue)));
+  assert.ok(issues.some((issue) => /夹杂中文/.test(issue)));
+});
+
+test("discarded drafts persist actionable lessons for the next generation round", () => {
+  const weak = structuredClone(strongCritique);
+  weak.plot.score = 5;
+  weak.plot.issues = ["钥匙突然出现，缺少来源", "角色选择没有产生后果"];
+  weak.rewritePriorities = ["先交代钥匙来源，再让角色承担选择后果"];
+  const active = {
+    index: 1,
+    stage: "semantic_reviewed" as const,
+    episode: checkpointEpisode("Rejected Draft"),
+    quality: {
+      score: 64,
+      wordCount: 280,
+      averageSentenceWords: 10,
+      lexicalCoverage: 0.92,
+      unfamiliarWords: [],
+      issues: ["正文过长"],
+      blockingIssues: ["正文过长"],
+    },
+    critique: weak,
+    semanticReview: weak,
+    fullRewriteCount: 2,
+    mechanicalRepairUsed: false,
+    semanticRewriteUsed: true,
+  };
+  const lessons = buildDiscardedDraftLessons(active, active.quality, ["上一轮：避免重复解释旧线索"]);
+
+  assert.ok(lessons.some((lesson) => /剧情逻辑 5\.0 分/.test(lesson)));
+  assert.ok(lessons.some((lesson) => /钥匙突然出现/.test(lesson)));
+  assert.ok(lessons.some((lesson) => /优先改进/.test(lesson)));
+  assert.ok(lessons.some((lesson) => /自动门禁：正文过长/.test(lesson)));
+  assert.ok(lessons.includes("上一轮：避免重复解释旧线索"));
+});
+
+test("candidate drafts use thinking mode with a larger independent budget", () => {
+  assert.deepEqual(creativeDraftModelPolicy({ rewriteTimeoutMs: 480_000 }), {
+    timeoutMs: 480_000,
+    maxCompletionTokens: 16_384,
+    disableThinking: false,
+  });
+});
+
+test("semantic full rewrites use MiniMax M3 direct output with a recovery retry", () => {
+  assert.deepEqual(semanticRewriteModelPolicy({ rewriteTimeoutMs: 480_000 }), {
+    timeoutMs: 480_000,
+    networkRetries: 1,
+    structureRetries: 2,
+    maxCompletionTokens: 8_192,
+    disableThinking: true,
+  });
+});
+
+test("semantic rewrite planning thinks before the direct JSON execution stage", () => {
+  assert.deepEqual(semanticPlanningModelPolicy({ rewriteTimeoutMs: 480_000 }), {
+    timeoutMs: 480_000,
+    networkRetries: 1,
+    structureRetries: 2,
+    maxCompletionTokens: 16_384,
+    disableThinking: false,
+  });
+});
+
+test("episode writing contracts cap hard story work at four paragraph cards", () => {
+  const overloaded = structuredClone(validPlan);
+  overloaded.episodes[1].newInformation = [
+    "伙伴找到一个藏在齿轮后的铜盒",
+    "广播员拒绝解释慢一分钟的原因",
+    "Ben 当着所有人做出了错误指控",
+  ];
+  const contract = buildEpisodeWritingContract({ examId: "middle" }, overloaded, 2);
+
+  assert.equal(contract.paragraphCards.length, 4);
+  assert.equal(contract.requiredEvents.length, 6);
+  assert.match(contract.requiredEvents[4], /铜盒/);
+  assert.ok(contract.optionalIfSpace.some((item) => /广播员/.test(item)));
+  assert.ok(contract.optionalIfSpace.some((item) => /Ben/.test(item)));
+  assert.deepEqual(contract.requiredClueActions, [
+    { clueId: "C1", action: "payoff" },
+    { clueId: "C2", action: "payoff" },
+  ]);
+});
+
+test("discarded draft feedback is compacted before entering a new prompt", () => {
+  const lessons = selectDraftLessonsForPrompt([
+    "剧情逻辑 6.0 分：选择没有导致后果",
+    "剧情逻辑 5.0 分：重要物件没有来源",
+    "连续性 6.0 分：重复上一集的发现",
+    "优先改进：先交代钥匙的来源",
+    "优先改进：让角色的选择造成代价",
+    "优先改进：结尾只保留一个悬念",
+    "优先改进：这条应该因同类过多而被去掉",
+    "自动门禁：正文过长",
+  ]);
+
+  assert.ok(lessons.length <= 8);
+  assert.equal(lessons.filter((lesson) => lesson.startsWith("剧情逻辑")).length, 1);
+  assert.equal(lessons.filter((lesson) => lesson.startsWith("优先改进")).length, 3);
+  assert.ok(lessons.some((lesson) => lesson.startsWith("自动门禁")));
 });
 
 test("candidate selection favors plot and child appeal quality", () => {
@@ -648,6 +871,67 @@ test("reasoning-only streaming responses report finish and diagnostic details", 
     ),
     /没有文本内容.*finish=length.*reasoningChars=14/,
   );
+});
+
+test("reasoning-only length responses recover through MiniMax M3 direct output independently of structure retries", async () => {
+  const requestBodies: Array<Record<string, unknown>> = [];
+  const logs: string[] = [];
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      requestBodies.push(JSON.parse(body) as Record<string, unknown>);
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      if (requestBodies.length === 1) {
+        response.end([
+        'data: {"choices":[{"delta":{"reasoning_content":"planned the final object"},"finish_reason":null}]}',
+        "",
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}],"base_resp":{"status_code":0,"status_msg":""}}',
+        "",
+        ].join("\n"));
+        return;
+      }
+      response.end(
+        'data: {"choices":[{"delta":{"content":"{\\"ok\\":true}"},"finish_reason":"stop"}],"base_resp":{"status_code":0,"status_msg":""}}\n\n',
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const result = await callStructured(
+      {
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        apiPath: "/chat/completions",
+        apiKey: "",
+        model: "MiniMax-M2.7",
+        reviewModel: "MiniMax-M3",
+        structureRepairModel: "MiniMax-M3",
+        temperature: 0.65,
+        reviewTemperature: 0.15,
+        timeoutMs: 1_000,
+        rewriteTimeoutMs: 1_000,
+        networkRetries: 1,
+        structureRetries: 1,
+        log: (message: string) => { logs.push(message); },
+      } as unknown as StoryRunOptions,
+      z.object({ ok: z.boolean() }),
+      "Return JSON.",
+      "Return an object.",
+      "MiniMax-M3",
+      0.15,
+      { structureRetries: 1, maxCompletionTokens: 16_384 },
+    );
+    assert.deepEqual(result, { ok: true });
+    assert.equal(requestBodies.length, 2);
+    assert.equal(requestBodies[1].model, "MiniMax-M3");
+    assert.deepEqual(requestBodies[1].thinking, { type: "disabled" });
+    assert.match(logs.join(" "), /自动切换.*MiniMax-M3.*直接输出模式/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test("model JSON parser skips regex examples before the real object", () => {

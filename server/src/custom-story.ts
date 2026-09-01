@@ -46,6 +46,19 @@ const checkpointStageLabels: Record<string, string> = {
   semantic_rewritten: "剧情修稿",
 };
 
+const automaticQualityRetryLimit = 2;
+
+export function isRecoverableStoryQualityFailure(message: string, resumeAvailable: boolean) {
+  if (!resumeAvailable) return false;
+  return [
+    "候选初稿连续未达到编辑底线",
+    "语义质量未达标",
+    "最终结构修稿造成语义退化",
+    "最终结构与词汇修稿后仍未达标",
+    "独立命题连续 2 次未通过原文证据检查",
+  ].some((marker) => message.includes(marker));
+}
+
 export class CustomStoryService implements CustomStoryProvider {
   private queue = Promise.resolve();
 
@@ -92,7 +105,7 @@ export class CustomStoryService implements CustomStoryProvider {
       .get(requestId) as CustomStoryRequestRow | undefined;
   }
 
-  private async generate(requestId: string) {
+  private async generate(requestId: string, automaticQualityRetry = 0): Promise<void> {
     const request = this.request(requestId);
     if (!request) return;
     const checkpoint = this.parseCheckpoint(request.checkpointJson);
@@ -175,6 +188,26 @@ export class CustomStoryService implements CustomStoryProvider {
       const savedCheckpoint = saved?.checkpointJson
         ? this.parseCheckpoint(saved.checkpointJson)
         : null;
+      const errorMessage = error instanceof Error ? error.message : "故事生成失败";
+      if (
+        automaticQualityRetry < automaticQualityRetryLimit
+        && isRecoverableStoryQualityFailure(errorMessage, Boolean(savedCheckpoint))
+      ) {
+        const nextAttempt = automaticQualityRetry + 1;
+        console.log(
+          `[custom-story:${request.id}] 本轮稿件未达到发布质量，但检查点完整；`
+          + `正在自动吸取废稿经验并换稿（自动续跑 ${nextAttempt}/${automaticQualityRetryLimit}）：${errorMessage}`,
+        );
+        this.db.prepare(
+          `UPDATE custom_story_requests SET status = 'generating', error_message = '',
+           progress_stage = 'drafting', progress_message = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+        ).run(
+          `本轮稿件未达标，正在吸取经验并自动重写（${nextAttempt}/${automaticQualityRetryLimit}）`,
+          request.id,
+        );
+        return this.generate(requestId, nextAttempt);
+      }
       const resumeMessage = savedCheckpoint
         ? savedCheckpoint.activeEpisode
           ? `已保存第 ${savedCheckpoint.activeEpisode.index + 1} 集的${checkpointStageLabels[savedCheckpoint.activeEpisode.stage] ?? "阶段成果"}，重试后将从这里继续`
@@ -187,7 +220,7 @@ export class CustomStoryService implements CustomStoryProvider {
          progress_stage = 'failed', progress_message = ?,
          updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
       ).run(
-        error instanceof Error ? error.message.slice(0, 1000) : "故事生成失败",
+        errorMessage.slice(0, 1000),
         resumeMessage,
         request.id,
       );

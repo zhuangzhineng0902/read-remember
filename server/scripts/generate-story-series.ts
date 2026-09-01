@@ -487,8 +487,87 @@ const episodeMetadataSchema = z.object({
 
 const episodeContentSchema = episodeNarrativeSchema.extend(episodeMetadataSchema.shape);
 
+function paragraphText(value: unknown): string | null {
+  if (typeof value === "string") return value.trim();
+  if (!Array.isArray(value)) return null;
+  const parts = value.map(paragraphText);
+  if (parts.some((part) => part === null)) return null;
+  return parts.filter(Boolean).join(" ").trim();
+}
+
+function balancedNarrativeParagraphs(paragraphs: string[]) {
+  if (paragraphs.length >= 3) return paragraphs;
+  const text = paragraphs.join(" ").replace(/\s+/g, " ").trim();
+  const words = text.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? [];
+  const targetCount = Math.max(3, Math.min(5, Math.round(words.length / 70) || 3));
+  const sentences = narrativeSentences(text);
+  if (sentences.length >= targetCount) {
+    const sentenceWordCounts = sentences.map(
+      (sentence) => sentence.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0,
+    );
+    const totalWords = sentenceWordCounts.reduce((total, count) => total + count, 0);
+    const result: string[] = [];
+    let sentenceIndex = 0;
+    let consumedWords = 0;
+    for (let groupIndex = 0; groupIndex < targetCount; groupIndex++) {
+      const groupsLeft = targetCount - groupIndex;
+      const maxEnd = sentences.length - (groupsLeft - 1);
+      const desiredWords = (totalWords - consumedWords) / groupsLeft;
+      let end = sentenceIndex + 1;
+      let groupWords = sentenceWordCounts[sentenceIndex] ?? 0;
+      while (end < maxEnd) {
+        const nextWords = sentenceWordCounts[end] ?? 0;
+        if (groupWords >= desiredWords * 0.8 && groupWords + nextWords > desiredWords * 1.2) break;
+        groupWords += nextWords;
+        end++;
+      }
+      result.push(sentences.slice(sentenceIndex, end).join(" "));
+      sentenceIndex = end;
+      consumedWords += groupWords;
+    }
+    return result;
+  }
+
+  // 极少数模型会把整篇正文写成一两个超长句。此时按空白词元均分，
+  // 仍只改变展示分段，不增删词元；后续质量门禁会检查句子和证据。
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (tokens.length < targetCount) return paragraphs;
+  const result: string[] = [];
+  let offset = 0;
+  for (let index = 0; index < targetCount; index++) {
+    const groupsLeft = targetCount - index;
+    const size = Math.ceil((tokens.length - offset) / groupsLeft);
+    result.push(tokens.slice(offset, offset + size).join(" "));
+    offset += size;
+  }
+  return result;
+}
+
+export function normalizeEpisodeNarrative(value: unknown, fallbackTitle = "") {
+  let candidate = value;
+  while (Array.isArray(candidate) && candidate.length === 1) candidate = candidate[0];
+  if (!candidate || typeof candidate !== "object") return value;
+  const record = candidate as Record<string, unknown>;
+  const title = typeof record.title === "string" && record.title.trim()
+    ? record.title.trim()
+    : fallbackTitle.trim();
+  const rawParagraphs = typeof record.paragraphs === "string"
+    ? [record.paragraphs]
+    : Array.isArray(record.paragraphs)
+      ? record.paragraphs
+      : null;
+  if (!title || !rawParagraphs?.length) return value;
+  const paragraphs = rawParagraphs.map(paragraphText);
+  if (paragraphs.some((paragraph) => !paragraph)) return value;
+  return {
+    ...record,
+    title,
+    paragraphs: balancedNarrativeParagraphs(paragraphs as string[]),
+  };
+}
+
 export function mergeEpisodeStructure(narrative: unknown, metadata: unknown) {
-  const parsedNarrative = episodeNarrativeSchema.safeParse(narrative);
+  const parsedNarrative = episodeNarrativeSchema.safeParse(normalizeEpisodeNarrative(narrative));
   const parsedMetadata = episodeMetadataSchema.safeParse(metadata);
   if (!parsedNarrative.success || !parsedMetadata.success) return null;
   return episodeContentSchema.parse({ ...parsedNarrative.data, ...parsedMetadata.data });
@@ -503,18 +582,78 @@ const groundedQuestionSetSchema = z.object({
 });
 
 const storyCritiqueSchema = z.object({
-  plot: z.object({ score: z.number().min(0).max(10), issues: z.array(z.string()).max(8) }),
-  childAppeal: z.object({ score: z.number().min(0).max(10), issues: z.array(z.string()).max(8) }),
-  gradedLanguage: z.object({ score: z.number().min(0).max(10), issues: z.array(z.string()).max(8) }),
-  continuity: z.object({ score: z.number().min(0).max(10), issues: z.array(z.string()).max(8) }),
-  rewritePriorities: z.array(z.string().trim().min(4).max(300)).min(1).max(8),
+  plot: z.object({
+    score: z.number().min(0).max(10),
+    issues: z.array(z.string()).transform((items) => items.slice(0, 8)),
+  }),
+  childAppeal: z.object({
+    score: z.number().min(0).max(10),
+    issues: z.array(z.string()).transform((items) => items.slice(0, 8)),
+  }),
+  gradedLanguage: z.object({
+    score: z.number().min(0).max(10),
+    issues: z.array(z.string()).transform((items) => items.slice(0, 8)),
+  }),
+  continuity: z.object({
+    score: z.number().min(0).max(10),
+    issues: z.array(z.string()).transform((items) => items.slice(0, 8)),
+  }),
+  rewritePriorities: z.array(z.string().trim().min(4).max(300))
+    .min(1)
+    .transform((items) => items.slice(0, 8)),
 });
 
-const candidateCritiqueBatchSchema = z.object({
-  reviews: z.array(storyCritiqueSchema.extend({
-    candidateIndex: z.number().int().min(0).max(2),
-  })).min(1).max(3),
+export function normalizePlanningArtifact(value: unknown) {
+  let candidate = value;
+  while (Array.isArray(candidate) && candidate.length === 1) candidate = candidate[0];
+  if (Array.isArray(candidate)) return { sections: candidate };
+  return candidate;
+}
+
+// Planning artifacts are transient model-to-model context, not persisted
+// business data. Accept richer field layouts instead of wasting a request on
+// renaming keys; strict schemas remain on the final narrative and critique.
+const planningArtifactSchema = z.preprocess(
+  normalizePlanningArtifact,
+  z.record(z.string(), z.unknown()).refine(
+    (value) => Object.keys(value).length >= 2,
+    "策划对象至少需要两个有效部分",
+  ),
+);
+
+const semanticRewritePlanSchema = planningArtifactSchema;
+const draftSynthesisPlanSchema = planningArtifactSchema;
+
+const candidateCritiqueSchema = storyCritiqueSchema.extend({
+  candidateIndex: z.preprocess(
+    (value) => typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value,
+    z.number().int().min(0).max(2),
+  ),
 });
+
+export function normalizeCandidateCritiqueBatch(value: unknown) {
+  let candidate = value;
+  while (Array.isArray(candidate) && candidate.length === 1) candidate = candidate[0];
+  if (Array.isArray(candidate)) return { reviews: candidate };
+  if (!candidate || typeof candidate !== "object") return value;
+  const record = candidate as Record<string, unknown>;
+  if (Array.isArray(record.reviews)) return { reviews: record.reviews };
+  if (record.reviews && typeof record.reviews === "object") return { reviews: [record.reviews] };
+  for (const key of ["data", "result", "candidates", "items"]) {
+    const nested = record[key];
+    if (Array.isArray(nested)) return { reviews: nested };
+  }
+  if ("candidateIndex" in record) return { reviews: [record] };
+  const keyedReviews = Object.entries(record)
+    .filter(([key, nested]) => /^\d+$/.test(key) && nested && typeof nested === "object")
+    .map(([key, nested]) => ({ candidateIndex: Number(key), ...(nested as Record<string, unknown>) }));
+  return keyedReviews.length ? { reviews: keyedReviews } : value;
+}
+
+const candidateCritiqueBatchSchema = z.preprocess(
+  normalizeCandidateCritiqueBatch,
+  z.object({ reviews: z.array(candidateCritiqueSchema).min(1).max(3) }),
+);
 
 export type SeriesPlan = z.infer<typeof planSchema>;
 export type GeneratedStoryContent = z.infer<typeof episodeContentSchema>;
@@ -635,6 +774,7 @@ const currentStoryGenerationCheckpointSchema = z.object({
   version: z.literal(2),
   plan: planSchema,
   episodes: z.array(completedEpisodeCheckpointSchema).max(30),
+  discardedDraftLessons: z.array(z.string().trim().min(4).max(500)).max(20).optional(),
   activeEpisode: z.object({
     index: z.number().int().min(0).max(29),
     stage: z.enum(activeEpisodeStages),
@@ -642,7 +782,7 @@ const currentStoryGenerationCheckpointSchema = z.object({
     quality: storyQualityCheckpointSchema.optional(),
     critique: storyCritiqueSchema.optional(),
     semanticReview: storyCritiqueSchema.optional(),
-    fullRewriteCount: z.number().int().min(0).max(2),
+    fullRewriteCount: z.number().int().min(0).max(4),
     mechanicalRepairUsed: z.boolean(),
     semanticRewriteUsed: z.boolean(),
   }).optional(),
@@ -656,6 +796,59 @@ export const storyGenerationCheckpointSchema = z.union([
 export type StoryGenerationCheckpointInput = z.infer<typeof storyGenerationCheckpointSchema>;
 export type StoryGenerationCheckpoint = z.infer<typeof currentStoryGenerationCheckpointSchema>;
 export type ActiveEpisodeCheckpoint = NonNullable<StoryGenerationCheckpoint["activeEpisode"]>;
+
+export function buildDiscardedDraftLessons(
+  active: ActiveEpisodeCheckpoint,
+  quality: StoryQuality,
+  previous: string[] = [],
+) {
+  const dimensionLabels: Record<(typeof critiqueDimensions)[number], string> = {
+    plot: "剧情逻辑",
+    childAppeal: "儿童吸引力",
+    gradedLanguage: "分级英语",
+    continuity: "连续性",
+  };
+  const review = active.semanticReview ?? active.critique;
+  const currentLessons = [
+    ...(review
+      ? critiqueDimensions.flatMap((dimension) => {
+          const result = review[dimension];
+          if (result.score >= 8 && !result.issues.length) return [];
+          const issues = result.issues.slice(0, 3).join("；") || "未达到发布标准";
+          return [`${dimensionLabels[dimension]} ${result.score.toFixed(1)} 分：${issues}`];
+        })
+      : []),
+    ...(review?.rewritePriorities.slice(0, 6).map((priority) => `优先改进：${priority}`) ?? []),
+    ...quality.blockingIssues.slice(0, 6).map((issue) => `自动门禁：${issue}`),
+  ];
+  return [...new Set([...previous, ...currentLessons].map((lesson) => lesson.trim()).filter(Boolean))]
+    .slice(-20)
+    .map((lesson) => lesson.slice(0, 500));
+}
+
+export function selectDraftLessonsForPrompt(lessons: string[], maximum = 8) {
+  const categoryCounts = new Map<string, number>();
+  const selected: string[] = [];
+  for (const lesson of [...lessons].reverse()) {
+    const category = ["剧情逻辑", "儿童吸引力", "分级英语", "连续性", "优先改进", "自动门禁"]
+      .find((prefix) => lesson.startsWith(prefix))
+      ?? lesson.match(/^([^：:]{2,12})[：:]/)?.[1]
+      ?? "其他";
+    const categoryLimit = category === "优先改进" ? 3 : 1;
+    const count = categoryCounts.get(category) ?? 0;
+    if (count >= categoryLimit) continue;
+    const compact = lesson
+      .replace(/\s+/g, " ")
+      .split(/；(?=.{80,})/, 1)[0]
+      .trim()
+      .slice(0, 320);
+    if (!compact) continue;
+    selected.push(compact);
+    categoryCounts.set(category, count + 1);
+    if (selected.length >= maximum) break;
+  }
+  return selected.reverse();
+}
 
 export function parseStoryGenerationCheckpoint(value: unknown) {
   const current = currentStoryGenerationCheckpointSchema.safeParse(value);
@@ -738,7 +931,7 @@ const defaultOptions: Omit<StoryRunOptions, "log"> = {
   episodeCandidates: 3,
   minLexicalCoverage: 0.95,
   temperature: 0.65,
-  reviewTemperature: 0.25,
+  reviewTemperature: 0.15,
   timeoutMs: 120_000,
   rewriteTimeoutMs: 480_000,
   networkRetries: 2,
@@ -997,12 +1190,52 @@ type ModelCallPolicy = {
 const modelTokenBudgets = {
   plan: 10240,
   episode: 8192,
+  creativeEpisode: 16384,
   critique: 8192,
   questions: 2048,
 } as const;
 
+export function creativeDraftModelPolicy(
+  options: Pick<StoryRunOptions, "rewriteTimeoutMs">,
+): ModelCallPolicy {
+  return {
+    timeoutMs: options.rewriteTimeoutMs,
+    maxCompletionTokens: modelTokenBudgets.creativeEpisode,
+    disableThinking: false,
+  };
+}
+
+export function semanticRewriteModelPolicy(
+  options: Pick<StoryRunOptions, "rewriteTimeoutMs">,
+): ModelCallPolicy {
+  return {
+    timeoutMs: options.rewriteTimeoutMs,
+    networkRetries: 1,
+    structureRetries: 2,
+    maxCompletionTokens: modelTokenBudgets.episode,
+    disableThinking: true,
+  };
+}
+
+export function semanticPlanningModelPolicy(
+  options: Pick<StoryRunOptions, "rewriteTimeoutMs">,
+): ModelCallPolicy {
+  return {
+    timeoutMs: options.rewriteTimeoutMs,
+    networkRetries: 1,
+    structureRetries: 2,
+    maxCompletionTokens: modelTokenBudgets.creativeEpisode,
+    disableThinking: false,
+  };
+}
+
 class ModelContentError extends Error {
-  constructor(message: string, readonly retryableAsStructure: boolean) {
+  constructor(
+    message: string,
+    readonly retryableAsStructure: boolean,
+    readonly finishReason = "unknown",
+    readonly reasoningTail = "",
+  ) {
     super(message);
     this.name = "ModelContentError";
   }
@@ -1100,6 +1333,7 @@ export async function readStreamingModelContent(response: Awaited<ReturnType<typ
   let buffer = "";
   let content = "";
   let reasoningCharacters = 0;
+  let reasoningTail = "";
   let eventCount = 0;
   let finishReason = "unknown";
   let statusCode: number | string = "unknown";
@@ -1138,12 +1372,13 @@ export async function readStreamingModelContent(response: Awaited<ReturnType<typ
       || modelContentText(choice?.delta?.text)
       || modelContentText(choice?.message?.content)
       || modelContentText(choice?.text);
-    reasoningCharacters += modelContentText(choice?.delta?.reasoning_content).length;
+    const reasoningParts = [modelContentText(choice?.delta?.reasoning_content)];
     if (Array.isArray(choice?.delta?.reasoning_details)) {
-      reasoningCharacters += choice.delta.reasoning_details.reduce(
-        (total, detail) => total + modelContentText(detail).length,
-        0,
-      );
+      reasoningParts.push(...choice.delta.reasoning_details.map(modelContentText));
+    }
+    for (const reasoningPart of reasoningParts) {
+      reasoningCharacters += reasoningPart.length;
+      if (reasoningPart) reasoningTail = `${reasoningTail}${reasoningPart}`.slice(-16_000);
     }
   };
 
@@ -1168,6 +1403,8 @@ export async function readStreamingModelContent(response: Awaited<ReturnType<typ
       `模型流式响应中没有文本内容（finish=${finishReason}，events=${eventCount}，`
       + `reasoningChars=${reasoningCharacters}，status=${statusCode}:${statusMessage || "empty"}）`,
       !outputSensitive && finishReason !== "content_filter",
+      finishReason,
+      reasoningTail,
     );
   }
   return content;
@@ -1225,7 +1462,7 @@ async function callModelText(
       const retryableHttp = !(error instanceof ModelHttpError) || error.retryable;
       const willRetry = !contentFailure && retryableHttp && attempt < networkRetries;
       options.log(
-        `${contentFailure ? "模型内容响应异常" : `模型网络请求 ${attempt}/${networkRetries} 失败`}`
+        `${contentFailure ? "模型内容响应待恢复" : `模型网络请求 ${attempt}/${networkRetries} 失败`}`
         + `（model=${model}，thinking=${disableThinking ? "disabled" : "enabled"}，maxTokens=${maxCompletionTokens}）：`
         + `${modelRequestError(error)}`
         + (willRetry ? "；正在重试…" : ""),
@@ -1239,7 +1476,7 @@ async function callModelText(
   throw lastError;
 }
 
-async function callStructured<T>(
+export async function callStructured<T>(
   options: StoryRunOptions,
   schema: z.ZodType<T>,
   system: string,
@@ -1252,7 +1489,7 @@ async function callStructured<T>(
   let lastError: Error | null = null;
   let lastShape = "无候选";
   const structureRetries = policy.structureRetries ?? options.structureRetries;
-  for (let attempt = 1; attempt <= structureRetries; attempt++) {
+  structureAttempt: for (let attempt = 1; attempt <= structureRetries; attempt++) {
     const correctionModel = structureModelForAttempt(
       options,
       model,
@@ -1261,30 +1498,57 @@ async function callStructured<T>(
     const correctionTemperature = attempt === 1
       ? temperature
       : Math.min(temperature, options.reviewTemperature, 0.2);
-    let content: string;
-    try {
-      content = await callModelText(
-        options,
-        system,
-        prompt,
-        correctionModel,
-        correctionTemperature,
-        policy.timeoutMs ?? options.timeoutMs,
-        policy.networkRetries ?? options.networkRetries,
-        policy.maxCompletionTokens ?? modelTokenBudgets.episode,
-        policy.disableThinking || attempt > 1,
-      );
-    } catch (error) {
-      if (error instanceof ModelContentError && error.retryableAsStructure && attempt < structureRetries) {
-        lastError = error;
-        options.log(
-          `模型内容输出 ${attempt}/${structureRetries} 为空，`
-          + `下一次切换到 ${structureModelForAttempt(options, model, attempt + 1)} 重新输出紧凑 JSON…`,
+    let content = "";
+    let recoveryPrompt = prompt;
+    for (let recoveryAttempt = 0; recoveryAttempt <= 2; recoveryAttempt++) {
+      const recoveringEmptyContent = recoveryAttempt > 0;
+      const requestModel = recoveringEmptyContent
+        ? options.structureRepairModel || options.reviewModel || correctionModel
+        : correctionModel;
+      const requestTemperature = recoveringEmptyContent
+        ? Math.min(options.reviewTemperature, 0.15)
+        : correctionTemperature;
+      const requestMaxTokens = recoveringEmptyContent
+        ? Math.min(policy.maxCompletionTokens ?? modelTokenBudgets.episode, 12_288)
+        : policy.maxCompletionTokens ?? modelTokenBudgets.episode;
+      try {
+        content = await callModelText(
+          options,
+          system,
+          recoveryPrompt,
+          requestModel,
+          requestTemperature,
+          policy.timeoutMs ?? options.timeoutMs,
+          recoveringEmptyContent ? 1 : policy.networkRetries ?? options.networkRetries,
+          requestMaxTokens,
+          policy.disableThinking || attempt > 1 || recoveringEmptyContent,
         );
-        prompt = `${user}\n\n上一次响应只产生了推理或空增量，没有生成最终 JSON。请缩短内部分析，直接返回一份字段完整、内容精炼的 JSON 对象；不要输出 Markdown、解释或第二个对象。`;
-        continue;
+        break;
+      } catch (error) {
+        if (!(error instanceof ModelContentError) || !error.retryableAsStructure) throw error;
+        lastError = error;
+        if (recoveryAttempt < 2) {
+          const reasoningHint = error.reasoningTail
+            ? `\n\n上一次推理的末尾如下，仅作为未完成草稿参考，不得原样复述：\n${error.reasoningTail}`
+            : "";
+          const fallbackModel = options.structureRepairModel || options.reviewModel || correctionModel;
+          options.log(
+            `模型只产生推理且未返回正文（finish=${error.finishReason}），`
+            + `已自动切换到 ${fallbackModel} 的直接输出模式`
+            + `（恢复 ${recoveryAttempt + 1}/2）…`,
+          );
+          recoveryPrompt = `${prompt}${reasoningHint}\n\n上一次已完成分析但没有留下最终文本。现在禁止继续分析；立即根据原任务输出一份字段完整、内容精炼的最终 JSON 对象。只输出 JSON，不要 Markdown、解释或第二个对象。`;
+          continue;
+        }
+        if (attempt < structureRetries) {
+          options.log(
+            `模型内容恢复已用完，进入第 ${attempt + 1}/${structureRetries} 次结构重建…`,
+          );
+          prompt = `${user}\n\n前一轮响应只产生了推理或空增量。请直接重建并返回一份完整紧凑的 JSON 对象。`;
+          continue structureAttempt;
+        }
+        throw new Error(`模型连续只返回推理而无最终文本，自动直输恢复已用完：${error.message}`);
       }
-      throw error;
     }
     const values = structuredJsonValues(content);
     lastShape = values.slice(0, 8).map(structuredValueShape).join(" → ") || "无候选";
@@ -1357,6 +1621,42 @@ async function callStructured<T>(
   throw new Error("模型没有返回符合结构的 JSON");
 }
 
+async function completeEpisodeMetadata(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  episodeNumber: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+  narrative: z.infer<typeof episodeNarrativeSchema>,
+) {
+  const readerProfile = resolveReaderProfile(options);
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+  const requiredClueActions = contract.requiredClueActions;
+  return callStructured(
+    options,
+    episodeMetadataSchema,
+    "你只输出合法 JSON。你是故事数据整理编辑，只为已经定稿的英文正文补齐结构化元数据，绝不改写或重复正文。",
+    `本集写作合同：${JSON.stringify(contract)}\n`
+      + `本集必须且只能返回的线索动作：${JSON.stringify(requiredClueActions)}\n`
+      + `上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n`
+      + `已定稿标题与正文：${JSON.stringify(narrative)}\n\n`
+      + "只根据这份最终正文生成 targetWords、continuitySummary、storyState、qualityEvidence。"
+      + `targetWords 选 4-${readerProfile.maxNewWords} 个且必须逐字出现在正文；continuitySummary 用 80-300 个中文字符记录结尾状态、关键发现和未解问题；`
+      + "storyState 使用中文字符串数组；qualityEvidence 的所有英文 quote 必须逐字存在于 paragraphs，因果和 progression 顺序必须与正文一致；"
+      + "progression 四个 quote 必须互不相同并按 obstacle、choice、consequence、newInformation 的正文顺序出现；"
+      + "clueEvidence 必须逐项且只覆盖上面列出的线索动作，不得改变 action、漏项或增加其他动作。本次禁止返回 title、paragraphs、questions。\n\n"
+      + "只返回：{\"targetWords\":[\"word\"],\"continuitySummary\":\"中文\",\"storyState\":{\"characterPositions\":[\"中文\"],\"knownFacts\":[\"中文\"],\"unresolvedQuestions\":[\"中文\"],\"items\":[\"中文\"],\"relationshipChanges\":[\"中文\"]},\"qualityEvidence\":{\"idiomaticPhrase\":\"exact quote\",\"sensoryQuote\":\"exact quote\",\"causalLinks\":[{\"causeQuote\":\"exact earlier quote\",\"effectQuote\":\"exact later quote\"}],\"clueEvidence\":[{\"clueId\":\"C1\",\"action\":\"plant\",\"evidenceQuote\":\"exact quote\"}],\"progression\":{\"obstacleQuote\":\"exact quote\",\"choiceQuote\":\"exact quote\",\"consequenceQuote\":\"exact quote\",\"newInformationQuote\":\"exact quote\"}}}",
+    options.structureRepairModel || options.reviewModel || options.model,
+    Math.min(options.reviewTemperature, 0.15),
+    {
+      timeoutMs: options.timeoutMs,
+      networkRetries: options.networkRetries,
+      structureRetries: options.structureRetries,
+      maxCompletionTokens: 4096,
+      disableThinking: true,
+    },
+  );
+}
+
 async function callEpisodeContent(
   options: StoryRunOptions,
   plan: SeriesPlan,
@@ -1378,33 +1678,29 @@ async function callEpisodeContent(
     {
       ...policy,
       recoverPartial: async (value, issues) => {
-        const narrative = episodeNarrativeSchema.safeParse(value);
+        const normalizedNarrative = normalizeEpisodeNarrative(value);
+        const narrative = episodeNarrativeSchema.safeParse(normalizedNarrative);
         if (!narrative.success) return null;
+        const originalParagraphCount = value && typeof value === "object"
+          && Array.isArray((value as Record<string, unknown>).paragraphs)
+          ? ((value as Record<string, unknown>).paragraphs as unknown[]).length
+          : null;
+        if (originalParagraphCount !== null && originalParagraphCount < 3) {
+          options.log(
+            `[${episodeNumber}/${options.episodes}] 模型正文只有 ${originalParagraphCount} 段，`
+            + `已按完整句子和词数在本地均衡拆分为 ${narrative.data.paragraphs.length} 段。`,
+          );
+        }
         options.log(
           `[${episodeNumber}/${options.episodes}] 模型已返回完整 title/paragraphs，但附属字段不完整（${issues}）；`
           + "保留正文，正在单独补齐连续性状态、目标词和质量证据…",
         );
-        const metadata = await callStructured(
+        const metadata = await completeEpisodeMetadata(
           options,
-          episodeMetadataSchema,
-          "你只输出合法 JSON。你是故事数据整理编辑，只为已经定稿的英文正文补齐结构化元数据，绝不改写或重复正文。",
-          `本集策划上下文：${JSON.stringify(episodePlanContext(plan, episodeNumber))}\n`
-            + `上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n`
-            + `已定稿标题与正文：${JSON.stringify(narrative.data)}\n\n`
-            + "只根据这份最终正文生成 targetWords、continuitySummary、storyState、qualityEvidence。"
-            + "targetWords 选 4-6 个且必须逐字出现在正文；continuitySummary 用 80-300 个中文字符记录结尾状态、关键发现和未解问题；"
-            + "storyState 使用中文字符串数组；qualityEvidence 的所有英文 quote 必须逐字存在于 paragraphs，因果和 progression 顺序必须与正文一致，"
-            + "clueEvidence 只能使用本集策划上下文中的线索编号。本次禁止返回 title、paragraphs、questions。\n\n"
-            + "只返回：{\"targetWords\":[\"word\"],\"continuitySummary\":\"中文\",\"storyState\":{\"characterPositions\":[\"中文\"],\"knownFacts\":[\"中文\"],\"unresolvedQuestions\":[\"中文\"],\"items\":[\"中文\"],\"relationshipChanges\":[\"中文\"]},\"qualityEvidence\":{\"idiomaticPhrase\":\"exact quote\",\"sensoryQuote\":\"exact quote\",\"causalLinks\":[{\"causeQuote\":\"exact earlier quote\",\"effectQuote\":\"exact later quote\"}],\"clueEvidence\":[{\"clueId\":\"C1\",\"action\":\"plant\",\"evidenceQuote\":\"exact quote\"}],\"progression\":{\"obstacleQuote\":\"exact quote\",\"choiceQuote\":\"exact quote\",\"consequenceQuote\":\"exact quote\",\"newInformationQuote\":\"exact quote\"}}}",
-          options.structureRepairModel || options.reviewModel || options.model,
-          Math.min(options.reviewTemperature, 0.15),
-          {
-            timeoutMs: options.timeoutMs,
-            networkRetries: options.networkRetries,
-            structureRetries: options.structureRetries,
-            maxCompletionTokens: 4096,
-            disableThinking: true,
-          },
+          plan,
+          episodeNumber,
+          previousEpisode,
+          narrative.data,
         );
         const merged = mergeEpisodeStructure(narrative.data, metadata);
         if (merged) {
@@ -1413,6 +1709,25 @@ async function callEpisodeContent(
         return merged;
       },
     },
+  );
+}
+
+async function callEpisodeNarrative(
+  options: StoryRunOptions,
+  system: string,
+  user: string,
+  model = options.model,
+  temperature = options.temperature,
+  policy: ModelCallPolicy = {},
+) {
+  return callStructured(
+    options,
+    z.preprocess((value) => normalizeEpisodeNarrative(value), episodeNarrativeSchema),
+    system,
+    user,
+    model,
+    temperature,
+    policy,
   );
 }
 
@@ -1503,6 +1818,102 @@ function episodePlanContext(plan: SeriesPlan, episodeNumber: number) {
   };
 }
 
+type EpisodeClueAction = {
+  clueId: string;
+  action: "plant" | "use" | "payoff";
+};
+
+function requiredEpisodeClueActions(plan: SeriesPlan, episodeNumber: number): EpisodeClueAction[] {
+  const plantedOrPaidOff = plan.clueLedger.flatMap((clue) => [
+    ...(clue.introducedIn === episodeNumber
+      ? [{ clueId: clue.id, action: "plant" as const }]
+      : []),
+    ...(clue.payoffIn === episodeNumber
+      ? [{ clueId: clue.id, action: "payoff" as const }]
+      : []),
+  ]);
+  if (plantedOrPaidOff.length) return plantedOrPaidOff;
+  const continued = plan.clueLedger
+    .filter((clue) => clue.usedIn === episodeNumber)
+    .slice(0, 1)
+    .map((clue) => ({ clueId: clue.id, action: "use" as const }));
+  return continued;
+}
+
+export type EpisodeWritingContract = {
+  wordRange: [number, number];
+  paragraphCards: Array<{
+    paragraph: number;
+    targetWords: [number, number];
+    purpose: string;
+  }>;
+  requiredClueActions: EpisodeClueAction[];
+  requiredEvents: string[];
+  optionalIfSpace: string[];
+  mustNotRepeat: string[];
+};
+
+export function buildEpisodeWritingContract(
+  options: Pick<StoryRunOptions, "examId">,
+  plan: SeriesPlan,
+  episodeNumber: number,
+): EpisodeWritingContract {
+  const beat = plan.episodes[episodeNumber - 1];
+  if (!beat) throw new Error(`季纲缺少第 ${episodeNumber} 集任务合同`);
+  const level = examGuide[options.examId];
+  const range = episodeNumber <= 2 ? level.firstWords : level.laterWords;
+  const preferredMin = range[0] + Math.min(12, Math.floor((range[1] - range[0]) / 4));
+  const preferredMax = range[1] - Math.min(12, Math.floor((range[1] - range[0]) / 4));
+  const average = Math.floor((preferredMin + preferredMax) / 8);
+  // Models regularly overshoot requested prose length. Aim each paragraph at
+  // the lower half of the legal range so a modest overrun still passes the
+  // hard preflight instead of wasting an entire critique round.
+  const paragraphMin = Math.max(35, average - 10);
+  const paragraphMax = Math.max(paragraphMin + 8, average);
+  const primaryDiscovery = beat.newInformation[0] ?? beat.clue;
+  return {
+    wordRange: range,
+    paragraphCards: [
+      {
+        paragraph: 1,
+        targetWords: [paragraphMin, paragraphMax],
+        purpose: `用立即发生的画面或对话完成钩子，并让读者明白唯一目标：${beat.goal}`,
+      },
+      {
+        paragraph: 2,
+        targetWords: [paragraphMin, paragraphMax],
+        purpose: `把阻碍场景化，让伙伴们不得不作出选择：阻碍=${beat.obstacle}；选择=${beat.choice}`,
+      },
+      {
+        paragraph: 3,
+        targetWords: [paragraphMin, paragraphMax],
+        purpose: `展示选择导致的可见后果，通过动作发现一条核心新信息：后果=${beat.consequence}；核心新信息=${primaryDiscovery}`,
+      },
+      {
+        paragraph: 4,
+        targetWords: [paragraphMin, paragraphMax],
+        purpose: `让上述选择造成不可逆变化，再用一个集中的可视悬念结束：变化=${beat.irreversibleChange}；悬念=${beat.cliffhanger}`,
+      },
+    ],
+    requiredClueActions: requiredEpisodeClueActions(plan, episodeNumber),
+    requiredEvents: [
+      `唯一中心目标：${beat.goal}`,
+      `主要阻碍：${beat.obstacle}`,
+      `角色选择：${beat.choice}`,
+      `选择的可见后果：${beat.consequence}`,
+      `本集只强制推进的新信息：${primaryDiscovery}`,
+      `不可逆变化与结尾悬念：${beat.irreversibleChange}；${beat.cliffhanger}`,
+    ],
+    optionalIfSpace: [
+      ...beat.newInformation.slice(1),
+      beat.teamworkTurn,
+      beat.emotionalBeat,
+      beat.clue,
+    ].filter(Boolean),
+    mustNotRepeat: beat.mustNotRepeat.slice(0, 3),
+  };
+}
+
 function episodePrompt(
   options: StoryRunOptions,
   plan: SeriesPlan,
@@ -1512,10 +1923,13 @@ function episodePrompt(
   const level = examGuide[options.examId];
   const readerProfile = resolveReaderProfile(options);
   const beat = plan.episodes[episodeIndex];
-  const range = episodeIndex < 2 ? level.firstWords : level.laterWords;
+  const contract = buildEpisodeWritingContract(options, plan, beat.number);
+  const range = contract.wordRange;
   return `根据故事季策划，写第 ${beat.number} 集英文分级阅读文章。
 
-本集所需策划上下文：${JSON.stringify(episodePlanContext(plan, beat.number))}
+本集经词数容量检查后的写作合同：${JSON.stringify(contract)}
+故事圣经：${JSON.stringify(plan.storyBible)}
+本集涉及的线索原始设定：${JSON.stringify(plan.clueLedger.filter((clue) => contract.requiredClueActions.some((required) => required.clueId === clue.id)))}
 上一集连续性摘要：${previousEpisode?.continuitySummary || "这是第一集，从一个立刻发生的异常事件开始。"}
 上一集结构化状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集尚无历史状态"}
 上一集最终英文正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集尚无正文"}
@@ -1530,41 +1944,37 @@ ${buildNarrativeCraftBrief(options, beat.number)}
 - 平均句长不超过约 ${level.maxSentenceWords} 词；关键动作使用短句。
 - 对话简短自然，使用英语母语者在该场景中会说的表达；自然加入一个适龄常用表达（例如请求、犹豫、安慰或承认错误），通过上下文让意思清楚，禁止堆砌俚语或直译中文成语。
 - 不为追求“文学感”频繁替换同义词；相同事物尽量沿用相同称呼，让孩子凭上下文建立词义。
-- continuitySummary 只供下一集承接，必须使用 80-300 个中文字符概括本集结束时的人物位置、关键发现、未解问题和物件变化；不要复述全文、题目或写作评价，绝不能超过 1200 个字符。
 
 叙事控制：
 - 前两句必须形成钩子。
-- 每段围绕一个清楚的小目标推进，最多包含 2-3 个主要事件；用 because、so、but、when、after 等自然关系或明确动作写清“为什么发生”和“因此发生什么”，不能像提纲一样连续罗列事件。
+- 严格按 paragraphCards 写成恰好 4 段，每段只完成该卡的一个叙事任务；用 because、so、but、when、after 等自然关系或明确动作写清“为什么发生”和“因此发生什么”。
 - 至少写入两种五感中的具体细节，用声音、光线、气味、味道、温度、触感或身体反应帮助读者看懂人物在哪里、危险从哪来；感官描写必须服务线索或情绪，不能堆形容词。
-- 严格写出本集“目标→阻碍→选择→后果→新问题”的因果链；选择必须有代价，后果必须由角色选择引起。人物换地点、拿到物件或知道新信息时必须交代来源。
-- 把 episodeMission 当作本集唯一中心任务；正文必须清楚呈现 newInformation 和 irreversibleChange。mustNotRepeat 中的信息只能作为一句以内的必要提醒，不能再次成为发现、悬念或主要场景。
+- requiredEvents 是本集全部硬任务，必须在四段内以可见动作完成“目标→阻碍→选择→后果→新问题”；选择必须有代价，后果必须由选择引起。optionalIfSpace 不是必写项，只能在不增加新场景、不超词数时自然融入，绝不得为了塞满旧季纲而牺牲因果。
 - 与上一集最终正文逐段比较：不得重复相同的解释、动作顺序或悬念；每段必须至少推进一次新行动、新判断或新后果。
 - 线索先以自然细节出现，之后才能使用或回收；合作必须改变结果；结尾必须是公平悬念。按 clueLedger 准确标注本集是 plant、use 还是 payoff。
 - 遵守 storyBible 的固定称呼、人物声音和世界规则，不得让角色忘记已知事实或无故获得物件。
 - 文章本身要精彩，不要用“这告诉我们团队合作很重要”之类说教句。
-- qualityEvidence 不是额外创作内容，只用于自检：所有 quote 必须逐字复制 paragraphs。idiomaticPhrase 是正文中的地道表达；sensoryQuote 是感官描写；每个 causalLinks 的 causeQuote 必须出现在 effectQuote 之前；clueEvidence 必须覆盖本集线索动作；progression 的 obstacleQuote、choiceQuote、consequenceQuote 必须按正文顺序出现，newInformationQuote 必须证明本集确实推进了新信息。
 
 输出前静默执行一次硬门禁自检，不要输出自检过程：
 - 词数必须落在 ${range[0]}-${range[1]} 内，最好离上下限各留 8 个词余量；除带引号短对话外，不超过 4 词的叙述句不得超过全部叙述句的 30%。
-- 4-${readerProfile.maxNewWords} 个 targetWords 必须全部以完整单词实际出现在 paragraphs；优先用高频词，避免为了文采引入生僻同义词。
-- progression 四段证据必须互不相同且逐字存在，正文顺序严格为 obstacleQuote → choiceQuote → consequenceQuote；newInformationQuote 必须证明本集新增事实。
-- causalLinks、clueEvidence、idiomaticPhrase 和 sensoryQuote 必须逐字来自最终 paragraphs，修改正文后同步更新所有 quote。
-- 本阶段只生成正文及其结构化状态，不生成 questions；题目会在正文通过全部质量门禁后单独生成。
+- 本阶段只生成 title 和 paragraphs，不要生成 targetWords、continuitySummary、storyState、qualityEvidence 或 questions；这些会在最佳正文选出后单独生成。
 
 只返回 JSON：
-{"title":"English title","paragraphs":["English only..."],"targetWords":["word"],"continuitySummary":"80-300个中文字符，只记录结尾状态、关键发现和未解问题","storyState":{"characterPositions":["中文：人物当前位置及状态"],"knownFacts":["中文：角色已经确认的事实"],"unresolvedQuestions":["中文：尚未解决的问题"],"items":["中文：物件及持有人"],"relationshipChanges":["中文：本集发生的关系变化"]},"qualityEvidence":{"idiomaticPhrase":"exact English phrase from paragraphs","sensoryQuote":"exact English quote from paragraphs","causalLinks":[{"causeQuote":"exact earlier quote","effectQuote":"exact later quote"}],"clueEvidence":[{"clueId":"C1","action":"plant","evidenceQuote":"exact English quote"}],"progression":{"obstacleQuote":"exact English quote","choiceQuote":"exact later English quote","consequenceQuote":"exact still later English quote","newInformationQuote":"exact English quote proving new story information"}}}`;
+{"title":"English title","paragraphs":["paragraph 1","paragraph 2","paragraph 3","paragraph 4"]}`;
 }
 
 function critiquePrompt(
   options: StoryRunOptions,
   plan: SeriesPlan,
-  episode: GeneratedStoryContent,
+  episode: Pick<GeneratedStoryContent, "title" | "paragraphs">,
   episodeNumber: number,
   previousEpisode: GeneratedStoryEpisode | null,
 ) {
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
   return `你是由四位编辑组成的儿童英语故事审稿组，只诊断问题，不重写正文。
 
-本集所需策划上下文：${JSON.stringify(episodePlanContext(plan, episodeNumber))}
+本集经容量检查后的写作合同：${JSON.stringify(contract)}
+故事圣经：${JSON.stringify(plan.storyBible)}
 上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}
 上一集最终正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集"}
 第 ${episodeNumber} 集待审稿：${JSON.stringify(episode)}
@@ -1573,7 +1983,7 @@ ${gradedReadingBrief(options)}
 ${buildNarrativeCraftBrief(options, episodeNumber)}
 
 四个视角分别按 0-10 分审查：
-1. plot：逐段追踪目标、阻碍、选择、后果，检查每次移动、发现和计划改变是否有原因；线索是否先埋后用、后续解释是否回收前文，而不是事件清单或突然跳转。episodeMission、newInformation 和 irreversibleChange 未真正完成时不得超过 7 分。
+1. plot：逐段追踪目标、阻碍、选择、后果，检查每次移动、发现和计划改变是否有原因；线索是否先埋后用、后续解释是否回收前文，而不是事件清单或突然跳转。writing contract 的 requiredEvents 未真正完成时不得超过 7 分；optionalIfSpace 未出现不得扣分。
 2. childAppeal：前两句钩子、自然笑点、具体冒险、伙伴互动、至少两种服务剧情的五感描写和结尾悬念是否真能让孩子想读下一集。若角色只是观察、等待、移动和听解释，没有承担代价或改变结果，不得超过 7 分。
 3. gradedLanguage：正文是否纯英文且自然地道；句子、词汇、指代是否适龄；是否有中式英语、不必要难词、碎片句、抽象解释和同义词漂移。
 4. continuity：是否遵守故事圣经、线索账本和上一集人物/物件/已知事实状态；是否把 mustNotRepeat 中的旧发现换句话重复成主要情节；禁止补写正文没有的地图、对话、动机或动作。重复上一集主要事件或解释时不得超过 7 分。
@@ -1587,13 +1997,15 @@ ${buildNarrativeCraftBrief(options, episodeNumber)}
 function candidateCritiqueBatchPrompt(
   options: StoryRunOptions,
   plan: SeriesPlan,
-  candidates: GeneratedStoryContent[],
+  candidates: Array<Pick<GeneratedStoryContent, "title" | "paragraphs">>,
   episodeNumber: number,
   previousEpisode: GeneratedStoryEpisode | null,
 ) {
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
   return `你是儿童英语连续故事的多维候选评审组。一次比较全部候选，但必须分别给每份候选独立评分，不能因为相对更好就放宽绝对质量线。
 
-本集所需策划上下文：${JSON.stringify(episodePlanContext(plan, episodeNumber))}
+本集经容量检查后的写作合同：${JSON.stringify(contract)}
+故事圣经：${JSON.stringify(plan.storyBible)}
 上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}
 上一集最终正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集"}
 候选初稿（candidateIndex 必须沿用这里的编号）：${JSON.stringify(candidates.map((episode, candidateIndex) => ({ candidateIndex, episode })))}
@@ -1602,7 +2014,7 @@ ${gradedReadingBrief(options)}
 ${buildNarrativeCraftBrief(options, episodeNumber)}
 
 每份候选都按以下四个维度 0-10 分评审：
-1. plot：目标、阻碍、选择、后果的因果是否完整，任务、新信息和不可逆变化是否真正完成。
+1. plot：目标、阻碍、选择、后果的因果是否完整，writing contract 的 requiredEvents 是否真正完成；optionalIfSpace 未出现不得扣分。
 2. childAppeal：开头钩子、伙伴互动、幽默、五感、冒险和结尾悬念是否能吸引孩子继续读。
 3. gradedLanguage：是否纯英文、自然地道、词汇句长适龄，避免碎片句、中式英语和生僻同义词。
 4. continuity：是否遵守故事圣经、线索账本和上一集状态，是否避免重复或凭空补信息。
@@ -1621,10 +2033,12 @@ function reviewPrompt(
   previousEpisode: GeneratedStoryEpisode | null,
 ) {
   const level = examGuide[options.examId];
-  const range = episodeNumber <= 2 ? level.firstWords : level.laterWords;
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+  const range = contract.wordRange;
   return `你是严格的儿童英语故事编辑。请重写并提升下面这一集，而不是只写评语。
 
-本集所需策划上下文：${JSON.stringify(episodePlanContext(plan, episodeNumber))}
+本集经容量检查后的写作合同：${JSON.stringify(contract)}
+故事圣经：${JSON.stringify(plan.storyBible)}
 上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}
 上一集最终正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集"}
 待审稿：${JSON.stringify(episode)}
@@ -1633,7 +2047,7 @@ ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
 ${buildNarrativeCraftBrief(options, episodeNumber)}
 
-按 rewritePriorities 逐项定向修复，并检查：开头钩子、人物声音、自然地道的英语、服务剧情的五感描写、清楚的逐段因果、线索先埋后收、团队合作的因果作用、情绪变化、悬念、连续性和选材边界。必须完成 episodeMission，让 newInformation 通过行动被发现，让 irreversibleChange 成为角色选择造成的结果；删除对 mustNotRepeat 和上一集主要动作的重复讲述。正文保持 ${range[0]}-${range[1]} 词、3-5 段，语言适合${level.audience}，平均句长约不超过 ${level.maxSentenceWords} 词。title、paragraphs 和所有 quote 必须纯英文，不得出现中文。删除说教、事件清单、空泛形容、突然出现的解法、无来源的信息、不必要难词和为了变化而使用的生僻同义词。重写正文后必须同步更新 qualityEvidence（包括 progression）、continuitySummary 和 storyState。continuitySummary 必须压缩为 80-300 个中文字符，只保留结尾状态、关键发现和未解问题，绝不能超过 1200 个字符。本阶段不要生成 questions；题目将在正文定稿后单独生成。
+按 rewritePriorities 逐项定向修复，但只把 writing contract 的 requiredEvents 当作硬任务；optionalIfSpace 不得导致增加场景或超词数。严格按 paragraphCards 保持 4 段，完成清楚的逐段因果、线索先埋后收、团队合作、情绪变化和一个集中悬念。正文保持 ${range[0]}-${range[1]} 词，语言适合${level.audience}，平均句长约不超过 ${level.maxSentenceWords} 词。title、paragraphs 和所有 quote 必须纯英文。删除说教、事件清单、突然解法、无来源信息和不必要难词。重写正文后同步更新 qualityEvidence、continuitySummary 和 storyState。本阶段不生成 questions。
 
 返回与原稿完全相同结构的 JSON，不要附加评论。`;
 }
@@ -1725,6 +2139,43 @@ export function semanticQualityIssues(
   critique: StoryCritique,
   firstEpisodeBaseline?: StoryCritique | null,
 ) {
+  return semanticScoreIssues(critique, firstEpisodeBaseline, 8, 1, 0.5);
+}
+
+export function isStrictStoryCritique(
+  critique: StoryCritique,
+  firstEpisodeBaseline?: StoryCritique | null,
+) {
+  return semanticQualityIssues(critique, firstEpisodeBaseline).length === 0;
+}
+
+export function isStoryCritiqueImprovement(
+  candidate: StoryCritique,
+  original: StoryCritique,
+  firstEpisodeBaseline?: StoryCritique | null,
+) {
+  return isStrictStoryCritique(candidate, firstEpisodeBaseline)
+    && critiqueAverage(candidate) > critiqueAverage(original) + 0.01;
+}
+
+function hasEditorialOpportunities(critique: StoryCritique) {
+  return critiqueDimensions.some((dimension) => critique[dimension].issues.length > 0);
+}
+
+function semanticPublishIssues(
+  critique: StoryCritique,
+  firstEpisodeBaseline?: StoryCritique | null,
+) {
+  return semanticScoreIssues(critique, firstEpisodeBaseline, 7, 1, 1);
+}
+
+function semanticScoreIssues(
+  critique: StoryCritique,
+  firstEpisodeBaseline: StoryCritique | null | undefined,
+  minimumScore: number,
+  maximumDimensionDrop: number,
+  maximumAverageDrop: number,
+) {
   const labels: Record<(typeof critiqueDimensions)[number], string> = {
     plot: "剧情逻辑",
     childAppeal: "儿童吸引力",
@@ -1734,15 +2185,18 @@ export function semanticQualityIssues(
   const issues: string[] = [];
   for (const dimension of critiqueDimensions) {
     const current = critique[dimension].score;
-    if (current < 8) {
-      issues.push(`${labels[dimension]} ${current.toFixed(1)} < 8`);
+    if (current < minimumScore) {
+      issues.push(`${labels[dimension]} ${current.toFixed(1)} < ${minimumScore}`);
     }
     const baseline = firstEpisodeBaseline?.[dimension].score;
-    if (baseline !== undefined && current < baseline - 1) {
+    if (baseline !== undefined && current < baseline - maximumDimensionDrop) {
       issues.push(`${labels[dimension]}比第一集低 ${(baseline - current).toFixed(1)} 分`);
     }
   }
-  if (firstEpisodeBaseline && critiqueAverage(critique) < critiqueAverage(firstEpisodeBaseline) - 0.5) {
+  if (
+    firstEpisodeBaseline
+    && critiqueAverage(critique) < critiqueAverage(firstEpisodeBaseline) - maximumAverageDrop
+  ) {
     issues.push(
       `四维平均分比第一集低 ${(critiqueAverage(firstEpisodeBaseline) - critiqueAverage(critique)).toFixed(1)} 分`,
     );
@@ -1816,7 +2270,14 @@ export function assessStoryQuality(
   let lexicalCoverage: number | null = null;
   let unfamiliarWords: string[] = [];
   if (words.length < range[0]) block(`正文过短：${words.length} < ${range[0]}`);
-  if (words.length > range[1]) block(`正文过长：${words.length} > ${range[1]}`);
+  if (words.length > range[1]) {
+    const hardUpperLimit = Math.ceil(range[1] * 1.15);
+    const issue = words.length > hardUpperLimit
+      ? `正文过长：${words.length} > ${range[1]}（硬上限 ${hardUpperLimit}）`
+      : `正文略超 ${range[1]} 词目标：${words.length} 词，仍在 15% 发布容差内`;
+    if (words.length > hardUpperLimit) block(issue);
+    else issues.push(issue);
+  }
   if (averageSentenceWords > level.maxSentenceWords + 2) block(`平均句长过高：${averageSentenceWords.toFixed(1)}`);
   const fragmentRatio = fragmentSentenceRatio(text);
   if (fragmentRatio > 0.3) block(`碎片化短句过多：${(fragmentRatio * 100).toFixed(0)}% 的句子不超过 4 词`);
@@ -1909,11 +2370,7 @@ export function assessStoryQuality(
         block(`线索 ${evidence.clueId} 的 ${evidence.action} 应发生在第 ${expectedEpisode} 集，而不是第 ${episodeNumber} 集`);
       }
     }
-    const requiredClueActions = plan.clueLedger.flatMap((clue) => [
-      ...(clue.introducedIn === episodeNumber ? [{ clueId: clue.id, action: "plant" as const }] : []),
-      ...(clue.usedIn === episodeNumber ? [{ clueId: clue.id, action: "use" as const }] : []),
-      ...(clue.payoffIn === episodeNumber ? [{ clueId: clue.id, action: "payoff" as const }] : []),
-    ]);
+    const requiredClueActions = requiredEpisodeClueActions(plan, episodeNumber);
     for (const required of requiredClueActions) {
       if (!episode.qualityEvidence.clueEvidence.some(
         (clue) => clue.clueId === required.clueId && clue.action === required.action,
@@ -2121,117 +2578,307 @@ async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
   return validateSeriesPlan(selection, options.episodes);
 }
 
+export function narrativePreflightIssues(
+  options: Pick<StoryRunOptions, "examId" | "readerStage">,
+  plan: SeriesPlan,
+  episodeNumber: number,
+  narrative: Pick<GeneratedStoryContent, "title" | "paragraphs">,
+) {
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+  const wordCount = narrative.paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0;
+  const issues: string[] = [];
+  if (narrative.paragraphs.length !== 4) issues.push(`正文必须恰好 4 段，实际 ${narrative.paragraphs.length} 段`);
+  if (wordCount < contract.wordRange[0] || wordCount > contract.wordRange[1]) {
+    issues.push(`正文词数 ${wordCount} 不在 ${contract.wordRange[0]}-${contract.wordRange[1]} 范围`);
+  }
+  if (cjkPattern.test(`${narrative.title} ${narrative.paragraphs.join(" ")}`)) {
+    issues.push("标题或正文夹杂中文、日文或韩文");
+  }
+  return issues;
+}
+
+function lessonsFromCritique(critique: StoryCritique, previous: string[]) {
+  const labels: Record<(typeof critiqueDimensions)[number], string> = {
+    plot: "剧情逻辑",
+    childAppeal: "儿童吸引力",
+    gradedLanguage: "分级英语",
+    continuity: "连续性",
+  };
+  const fresh = critiqueDimensions.flatMap((dimension) =>
+    critique[dimension].issues.map((issue) => `${labels[dimension]}：${issue}`),
+  );
+  fresh.push(...critique.rewritePriorities.map((priority) => `优先改进：${priority}`));
+  return [...new Set([...previous, ...fresh])].slice(-20);
+}
+
+async function prepareNarrativeForStrictReview(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  episodeNumber: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+  narrative: z.infer<typeof episodeNarrativeSchema>,
+) {
+  const issues = narrativePreflightIssues(options, plan, episodeNumber, narrative);
+  if (!issues.length) return narrative;
+  const onlyOverlong = issues.length === 1 && issues[0].startsWith("正文词数");
+  const wordCount = narrative.paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0;
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+  if (!onlyOverlong || wordCount <= contract.wordRange[1]) return null;
+
+  const earlyCompressionSchema = episodeNarrativeSchema.superRefine((value, context) => {
+    const compressedIssues = narrativePreflightIssues(options, plan, episodeNumber, value);
+    for (const issue of compressedIssues) {
+      context.addIssue({ code: "custom", path: ["paragraphs"], message: issue });
+    }
+  });
+  options.log(
+    `[${episodeNumber}/${options.episodes}] 候选正文 ${wordCount} 词，仅长度越界；`
+    + "在四维评审前先用无思考模式做一次定长压缩。",
+  );
+  try {
+    const compressed = await callStructured(
+      options,
+      earlyCompressionSchema,
+      "你只输出 title 和 paragraphs 的合法 JSON。你是分级故事定长编辑，只删减冗余，不改变剧情事实、因果、线索、人物选择或结尾悬念。",
+      `本集写作合同：${JSON.stringify(contract)}\n`
+        + `上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n`
+        + `待压缩正文：${JSON.stringify(narrative)}\n\n`
+        + `压缩为恰好 4 段、总计 ${contract.wordRange[0]}-${contract.wordRange[1]} 个英文单词。`
+        + "逐段遵守 paragraphCards.targetWords；只删除解释、重复、optionalIfSpace 和多余形容，绝不新增事件或改动 requiredEvents。"
+        + "输出前自行计数；只返回 {\"title\":\"...\",\"paragraphs\":[\"...\",\"...\",\"...\",\"...\"]}。",
+      options.structureRepairModel || options.reviewModel || options.model,
+      0.1,
+      {
+        timeoutMs: options.timeoutMs,
+        networkRetries: 1,
+        structureRetries: 2,
+        maxCompletionTokens: 3072,
+        disableThinking: true,
+      },
+    );
+    options.log(
+      `[${episodeNumber}/${options.episodes}] 候选已在评审前压缩到 `
+      + `${compressed.paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0} 词。`,
+    );
+    return compressed;
+  } catch (error) {
+    options.log(
+      `[${episodeNumber}/${options.episodes}] 候选前置定长压缩失败，直接淘汰该稿：${modelRequestError(error)}`,
+    );
+    return null;
+  }
+}
+
+async function synthesizeEpisodeDrafts(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  index: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+  drafts: Array<z.infer<typeof episodeNarrativeSchema>>,
+  synthesisAttempt: number,
+  failureLessons: string[],
+) {
+  const episodeNumber = index + 1;
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+  const compactLessons = selectDraftLessonsForPrompt(failureLessons);
+  const lessonBrief = compactLessons.length
+    ? `\n上一份融合稿未达标，必须针对性规避：${JSON.stringify(compactLessons)}`
+    : "";
+  options.log(
+    `[${episodeNumber}/${options.episodes}] 正在思考提炼 ${drafts.length} 份初稿各自的优点，`
+    + `建立一条统一因果骨架（融合尝试 ${synthesisAttempt}/2）。`,
+  );
+  const synthesisPlan = await callStructured(
+    options,
+    draftSynthesisPlanSchema,
+    "你只输出合法 JSON。你是儿童连续故事总编；先深入比较多篇素材稿，再制定一份融合蓝图。本阶段不写正文。",
+    `本集写作合同：${JSON.stringify(contract)}\n`
+      + `故事圣经：${JSON.stringify(plan.storyBible)}\n`
+      + `上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n`
+      + `上一集正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集"}\n`
+      + `素材初稿：${JSON.stringify(drafts.map((draft, candidateIndex) => ({ candidateIndex, draft })))}\n`
+      + `${lessonBrief}\n\n`
+      + "这些初稿只是可拆解的素材，不是故事事实，也不是让你原样选一篇。先指定一份因果最完整的初稿作为 backboneCandidateIndex，"
+      + "保留它的事件顺序作为唯一主骨架；其他每份初稿最多只吸收一个不会增加新场景的亮点。分别提取最好的钩子、伙伴互动、感官细节、自然英语或悬念，"
+      + "但只建立一条统一的目标→阻碍→选择→后果→新信息因果线。冲突设定、重复事件、无来源物件和较弱桥段必须写入 rejectElements。"
+      + "禁止把三篇事件全部并列塞入正文；融合蓝图必须像从一开始就只设计过一个故事。只返回融合蓝图 JSON。",
+    options.reviewModel || options.model,
+    Math.max(options.reviewTemperature, 0.3),
+    semanticPlanningModelPolicy(options),
+  );
+  const synthesized = await callEpisodeNarrative(
+    options,
+    "你只输出 title 和 paragraphs 的合法 JSON。你是儿童分级故事主编；严格执行融合蓝图，写一篇全新的统一正文，不再展开长推理。",
+    `${episodePrompt(options, plan, index, previousEpisode)}\n\n`
+      + `融合蓝图：${JSON.stringify(synthesisPlan)}\n`
+      + `素材初稿：${JSON.stringify(drafts.map((draft, candidateIndex) => ({ candidateIndex, draft })))}\n`
+      + `${lessonBrief}\n\n`
+      + "生成一篇全新的融合稿：以融合蓝图指定的 backboneCandidateIndex 事件顺序为唯一骨架，不是逐段拼接。"
+      + "其他素材每篇最多贡献一个不会增加场景的亮点；每个段落只能服务统一因果线。必须重写衔接，使人物动机、物件来源和线索顺序完全一致。"
+      + "先保证 requiredEvents 和因果完整，再删 optionalIfSpace、解释句和装饰细节；不要加入 rejectElements。"
+      + "必须恰好 4 段，每段尽量控制在 40-48 个英文单词，总词数优先控制在 180-220，绝不能超过硬上限。只返回 title 和 paragraphs。",
+    options.reviewModel || options.model,
+    Math.max(options.reviewTemperature, 0.25),
+    semanticRewriteModelPolicy(options),
+  );
+  return prepareNarrativeForStrictReview(
+    options,
+    plan,
+    episodeNumber,
+    previousEpisode,
+    synthesized,
+  );
+}
+
 async function generateEpisodeDraft(
   options: StoryRunOptions,
   plan: SeriesPlan,
   index: number,
   previousEpisode: GeneratedStoryEpisode | null,
+  firstEpisodeBaseline: StoryCritique | null = null,
+  discardedDraftLessons: string[] = [],
+  strictRound = 1,
 ) {
   const episodeNumber = index + 1;
+  const maximumStrictRounds = 3;
+  const promptLessons = selectDraftLessonsForPrompt(discardedDraftLessons);
+  const failureLessonBrief = promptLessons.length
+    ? `\n\n以前被质量门禁作废的稿件留下了以下精简经验。它们不是故事事实，禁止在正文中提及“评审、分数、旧稿或失败”；动笔前逐条转换为预防动作：\n${promptLessons.map((lesson, lessonIndex) => `${lessonIndex + 1}. ${lesson}`).join("\n")}`
+    : "";
   reportProgress(
     options,
     "drafting",
-    `正在生成第 ${episodeNumber}/${options.episodes} 集的 ${options.episodeCandidates} 份候选初稿`,
+    `正在用思考模式生成第 ${episodeNumber}/${options.episodes} 集的 ${options.episodeCandidates} 份候选初稿（严选第 ${strictRound}/${maximumStrictRounds} 轮）`,
     episodeProgress(options, index, 0),
   );
-  const drafts = await Promise.all(Array.from({ length: options.episodeCandidates }, (_, candidateIndex) =>
-    callEpisodeContent(
+  const candidateResults = await Promise.allSettled(Array.from({ length: options.episodeCandidates }, (_, candidateIndex) =>
+    callEpisodeNarrative(
       options,
-      plan,
-      episodeNumber,
-      previousEpisode,
-      "你只输出合法 JSON。你是擅长悬念、幽默、伙伴感与分级英语的儿童故事作家。",
-      `${episodePrompt(options, plan, index, previousEpisode)}\n\n这是候选初稿 ${candidateIndex + 1}/${options.episodeCandidates}。请用与其他候选不同但符合季纲的具体阻碍、角色互动和感官细节完成本集任务合同。`,
+      "你只输出包含 title 和 paragraphs 的合法 JSON。你是擅长悬念、幽默、伙伴感与分级英语的儿童故事作家。",
+      `${episodePrompt(options, plan, index, previousEpisode)}${failureLessonBrief}\n\n这是候选初稿 ${candidateIndex + 1}/${options.episodeCandidates}。请用与其他候选不同但符合季纲的具体阻碍、角色互动和感官细节完成本集任务合同。`,
       options.model,
       options.temperature,
-      { maxCompletionTokens: modelTokenBudgets.episode },
+      creativeDraftModelPolicy(options),
     ),
   ));
-  reportProgress(
-    options,
-    "reviewing",
-    `第 ${episodeNumber} 集的 ${drafts.length} 份候选初稿已完成，正在进行一次批量多维评审`,
-    episodeProgress(options, index, 0.3),
-  );
-  const expectedCritiqueBatchSchema = candidateCritiqueBatchSchema.superRefine((value, context) => {
-    const indexes = value.reviews.map((review) => review.candidateIndex);
-    if (
-      value.reviews.length !== drafts.length
-      || new Set(indexes).size !== drafts.length
-      || drafts.some((_, candidateIndex) => !indexes.includes(candidateIndex))
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["reviews"],
-        message: `必须为 candidateIndex 0-${drafts.length - 1} 各返回一份且不能重复`,
-      });
+  const drafts = candidateResults.flatMap((result, candidateIndex) => {
+    if (result.status === "fulfilled") return [result.value];
+    options.log(
+      `第 ${episodeNumber} 集素材初稿 ${candidateIndex + 1} 在自动恢复后仍不可用，`
+      + `已隔离该稿并继续聚合其他素材：${modelRequestError(result.reason)}`,
+    );
+    return [];
+  });
+  if (drafts.length < 2) {
+    if (strictRound < maximumStrictRounds) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] 本轮只有 ${drafts.length} 份可用初稿，不足以做多稿聚合；正在换一批素材。`,
+      );
+      return generateEpisodeDraft(
+        options,
+        plan,
+        index,
+        previousEpisode,
+        firstEpisodeBaseline,
+        discardedDraftLessons,
+        strictRound + 1,
+      );
     }
-  });
-  const critiqueBatch = await callStructured(
-    options,
-    expectedCritiqueBatchSchema,
-    "你只输出合法 JSON。你是严格的儿童英语故事候选总编，必须一次完成所有候选的四维绝对质量评审。",
-    candidateCritiqueBatchPrompt(options, plan, drafts, episodeNumber, previousEpisode),
-    options.reviewModel || options.model,
-    options.reviewTemperature,
-    { maxCompletionTokens: modelTokenBudgets.critique },
-  );
-  const critiqueByIndex = new Map(
-    critiqueBatch.reviews.map(({ candidateIndex, ...critique }) => [candidateIndex, critique]),
-  );
-  const critiques = drafts.map((_, candidateIndex) => {
-    const critique = critiqueByIndex.get(candidateIndex);
-    if (!critique) throw new Error(`批量候选评审缺少 candidateIndex=${candidateIndex}`);
-    return critique;
-  });
-  let selectedIndex = selectBestStoryCritique(critiques);
-  if (critiqueAverage(critiques[selectedIndex]) < 7) {
+    throw new Error(`第 ${episodeNumber} 集候选初稿连续未达到编辑底线：没有足够的可用素材稿进行聚合`);
+  }
+
+  let narrative: z.infer<typeof episodeNarrativeSchema> | null = null;
+  let critique: StoryCritique | null = null;
+  let synthesisLessons = discardedDraftLessons;
+  for (let synthesisAttempt = 1; synthesisAttempt <= 2; synthesisAttempt++) {
     reportProgress(
       options,
-      "drafting",
-      `第 ${episodeNumber} 集候选质量偏低，正在重新生成一份全新初稿`,
-      episodeProgress(options, index, 0.42),
+      "selecting_plan",
+      `第 ${episodeNumber} 集素材初稿已完成，正在聚合优点并生成统一融合稿（${synthesisAttempt}/2）`,
+      episodeProgress(options, index, 0.32 + synthesisAttempt * 0.07),
     );
-    options.log(
-      `[${episodeNumber}/${options.episodes}] 最佳候选四维均分仅 ${critiqueAverage(critiques[selectedIndex]).toFixed(1)}，`
-      + "不进入连续润色，改为重新生成一份候选稿。",
-    );
-    const replacement = await callEpisodeContent(
+    const synthesized = await synthesizeEpisodeDrafts(
       options,
       plan,
+      index,
+      previousEpisode,
+      drafts,
+      synthesisAttempt,
+      synthesisLessons,
+    );
+    if (!synthesized) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] 第 ${synthesisAttempt}/2 份融合稿未通过前置段数、词数或纯英文硬门禁。`,
+      );
+      continue;
+    }
+    reportProgress(
+      options,
+      "reviewing",
+      `第 ${episodeNumber} 集融合稿已完成，正在进行独立四维 8 分严选`,
+      episodeProgress(options, index, 0.48),
+    );
+    const reviewed = await reviewEpisodeSemantics(
+      options,
+      plan,
+      synthesized,
       episodeNumber,
       previousEpisode,
-      "你只输出合法 JSON。你是擅长从失败审稿中重建故事的儿童英语作家；必须从空白重新创作，不得只改写旧稿。",
-      `${episodePrompt(options, plan, index, previousEpisode)}\n\n上一批最佳候选仍未达到可编辑底线，主要问题是：${JSON.stringify(critiques[selectedIndex].rewritePriorities)}。请从空白重新设计本集的具体阻碍、角色选择、因果后果和结尾悬念，避免沿用问题稿的事件顺序或表达。`,
-      options.model,
-      options.temperature,
-      { maxCompletionTokens: modelTokenBudgets.episode },
     );
-    const replacementCritique = await callStructured(
-      options,
-      storyCritiqueSchema,
-      "你只输出合法 JSON。你代表剧情、儿童吸引力、分级语言和连续性四位专业编辑，必须指出可执行的问题。",
-      critiquePrompt(options, plan, replacement, episodeNumber, previousEpisode),
-      options.reviewModel || options.model,
-      options.reviewTemperature,
-      { maxCompletionTokens: modelTokenBudgets.critique },
+    const strictIssues = semanticQualityIssues(reviewed, firstEpisodeBaseline);
+    if (!strictIssues.length) {
+      narrative = synthesized;
+      critique = reviewed;
+      options.log(
+        `[${episodeNumber}/${options.episodes}] 融合稿通过四项 8 分严选，`
+        + `四维均分 ${critiqueAverage(reviewed).toFixed(2)}。`,
+      );
+      break;
+    }
+    synthesisLessons = lessonsFromCritique(reviewed, synthesisLessons);
+    options.log(
+      `[${episodeNumber}/${options.episodes}] 第 ${synthesisAttempt}/2 份融合稿未达到四项 8 分：`
+      + `${strictIssues.join("；")}。不进入元数据或润色，下一次聚合将吸取本稿问题。`,
     );
-    drafts.push(replacement);
-    critiques.push(replacementCritique);
-    selectedIndex = selectBestStoryCritique(critiques);
   }
-  const draft = drafts[selectedIndex];
-  const critique = critiques[selectedIndex];
-  if (critiqueAverage(critique) < 7) {
+  if (!narrative || !critique) {
+    if (strictRound < maximumStrictRounds) {
+      reportProgress(
+        options,
+        "drafting",
+        `第 ${episodeNumber} 集本轮融合稿未通过 8 分严选，正在生成一批全新素材`,
+        episodeProgress(options, index, 0.5),
+      );
+      return generateEpisodeDraft(
+        options,
+        plan,
+        index,
+        previousEpisode,
+        firstEpisodeBaseline,
+        synthesisLessons,
+        strictRound + 1,
+      );
+    }
     throw new Error(
-      `第 ${episodeNumber} 集候选初稿连续未达到编辑底线：四维均分 ${critiqueAverage(critique).toFixed(1)} < 7`,
+      `第 ${episodeNumber} 集候选初稿连续未达到编辑底线：${maximumStrictRounds} 批素材的融合稿均未四项达到 8 分`,
     );
   }
-  options.log(
-    `[${episodeNumber}/${options.episodes}] 从 ${drafts.length} 份初稿中选择候选 ${selectedIndex + 1}`
-    + `（四维均分 ${critiqueAverage(critique).toFixed(1)}）`,
+  reportProgress(
+    options,
+    "drafting",
+    `第 ${episodeNumber} 集已通过四项 8 分严选，正在单独生成连续性状态和质量证据`,
+    episodeProgress(options, index, 0.52),
   );
-  return { episode: draft, critique };
+  const metadata = await completeEpisodeMetadata(
+    options,
+    plan,
+    episodeNumber,
+    previousEpisode,
+    narrative,
+  );
+  const episode = mergeEpisodeStructure(narrative, metadata);
+  if (!episode) throw new Error(`第 ${episodeNumber} 集最佳正文与元数据合并失败`);
+  return { episode, critique };
 }
 
 async function repairEpisode(
@@ -2242,28 +2889,130 @@ async function repairEpisode(
   quality: StoryQuality,
   previousEpisode: GeneratedStoryEpisode | null,
 ) {
-  const level = examGuide[options.examId];
-  const range = episodeNumber <= 2 ? level.firstWords : level.laterWords;
-  const beat = plan.episodes[episodeNumber - 1];
-  const relevantClues = plan.clueLedger.filter(
-    (clue) => [clue.introducedIn, clue.usedIn, clue.payoffIn].includes(episodeNumber),
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+  const range = contract.wordRange;
+  const relevantClues = plan.clueLedger.filter((clue) =>
+    contract.requiredClueActions.some((required) => required.clueId === clue.id),
   );
-  const requiredClueActions = relevantClues.flatMap((clue) => [
-    ...(clue.introducedIn === episodeNumber ? [{ clueId: clue.id, action: "plant" as const }] : []),
-    ...(clue.usedIn === episodeNumber ? [{ clueId: clue.id, action: "use" as const }] : []),
-    ...(clue.payoffIn === episodeNumber ? [{ clueId: clue.id, action: "payoff" as const }] : []),
-  ]);
+  const requiredClueActions = contract.requiredClueActions;
   const preferredWordRange: [number, number] = [
-    Math.max(range[0], range[1] - 20),
-    range[1] - 8,
+    Math.max(range[0], range[1] - 50),
+    range[1] - 25,
   ];
+  const metadataOnlyIssuePatterns = [
+    /^目标词/,
+    /^地道英语表达/,
+    /^五感描写证据/,
+    /^因果证据/,
+    /^第 \d+ 组因果/,
+    /^线索 /,
+    /^本集阻碍/,
+    /^本集推进/,
+  ];
+  const onlyMetadataIsBlocking = quality.blockingIssues.length > 0
+    && quality.blockingIssues.every(
+      (issue) => metadataOnlyIssuePatterns.some((pattern) => pattern.test(issue)),
+    );
+  if (onlyMetadataIsBlocking) {
+    const narrative = episodeNarrativeSchema.parse({ title: episode.title, paragraphs: episode.paragraphs });
+    const metadata = await completeEpisodeMetadata(
+      options,
+      plan,
+      episodeNumber,
+      previousEpisode,
+      narrative,
+    );
+    const merged = mergeEpisodeStructure(narrative, metadata);
+    if (!merged) throw new Error(`第 ${episodeNumber} 集正文与修复后的元数据合并失败`);
+    options.log(
+      `[${episodeNumber}/${options.episodes}] 正文无需重写，已单独重建目标词、线索与质量证据。`,
+    );
+    return merged;
+  }
+  const needsLengthCompression = quality.blockingIssues.some((issue) => issue.startsWith("正文过"));
+  if (needsLengthCompression) {
+    const compressedNarrativeSchema = episodeNarrativeSchema.superRefine((value, context) => {
+      const paragraphWordCounts = value.paragraphs.map(
+        (paragraph) => paragraph.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0,
+      );
+      const totalWords = paragraphWordCounts.reduce((total, count) => total + count, 0);
+      if (value.paragraphs.length !== 4) {
+        context.addIssue({ code: "custom", path: ["paragraphs"], message: `必须恰好 4 段，实际 ${value.paragraphs.length} 段` });
+      }
+      paragraphWordCounts.forEach((count, paragraphIndex) => {
+        const cardRange = contract.paragraphCards[paragraphIndex]?.targetWords ?? [40, 60];
+        if (count < cardRange[0] || count > cardRange[1]) {
+          context.addIssue({ code: "custom", path: ["paragraphs", paragraphIndex], message: `本段必须 ${cardRange[0]}-${cardRange[1]} 词，实际 ${count} 词` });
+        }
+      });
+      if (totalWords < range[0] || totalWords > preferredWordRange[1]) {
+        context.addIssue({ code: "custom", path: ["paragraphs"], message: `正文总计必须 ${range[0]}-${preferredWordRange[1]} 词，实际 ${totalWords} 词` });
+      }
+    });
+    const compressedNarrative = await callStructured(
+      options,
+      compressedNarrativeSchema,
+      "你只输出包含 title 和 paragraphs 的合法 JSON。你是儿童分级故事压缩编辑；只压缩表达，不改变事件、因果、线索或人物选择。禁止输出其他字段。",
+      `本集精简写作合同：${JSON.stringify(contract)}\n本集必须保留的线索动作：${JSON.stringify(requiredClueActions)}\n上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n待压缩稿：${JSON.stringify({ title: episode.title, paragraphs: episode.paragraphs })}\n\n把正文压缩为恰好 4 个英文段落，总词数控制在 ${range[0]}-${preferredWordRange[1]} 词，每段按 paragraphCards 的 targetWords 分配。每段只保留推动“阻碍 → 选择 → 后果 → 新信息”的动作、必要对话、一个感官细节和必要线索。只有 requiredEvents 和 requiredClueActions 是硬任务；optionalIfSpace 可以删除。title 和 paragraphs 必须纯英文。只返回 {"title":"...","paragraphs":["...","...","...","..."]}，不要返回其他字段。`,
+      options.reviewModel || options.model,
+      0.1,
+      {
+        timeoutMs: options.rewriteTimeoutMs,
+        networkRetries: 1,
+        structureRetries: 2,
+        maxCompletionTokens: 3072,
+        disableThinking: true,
+        recoverPartial: async (value) => {
+          const joinParagraphParts = (part: unknown): string | null => {
+            if (typeof part === "string") return part.trim();
+            if (!Array.isArray(part)) return null;
+            const pieces = part.map(joinParagraphParts);
+            if (pieces.some((piece) => piece === null)) return null;
+            return pieces.filter(Boolean).join(" ");
+          };
+          const candidate = Array.isArray(value)
+            ? { title: episode.title, paragraphs: value }
+            : value && typeof value === "object"
+              ? value as Record<string, unknown>
+              : null;
+          const rawParagraphs = candidate?.paragraphs;
+          if (Array.isArray(rawParagraphs) && rawParagraphs.length === 4) {
+            const paragraphs = rawParagraphs.map(joinParagraphParts);
+            if (paragraphs.some((paragraph) => !paragraph)) return null;
+            options.log(
+              `[${episodeNumber}/${options.episodes}] 压缩模型返回了非标准段落包装，`
+              + "已在本地拼合嵌套句子并规范为 title/paragraphs 对象。",
+            );
+            return {
+              title: typeof candidate?.title === "string" ? candidate.title : episode.title,
+              paragraphs,
+            };
+          }
+          return null;
+        },
+      },
+    );
+    const metadata = await completeEpisodeMetadata(
+      options,
+      plan,
+      episodeNumber,
+      previousEpisode,
+      compressedNarrative,
+    );
+    const merged = mergeEpisodeStructure(compressedNarrative, metadata);
+    if (!merged) throw new Error(`第 ${episodeNumber} 集压缩正文与元数据合并失败`);
+    options.log(
+      `[${episodeNumber}/${options.episodes}] 专用压缩正文已通过逐段与总词数校验，并完成元数据补齐。`,
+    );
+    return merged;
+  }
   return callEpisodeContent(
     options,
     plan,
     episodeNumber,
     previousEpisode,
     "你只输出合法 JSON。你是分级阅读终审编辑，只修复自动质量检测指出的问题，并保持精彩情节和原有结构。",
-    `故事圣经：${JSON.stringify(plan.storyBible)}\n本集独立任务合同：${JSON.stringify(beat)}\n本集相关线索：${JSON.stringify(relevantClues)}\n本集必须且只能提供的线索动作：${JSON.stringify(requiredClueActions)}\n上一集结构化状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n待修正文：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词（除 targetWords、人物专名和固定术语外，逐个换成更常见表达）：${quality.unfamiliarWords.join(", ")}\n\n正文硬范围是 ${range[0]}-${range[1]} 词；为避免再次越界，静默计数并把最终正文控制在 ${preferredWordRange[0]}-${preferredWordRange[1]} 词。title、paragraphs 和所有 quote 必须是纯英文，彻底删除其中的中文。targetWords 中的每个词必须以完整单词实际出现在正文中；不要引入新的生僻同义词。把跳跃的事件改成读者可跟随的因果链，用服务线索或情绪的五感细节连接场景，并自然保留一个适龄地道表达。不要重复上一集的主要动作或解释，必须完成本集 episodeMission、newInformation 和 irreversibleChange。不要删除关键线索、角色选择的后果或结尾悬念。clueEvidence 必须逐项且只覆盖“本集必须且只能提供的线索动作”：前集已经 plant 的线索本集只能标 use/payoff；如果某个线索动作还没有对应英文句，先把该线索自然写入正文，再逐字复制 evidenceQuote。每个 qualityEvidence（包括 progression 和 causalLinks）都必须逐字复制修改后 paragraphs 中真实存在的文本。修改后同步更新 qualityEvidence、continuitySummary 和 storyState。continuitySummary 必须是 80-300 个中文字符，只记录结尾状态、关键发现和未解问题，绝不能超过 1200 个字符。本阶段不要生成 questions。返回与待修正文相同结构的完整 JSON。`,
+    `故事圣经：${JSON.stringify(plan.storyBible)}\n本集精简写作合同：${JSON.stringify(contract)}\n本集相关线索：${JSON.stringify(relevantClues)}\n本集必须且只能提供的线索动作：${JSON.stringify(requiredClueActions)}\n上一集结构化状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n待修正文：${JSON.stringify(episode)}\n自动检测问题：${quality.issues.join("；")}\n超纲或未识别词：${quality.unfamiliarWords.join(", ")}\n\n正文硬范围是 ${range[0]}-${range[1]} 词，最终控制在 ${preferredWordRange[0]}-${preferredWordRange[1]} 词。严格保留 contract.requiredEvents 和 requiredClueActions；optionalIfSpace 可以删除，不得因为补旧季纲而超词数。title、paragraphs 和所有 quote 必须纯英文。targetWords 必须出现在正文，不引入新的生僻同义词。把跳跃事件改成可跟随的因果链，保留五感细节、适龄地道表达、角色选择的后果和集中悬念。clueEvidence 只覆盖指定线索动作；所有 qualityEvidence 必须逐字来自修改后正文。同步更新 continuitySummary 和 storyState，本阶段不生成 questions。返回与待修正文相同结构的完整 JSON。`,
     options.reviewModel || options.model,
     0.1,
     {
@@ -2279,7 +3028,7 @@ async function repairEpisode(
 async function reviewEpisodeSemantics(
   options: StoryRunOptions,
   plan: SeriesPlan,
-  episode: GeneratedStoryContent,
+  episode: Pick<GeneratedStoryContent, "title" | "paragraphs">,
   episodeNumber: number,
   previousEpisode: GeneratedStoryEpisode | null,
 ) {
@@ -2290,7 +3039,52 @@ async function reviewEpisodeSemantics(
     critiquePrompt(options, plan, episode, episodeNumber, previousEpisode),
     options.reviewModel || options.model,
     options.reviewTemperature,
-    { maxCompletionTokens: modelTokenBudgets.critique },
+    { maxCompletionTokens: modelTokenBudgets.critique, disableThinking: true },
+  );
+}
+
+async function rewriteEpisodeSemanticsWithPlan(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  episode: GeneratedStoryContent,
+  critique: StoryCritique,
+  episodeNumber: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+) {
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+  options.log(
+    `[${episodeNumber}/${options.episodes}] 剧情语义优化先开启思考生成重构蓝图；`
+    + "蓝图完成后再关闭思考执行完整 JSON。",
+  );
+  const rewritePlan = await callStructured(
+    options,
+    semanticRewritePlanSchema,
+    "你只输出合法 JSON。你是儿童连续故事的剧情重构策划师；先深入推理，再给执行编辑一份短而明确的重构蓝图，本阶段绝不重写正文。",
+    `本集写作合同：${JSON.stringify(contract)}\n`
+      + `故事圣经：${JSON.stringify(plan.storyBible)}\n`
+      + `上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n`
+      + `上一集正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集"}\n`
+      + `当前正文：${JSON.stringify({ title: episode.title, paragraphs: episode.paragraphs })}\n`
+      + `严格评审：${JSON.stringify(critique)}\n\n`
+      + "规划如何真正修复评审问题，而不是换同义词。逐段明确必须保留什么、删除或改变什么，以及阻碍→选择→后果→新信息的因果。"
+      + "不得增加 writing contract 之外的新设定，不得重复上一集发现，不得让物件或答案凭空出现。只返回重构蓝图 JSON。",
+    options.reviewModel || options.model,
+    Math.max(options.reviewTemperature, 0.25),
+    semanticPlanningModelPolicy(options),
+  );
+  return callEpisodeContent(
+    options,
+    plan,
+    episodeNumber,
+    previousEpisode,
+    "你只输出合法 JSON。你是儿童连续故事执行编辑；严格执行已经完成的重构蓝图，不再展开长推理。",
+    `${reviewPrompt(options, plan, episode, critique, episodeNumber, previousEpisode)}\n\n`
+      + `已完成的重构蓝图：${JSON.stringify(rewritePlan)}\n\n`
+      + "逐项执行蓝图；若蓝图与 writing contract 冲突，以 writing contract 为准。"
+      + "不得只做措辞润色，必须落实蓝图中的因果、连续性、伙伴互动和结尾回报。",
+    options.reviewModel || options.model,
+    options.reviewTemperature,
+    semanticRewriteModelPolicy(options),
   );
 }
 
@@ -2318,7 +3112,6 @@ function meetsQualityTarget(quality: StoryQuality, targetCoverage: number) {
 export function passesStoryQualityFloor(quality: StoryQuality, targetCoverage: number) {
   const publishableCoverage = Math.min(targetCoverage, 0.9);
   return quality.blockingIssues.length === 0
-    && quality.score >= 80
     && (quality.lexicalCoverage === null || quality.lexicalCoverage >= publishableCoverage);
 }
 
@@ -2455,6 +3248,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
     (item) => item.semanticReview,
   ) ?? [];
   let activeEpisode = restored?.activeEpisode;
+  let discardedDraftLessons = restored?.discardedDraftLessons ?? [];
   const checkpointEpisodes = () => generated.map((savedEpisode, savedIndex) => ({
     episode: savedEpisode,
     quality: qualities[savedIndex],
@@ -2466,6 +3260,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       version: 2,
       plan,
       episodes: checkpointEpisodes(),
+      ...(discardedDraftLessons.length ? { discardedDraftLessons } : {}),
       ...(active ? { activeEpisode: active } : {}),
     });
   };
@@ -2536,21 +3331,55 @@ export async function runStoryGeneration(options: StoryRunOptions) {
           const exhaustedSemanticIssues = savedActive.semanticReview
             ? semanticQualityIssues(savedActive.semanticReview, exhaustedBaseline)
             : [];
-          const rejectedAfterRepair = savedActive.stage === "semantic_reviewed"
+          const exhaustedSemanticPublishIssues = savedActive.semanticReview
+            ? semanticPublishIssues(savedActive.semanticReview, exhaustedBaseline)
+            : [];
+          const savedGateReview = savedActive.semanticReview ?? savedActive.critique;
+          const rejectedByEarlyStrictGate = Boolean(
+            savedGateReview
+            && !savedActive.mechanicalRepairUsed
+            && !isStrictStoryCritique(savedGateReview, exhaustedBaseline),
+          );
+          const pendingMechanicalRescue = savedActive.mechanicalRepairUsed
+            && savedActive.fullRewriteCount < 4
+            && !passesStoryQualityFloor(exhaustedQuality, options.minLexicalCoverage)
+            && Boolean(savedActive.critique);
+          const pendingFinalSemanticReview = savedActive.stage === "mechanical_repaired"
+            && passesStoryQualityFloor(exhaustedQuality, options.minLexicalCoverage)
+            && Boolean(savedActive.critique);
+          const pendingSemanticRescue = savedActive.stage === "semantic_reviewed"
             && exhaustedSemanticIssues.length > 0
-            && (savedActive.semanticRewriteUsed || savedActive.mechanicalRepairUsed);
-          const exhaustedRewriteBudget = savedActive.fullRewriteCount >= 2
-            && (
-              !passesStoryQualityFloor(exhaustedQuality, options.minLexicalCoverage)
-              || exhaustedSemanticIssues.length > 0
-            );
+            && !savedActive.mechanicalRepairUsed
+            && savedActive.fullRewriteCount < 2;
+          const rejectedAfterRepair = savedActive.stage === "semantic_reviewed"
+            && exhaustedSemanticPublishIssues.length > 0
+            && (savedActive.semanticRewriteUsed || savedActive.mechanicalRepairUsed)
+            && !pendingMechanicalRescue
+            && !pendingFinalSemanticReview
+            && !pendingSemanticRescue;
+          const exhaustedRewriteBudget = (
+            savedActive.fullRewriteCount >= 4
+            && !passesStoryQualityFloor(exhaustedQuality, options.minLexicalCoverage)
+          ) || (
+            savedActive.fullRewriteCount >= 2
+            && exhaustedSemanticPublishIssues.length > 0
+            && !pendingMechanicalRescue
+            && !pendingFinalSemanticReview
+          );
           if (
-            rejectedAfterRepair
+            rejectedByEarlyStrictGate
+            || rejectedAfterRepair
             || exhaustedRewriteBudget
           ) {
+            discardedDraftLessons = buildDiscardedDraftLessons(
+              savedActive,
+              exhaustedQuality,
+              discardedDraftLessons,
+            );
             options.log(
               `[${episodeNumber}/${options.episodes}] 已保存稿修复后仍未通过质量门禁，`
-              + "保留前面已完成章节，丢弃本集坏稿并重新生成 3 份候选。",
+              + `已沉淀 ${discardedDraftLessons.length} 条失败经验；保留前面已完成章节，`
+              + "丢弃本集坏稿并重新生成 3 份候选。",
             );
             savedActive = undefined;
             saveCheckpoint();
@@ -2563,54 +3392,68 @@ export async function runStoryGeneration(options: StoryRunOptions) {
         let fullRewriteCount = savedActive?.fullRewriteCount ?? 0;
         let mechanicalRepairUsed = savedActive?.mechanicalRepairUsed ?? false;
         let semanticRewriteUsed = savedActive?.semanticRewriteUsed ?? false;
+        let resumingMechanicalRescue = false;
 
         if (savedActive) {
           episode = savedActive.episode;
           critique = savedActive.critique;
           semanticReview = savedActive.semanticReview;
           quality = assessStoryQuality(episode, options, episodeNumber, lexical, plan, episodePrevious);
+          resumingMechanicalRescue = mechanicalRepairUsed
+            && fullRewriteCount < 4
+            && !passesStoryQualityFloor(quality, options.minLexicalCoverage)
+            && Boolean(critique);
+          if (resumingMechanicalRescue && critique) {
+            semanticReview = critique;
+            options.log(
+              `[${episodeNumber}/${options.episodes}] 中间机械稿尚未达标，`
+              + "复用修稿前已通过的候选评审，先完成剩余机械修复再做终审。",
+            );
+          }
           options.log(
             `[${episodeNumber}/${options.episodes}] 从 ${savedActive.stage} 阶段继续，`
-            + `已使用完整重写 ${fullRewriteCount}/2 次。`,
+            + `已使用完整重写 ${fullRewriteCount}/4 次。`,
           );
         } else {
-          const draft = await generateEpisodeDraft(options, plan, index, episodePrevious);
+          const draft = await generateEpisodeDraft(
+            options,
+            plan,
+            index,
+            episodePrevious,
+            index > 0 ? semanticReviews[0] : null,
+            discardedDraftLessons,
+          );
           episode = draft.episode;
           critique = draft.critique;
+          semanticReview = draft.critique;
           quality = assessStoryQuality(episode, options, episodeNumber, lexical, plan, episodePrevious);
           saveCheckpoint({
             index,
-            stage: "draft_selected",
+            stage: "semantic_reviewed",
             episode,
             quality,
             critique,
+            semanticReview,
             fullRewriteCount,
             mechanicalRepairUsed,
             semanticRewriteUsed,
           });
         }
 
-        if (!(savedActive?.stage === "semantic_reviewed" && semanticReview)) {
-          if ((!savedActive || savedActive.stage === "draft_selected") && critique) {
-            semanticReview = critique;
-            options.log(
-              `[${episodeNumber}/${options.episodes}] 复用候选稿四维评审作为剧情门禁，跳过一次重复语义评审。`,
-            );
-          } else {
-            reportProgress(
-              options,
-              "reviewing",
-              `第 ${episodeNumber} 集正在进行剧情与连续性评审`,
-              episodeProgress(options, index, 0.58),
-            );
-            semanticReview = await reviewEpisodeSemantics(
-              options,
-              plan,
-              episode,
-              episodeNumber,
-              episodePrevious,
-            );
-          }
+        if (!semanticReview) {
+          reportProgress(
+            options,
+            "reviewing",
+            `第 ${episodeNumber} 集已从候选中选出，正在进行独立剧情与连续性终审`,
+            episodeProgress(options, index, 0.58),
+          );
+          semanticReview = await reviewEpisodeSemantics(
+            options,
+            plan,
+            episode,
+            episodeNumber,
+            episodePrevious,
+          );
           if (!semanticReview) throw new Error(`第 ${episodeNumber} 集检查点缺少初稿评审`);
           saveCheckpoint({
             index,
@@ -2628,12 +3471,69 @@ export async function runStoryGeneration(options: StoryRunOptions) {
 
         const firstEpisodeBaseline = index > 0 ? semanticReviews[0] : null;
         let semanticIssues = semanticQualityIssues(semanticReview, firstEpisodeBaseline);
-        if (semanticIssues.length && !semanticRewriteUsed && !mechanicalRepairUsed) {
-          if (fullRewriteCount >= 2) {
-            throw new Error(
-              `第 ${episodeNumber} 集已用完 2 次完整重写预算，语义质量仍未达标：${semanticIssues.join("；")}`,
+        if (
+          !semanticIssues.length
+          && !semanticRewriteUsed
+          && !mechanicalRepairUsed
+          && hasEditorialOpportunities(semanticReview)
+        ) {
+          reportProgress(
+            options,
+            "editing",
+            `第 ${episodeNumber} 集已通过四项 8 分，正在用“思考规划 + 直接执行”尝试一次增益优化`,
+            episodeProgress(options, index, 0.66),
+          );
+          const selectedEpisode = episode;
+          const selectedQuality = quality;
+          const selectedReview = semanticReview;
+          semanticRewriteUsed = true;
+          const optimizedEpisode = await rewriteEpisodeSemanticsWithPlan(
+            options,
+            plan,
+            episode,
+            semanticReview,
+            episodeNumber,
+            episodePrevious,
+          );
+          const optimizedReview = await reviewEpisodeSemantics(
+            options,
+            plan,
+            optimizedEpisode,
+            episodeNumber,
+            episodePrevious,
+          );
+          fullRewriteCount += 1;
+          if (isStoryCritiqueImprovement(optimizedReview, selectedReview, firstEpisodeBaseline)) {
+            episode = optimizedEpisode;
+            semanticReview = optimizedReview;
+            quality = assessStoryQuality(episode, options, episodeNumber, lexical, plan, episodePrevious);
+            options.log(
+              `[${episodeNumber}/${options.episodes}] 增益优化已采用：四维均分从 `
+              + `${critiqueAverage(selectedReview).toFixed(2)} 提升到 ${critiqueAverage(optimizedReview).toFixed(2)}。`,
+            );
+          } else {
+            episode = selectedEpisode;
+            semanticReview = selectedReview;
+            quality = selectedQuality;
+            options.log(
+              `[${episodeNumber}/${options.episodes}] 增益优化未同时满足“四项仍达 8 分且均分高于原稿”，`
+              + `已丢弃优化稿并保留严选原稿（原稿 ${critiqueAverage(selectedReview).toFixed(2)}，优化稿 ${critiqueAverage(optimizedReview).toFixed(2)}）。`,
             );
           }
+          saveCheckpoint({
+            index,
+            stage: "semantic_reviewed",
+            episode,
+            quality,
+            critique,
+            semanticReview,
+            fullRewriteCount,
+            mechanicalRepairUsed,
+            semanticRewriteUsed,
+          });
+          semanticIssues = semanticQualityIssues(semanticReview, firstEpisodeBaseline);
+        }
+        while (semanticIssues.length && !mechanicalRepairUsed && fullRewriteCount < 2) {
           reportProgress(
             options,
             "repairing",
@@ -2641,24 +3541,13 @@ export async function runStoryGeneration(options: StoryRunOptions) {
             episodeProgress(options, index, 0.68),
           );
           semanticRewriteUsed = true;
-          episode = await callEpisodeContent(
+          episode = await rewriteEpisodeSemanticsWithPlan(
             options,
             plan,
+            episode,
+            semanticReview,
             episodeNumber,
             episodePrevious,
-            "你只输出合法 JSON。你是儿童连续故事终审编辑，必须直接修复剧情逻辑、吸引力、语言或连续性不足。",
-            `${reviewPrompt(options, plan, episode, semanticReview, episodeNumber, episodePrevious)}\n\n`
-              + `在优先修复剧情问题的同时，一并消除当前自动检测到的结构与词汇问题：${quality.issues.join("；") || "暂无"}。`
-              + "仍会在剧情定稿后执行一次最终自动检查，因此不要牺牲剧情因果来机械凑指标。",
-            options.reviewModel || options.model,
-            options.reviewTemperature,
-            {
-              timeoutMs: options.rewriteTimeoutMs,
-              networkRetries: 1,
-              structureRetries: 1,
-              maxCompletionTokens: modelTokenBudgets.episode,
-              disableThinking: true,
-            },
           );
           fullRewriteCount += 1;
           quality = assessStoryQuality(episode, options, episodeNumber, lexical, plan, episodePrevious);
@@ -2693,14 +3582,14 @@ export async function runStoryGeneration(options: StoryRunOptions) {
           semanticIssues = semanticQualityIssues(semanticReview, firstEpisodeBaseline);
         }
         if (semanticIssues.length) {
-          throw new Error(`第 ${episodeNumber} 集语义质量未达标：${semanticIssues.join("；")}`);
+          throw new Error(`第 ${episodeNumber} 集语义质量未达标：严格门禁要求四项均达到 8 分（${semanticIssues.join("；")}）`);
         }
 
-        while (!passesStoryQualityFloor(quality, options.minLexicalCoverage) && fullRewriteCount < 2) {
+        while (!passesStoryQualityFloor(quality, options.minLexicalCoverage) && fullRewriteCount < 4) {
           reportProgress(
             options,
             "repairing",
-            `第 ${episodeNumber} 集剧情已通过，正在进行第 ${fullRewriteCount + 1}/2 次完整重写（最终结构与词汇）`,
+            `第 ${episodeNumber} 集剧情已通过，正在进行第 ${fullRewriteCount + 1}/4 次完整重写（最终结构与词汇）`,
             episodeProgress(options, index, 0.84),
           );
           mechanicalRepairUsed = true;
@@ -2751,7 +3640,9 @@ export async function runStoryGeneration(options: StoryRunOptions) {
             });
             semanticIssues = semanticQualityIssues(semanticReview, firstEpisodeBaseline);
             if (semanticIssues.length) {
-              throw new Error(`第 ${episodeNumber} 集最终结构修稿造成语义退化：${semanticIssues.join("；")}`);
+              throw new Error(
+                `第 ${episodeNumber} 集最终结构修稿造成语义退化：严格门禁要求四项仍达到 8 分（${semanticIssues.join("；")}）`,
+              );
             }
           }
         }
