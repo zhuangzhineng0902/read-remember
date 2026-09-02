@@ -22,6 +22,7 @@ import {
   normalizeContinuitySummary,
   normalizeEpisodeNarrative,
   normalizePlanningArtifact,
+  normalizeSeriesPlan,
   normalizeStoryCritique,
   normalizeTargetWords,
   narrativePreflightIssues,
@@ -301,6 +302,35 @@ test("series plan validator enforces clue chronology", () => {
   invalid.clueLedger[0].introducedIn = 2;
   invalid.clueLedger[0].usedIn = 1;
   assert.throws(() => validateSeriesPlan(invalid, 2), /顺序不合法/);
+});
+
+test("series plan normalization repairs harmless model cardinality and numeric drift locally", () => {
+  const modelPlan = structuredClone(validPlan) as unknown as Record<string, unknown>;
+  const episodes = modelPlan.episodes as Array<Record<string, unknown>>;
+  episodes[0].number = "1";
+  episodes[0].newInformation = ["fact one", "fact two", "fact three", "extra fact"];
+  episodes[0].mustNotRepeat = ["old one", "old two", "old three", "old four", "old five", "old six"];
+  const clueLedger = modelPlan.clueLedger as Array<Record<string, unknown>>;
+  clueLedger[0].introducedIn = "1";
+
+  const normalized = normalizeSeriesPlan([modelPlan]) as Record<string, unknown>;
+  const normalizedEpisodes = normalized.episodes as Array<Record<string, unknown>>;
+  const normalizedClues = normalized.clueLedger as Array<Record<string, unknown>>;
+  assert.equal(normalizedEpisodes[0].number, 1);
+  assert.equal((normalizedEpisodes[0].newInformation as unknown[]).length, 3);
+  assert.deepEqual(normalizedEpisodes[0].mustNotRepeat, []);
+  assert.match(
+    String((normalizedEpisodes[1].mustNotRepeat as unknown[])[0]),
+    /不得把上一集已知事实再次写成新发现/,
+  );
+  assert.equal(normalizedClues[0].introducedIn, 1);
+
+  const checkpoint = storyGenerationCheckpointSchema.parse({
+    version: 2,
+    plan: modelPlan,
+    episodes: [],
+  });
+  assert.equal(checkpoint.plan.episodes[0].newInformation.length, 3);
 });
 
 test("a complete rewritten narrative can be preserved while missing metadata is filled separately", () => {

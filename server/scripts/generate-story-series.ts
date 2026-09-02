@@ -348,7 +348,7 @@ const episodeBeatSchema = z.object({
   episodeMission: z.string().trim().min(10).max(500),
   newInformation: z.array(z.string().trim().min(6).max(300)).min(1).max(3),
   irreversibleChange: z.string().trim().min(8).max(400),
-  mustNotRepeat: z.array(z.string().trim().min(6).max(300)).min(1).max(5),
+  mustNotRepeat: z.array(z.string().trim().min(6).max(300)).max(5),
   openingHook: z.string().trim().min(10).max(500),
   goal: z.string().trim().min(8).max(400),
   obstacle: z.string().trim().min(8).max(400),
@@ -372,7 +372,7 @@ const clueLedgerEntrySchema = z.object({
   payoff: z.string().trim().min(8).max(500),
 });
 
-const planSchema = z.object({
+const planObjectSchema = z.object({
   seriesTitle: z.string().trim().min(3).max(120),
   premise: z.string().trim().min(30).max(1000),
   cast: z.array(
@@ -387,6 +387,116 @@ const planSchema = z.object({
   storyBible: storyBibleSchema,
   clueLedger: z.array(clueLedgerEntrySchema).min(2).max(30),
   episodes: z.array(episodeBeatSchema).min(2).max(30),
+});
+
+function objectArray(value: unknown) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>);
+  return value;
+}
+
+function boundedArray(value: unknown, maximum: number) {
+  const normalized = objectArray(value);
+  return Array.isArray(normalized) ? normalized.slice(0, maximum) : normalized;
+}
+
+function integerLike(value: unknown) {
+  return typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : value;
+}
+
+function normalizeEpisodeBeat(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const episode = value as Record<string, unknown>;
+  return {
+    ...episode,
+    number: integerLike(episode.number),
+    newInformation: boundedArray(episode.newInformation, 3),
+    mustNotRepeat: boundedArray(episode.mustNotRepeat, 5),
+  };
+}
+
+function normalizeClueLedgerEntry(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const clue = value as Record<string, unknown>;
+  return {
+    ...clue,
+    introducedIn: integerLike(clue.introducedIn),
+    usedIn: integerLike(clue.usedIn),
+    payoffIn: integerLike(clue.payoffIn),
+  };
+}
+
+export function normalizeSeriesPlan(value: unknown) {
+  let candidate = value;
+  while (Array.isArray(candidate) && candidate.length === 1) candidate = candidate[0];
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return candidate;
+  let plan = candidate as Record<string, unknown>;
+  for (const key of ["plan", "data", "result"] as const) {
+    const nested = plan[key];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const nestedRecord = nested as Record<string, unknown>;
+      if ("seriesTitle" in nestedRecord || "episodes" in nestedRecord) {
+        plan = nestedRecord;
+        break;
+      }
+    }
+  }
+  const storyBibleRecord = plan.storyBible && typeof plan.storyBible === "object" && !Array.isArray(plan.storyBible)
+    ? plan.storyBible as Record<string, unknown>
+    : null;
+  const rawEpisodes = Array.isArray(objectArray(plan.episodes))
+    ? (boundedArray(plan.episodes, 30) as unknown[]).map(normalizeEpisodeBeat)
+    : objectArray(plan.episodes);
+  const episodes = Array.isArray(rawEpisodes)
+    ? rawEpisodes.map((episode, index) => {
+        if (!episode || typeof episode !== "object" || Array.isArray(episode)) return episode;
+        if (index === 0) return { ...episode, mustNotRepeat: [] };
+        const previous = rawEpisodes[index - 1];
+        if (!previous || typeof previous !== "object" || Array.isArray(previous)) return episode;
+        const previousBeat = previous as Record<string, unknown>;
+        const previousFacts = Array.isArray(previousBeat.newInformation)
+          ? previousBeat.newInformation.filter((item): item is string => typeof item === "string").slice(0, 2)
+          : [];
+        const irreversibleChange = typeof previousBeat.irreversibleChange === "string"
+          ? previousBeat.irreversibleChange
+          : "";
+        return {
+          ...episode,
+          mustNotRepeat: [
+            ...previousFacts.map((fact) => `不得把上一集已知事实再次写成新发现：${fact}`),
+            ...(irreversibleChange
+              ? [`不得重复上一集已经完成的状态变化：${irreversibleChange}`]
+              : []),
+          ].slice(0, 3),
+        };
+      })
+    : rawEpisodes;
+  return {
+    ...plan,
+    cast: boundedArray(plan.cast, 8),
+    storyBible: storyBibleRecord
+      ? {
+          ...storyBibleRecord,
+          worldRules: boundedArray(storyBibleRecord.worldRules, 8),
+          fixedTerms: boundedArray(storyBibleRecord.fixedTerms, 16),
+          characterArcs: boundedArray(storyBibleRecord.characterArcs, 8),
+        }
+      : plan.storyBible,
+    clueLedger: Array.isArray(objectArray(plan.clueLedger))
+      ? (boundedArray(plan.clueLedger, 30) as unknown[]).map(normalizeClueLedgerEntry)
+      : objectArray(plan.clueLedger),
+    episodes,
+  };
+}
+
+const planSchema = z.preprocess(normalizeSeriesPlan, planObjectSchema);
+
+const planSelectionSchema = z.object({
+  selectedCandidate: z.preprocess(
+    integerLike,
+    z.number().int().min(1).max(4),
+  ),
+  rationale: z.string().trim().min(8).max(800),
 });
 
 const questionSchema = z.object({
@@ -785,6 +895,7 @@ const activeEpisodeStages = [
 ] as const;
 
 const currentReviewCalibrationVersion = "independent-four-dimension-v2-calibrated-7-7.5";
+const currentStoryContractVersion = "derived-history-and-two-clues-v1";
 
 const storyQualityCheckpointSchema = z.object({
   score: z.number().min(0).max(100),
@@ -813,6 +924,7 @@ const currentStoryGenerationCheckpointSchema = z.object({
   plan: planSchema,
   episodes: z.array(completedEpisodeCheckpointSchema).max(30),
   reviewCalibrationVersion: z.string().trim().min(1).max(80).optional(),
+  storyContractVersion: z.string().trim().min(1).max(80).optional(),
   discardedDraftLessons: z.array(z.string().trim().min(4).max(500)).max(20).optional(),
   rejectedElite: z.object({
     index: z.number().int().min(0).max(29),
@@ -1843,12 +1955,13 @@ ${buildNarrativeCraftBrief(options)}
 - 故事圣经：3-8 条不可随意改变的世界规则；固定人物、地点和物件的英文称呼；每位主要角色的欲望、恐惧、说话特征和整季成长。
 - 线索账本：每条线索用 C1、C2……编号，明确在哪一集埋下、误导、使用和回收；埋下不得晚于使用，最后一集前回收主线线索。
 - 每集按“目标→阻碍→角色作出艰难选择→产生后果→出现新问题”构成因果链，不能只罗列事件。
-- 每集写一份独立任务合同：episodeMission 说明这一集在整季中不可替代的作用；newInformation 列出读者本集真正新知道的事实；irreversibleChange 写明结尾后无法回到本集开头的状态变化；mustNotRepeat 列出上一集已完成、不得再次当作主要发现讲述的信息。
+- 每集写一份独立任务合同：episodeMission 说明这一集在整季中不可替代的作用；newInformation 最多 3 条，列出读者本集真正新知道的事实；irreversibleChange 写明结尾后无法回到本集开头的状态变化。mustNotRepeat 由程序根据前一集事实自动推导，你必须返回空数组 []，不得自行填写，避免与本集任务冲突。
+- 每集最多承担 2 个必须完成的线索动作；其余线索移到相邻章节，不得把 3 条以上线索同时塞进一篇短文。
 - 相邻两集不能用相同事件换地点重演。第二集必须扩大冲突或推翻一个判断，最终集必须用前文证据解决主问题；每集至少有一个新的行动结果，而不只是再次观察已知异常。
 - 每集最多推进 2-3 个主要事件；人物换地点、获得信息或改变计划时必须写出原因。伏笔先以不起眼但可记住的感官细节出现，后续回收时让读者能回想起原文证据。
 
 只返回一套策划 JSON，不要附加说明：
-{"seriesTitle":"英文系列名","premise":"中文策划说明","cast":[{"name":"英文名","role":"中文角色作用","strength":"优点","flaw":"缺点"}],"seasonMystery":"中文主谜题","storyBible":{"worldRules":["中文"],"fixedTerms":[{"concept":"中文概念","english":"固定英文称呼"}],"characterArcs":[{"name":"英文名","wants":"中文","fear":"中文","voice":"中文","growth":"中文"}]},"clueLedger":[{"id":"C1","clue":"中文","introducedIn":1,"misdirection":"中文","usedIn":2,"payoffIn":3,"payoff":"中文"}],"episodes":[{"number":1,"title":"英文标题","episodeMission":"本集不可替代的叙事任务","newInformation":["本集新增事实"],"irreversibleChange":"本集结束后的不可逆变化","mustNotRepeat":["本集不得重复讲述的既有信息"],"openingHook":"中文","goal":"中文","obstacle":"中文","choice":"中文","consequence":"中文","newQuestion":"中文","problem":"中文","clue":"中文","teamworkTurn":"中文","emotionalBeat":"中文","cliffhanger":"中文"}]}`;
+{"seriesTitle":"英文系列名","premise":"中文策划说明","cast":[{"name":"英文名","role":"中文角色作用","strength":"优点","flaw":"缺点"}],"seasonMystery":"中文主谜题","storyBible":{"worldRules":["中文"],"fixedTerms":[{"concept":"中文概念","english":"固定英文称呼"}],"characterArcs":[{"name":"英文名","wants":"中文","fear":"中文","voice":"中文","growth":"中文"}]},"clueLedger":[{"id":"C1","clue":"中文","introducedIn":1,"misdirection":"中文","usedIn":2,"payoffIn":3,"payoff":"中文"}],"episodes":[{"number":1,"title":"英文标题","episodeMission":"本集不可替代的叙事任务","newInformation":["本集新增事实"],"irreversibleChange":"本集结束后的不可逆变化","mustNotRepeat":[],"openingHook":"中文","goal":"中文","obstacle":"中文","choice":"中文","consequence":"中文","newQuestion":"中文","problem":"中文","clue":"中文","teamworkTurn":"中文","emotionalBeat":"中文","cliffhanger":"中文"}]}`;
 }
 
 function episodePlanContext(plan: SeriesPlan, episodeNumber: number) {
@@ -1879,7 +1992,7 @@ function requiredEpisodeClueActions(plan: SeriesPlan, episodeNumber: number): Ep
       ? [{ clueId: clue.id, action: "payoff" as const }]
       : []),
   ]);
-  if (plantedOrPaidOff.length) return plantedOrPaidOff;
+  if (plantedOrPaidOff.length) return plantedOrPaidOff.slice(0, 2);
   const continued = plan.clueLedger
     .filter((clue) => clue.usedIn === episodeNumber)
     .slice(0, 1)
@@ -2619,7 +2732,7 @@ async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
     4,
   );
   options.log(`正在并行生成 ${options.planCandidates} 套候选季纲…`);
-  const candidates = await Promise.all(
+  const candidateResults = await Promise.allSettled(
     Array.from({ length: options.planCandidates }, async (_, index) => {
       const value = await callStructured(
         options,
@@ -2633,17 +2746,49 @@ async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
       return validateSeriesPlan(value, options.episodes);
     }),
   );
+  const candidates = candidateResults.flatMap((result, index) => {
+    if (result.status === "fulfilled") return [result.value];
+    options.log(
+      `候选季纲 ${index + 1}/${options.planCandidates} 在本地归一化和结构恢复后仍不可用，`
+      + `已隔离该方案并继续使用其他候选：${modelRequestError(result.reason)}`,
+    );
+    return [];
+  });
+  if (!candidates.length) {
+    throw new Error("所有候选季纲均不可用；模型未能提供至少一套完整故事方案");
+  }
+  if (candidates.length === 1) {
+    options.log("仅有 1 套候选季纲通过完整性校验，直接采用；不再要求模型重写巨型季纲 JSON。");
+    return candidates[0];
+  }
   reportProgress(options, "selecting_plan", "候选方案已完成，正在选择最终故事主线", 14);
-  const selection = await callStructured(
-    options,
-    planSchema,
-    "你只输出合法 JSON。你是儿童分级连续故事总编，善于比较方案并把最强元素融合成逻辑严密的新季纲。",
-    `${basePrompt}\n\n以下是 ${candidates.length} 套候选季纲：\n${JSON.stringify(candidates)}\n\n比较它们的开篇吸引力、整季因果链、角色成长、线索公平性、笑点潜力和连续追读欲。选择最强主结构，并只在不破坏因果和线索账本的前提下融合其他方案的优点。返回一套完整最终季纲 JSON。`,
-    options.reviewModel || options.model,
-    options.reviewTemperature,
-    { maxCompletionTokens: modelTokenBudgets.plan, disableThinking: true },
-  );
-  return validateSeriesPlan(selection, options.episodes);
+  try {
+    const selection = await callStructured(
+      options,
+      planSelectionSchema,
+      "你只输出合法 JSON。你是儿童分级连续故事总编，只负责从已通过结构校验的候选方案中选出最强的一套，不重写季纲。",
+      `以下是 ${candidates.length} 套已通过完整性校验的候选季纲：\n${JSON.stringify(candidates)}\n\n比较开篇吸引力、整季因果链、角色成长、线索公平性、笑点潜力和连续追读欲。只返回 {"selectedCandidate":1,"rationale":"选择理由"}，selectedCandidate 使用从 1 开始的候选编号。`,
+      options.reviewModel || options.model,
+      options.reviewTemperature,
+      {
+        maxCompletionTokens: modelTokenBudgets.questions,
+        networkRetries: 1,
+        structureRetries: 2,
+        disableThinking: true,
+      },
+    );
+    const selected = candidates[Math.min(selection.selectedCandidate, candidates.length) - 1] ?? candidates[0];
+    options.log(
+      `总编选择候选季纲 ${Math.min(selection.selectedCandidate, candidates.length)}/${candidates.length}：`
+      + selection.rationale,
+    );
+    return selected;
+  } catch (error) {
+    options.log(
+      `候选季纲的轻量选优响应不可用，已采用第一套完整候选，避免再次生成大型 JSON：${modelRequestError(error)}`,
+    );
+    return candidates[0];
+  }
 }
 
 export function narrativePreflightIssues(
@@ -3545,6 +3690,19 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       restored = null;
     }
   }
+  if (restored && restored.storyContractVersion !== currentStoryContractVersion) {
+    options.log(
+      "检测到旧版故事合同：已保留完成章节和季纲，丢弃当前集旧稿、旧评分及其冲突经验，"
+      + "改用按历史事实推导禁重复项、每集最多两条硬线索的新合同重新生成。",
+    );
+    restored = {
+      ...restored,
+      storyContractVersion: currentStoryContractVersion,
+      discardedDraftLessons: undefined,
+      rejectedElite: undefined,
+      activeEpisode: undefined,
+    };
+  }
   const plan = restored?.plan ?? await generatePlan(options, engagementBrief);
   const generated: GeneratedStoryEpisode[] = restored?.episodes.map((item) => item.episode) ?? [];
   const qualities: StoryQuality[] = restored?.episodes.map((item) => item.quality) ?? [];
@@ -3566,6 +3724,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       version: 2,
       plan,
       episodes: checkpointEpisodes(),
+      storyContractVersion: currentStoryContractVersion,
       ...(reviewCalibrationVersion ? { reviewCalibrationVersion } : {}),
       ...(discardedDraftLessons.length ? { discardedDraftLessons } : {}),
       ...(rejectedElite ? { rejectedElite } : {}),
