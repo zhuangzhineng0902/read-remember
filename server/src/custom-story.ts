@@ -22,6 +22,7 @@ type CustomStoryRequestRow = {
   readerStage: ReaderStageId;
   checkpointJson: string;
   checkpointEpisodeCount: number;
+  automaticRetryCount: number;
 };
 
 export type CustomStoryProvider = {
@@ -46,7 +47,9 @@ const checkpointStageLabels: Record<string, string> = {
   semantic_rewritten: "剧情修稿",
 };
 
-const automaticQualityRetryLimit = 2;
+// One automatic continuation plus the initial run. Each run has its own bounded
+// two-batch/two-fusion budget, so a chapter cannot loop indefinitely.
+const automaticQualityRetryLimit = 1;
 
 export function isRecoverableStoryQualityFailure(message: string, resumeAvailable: boolean) {
   if (!resumeAvailable) return false;
@@ -99,13 +102,14 @@ export class CustomStoryService implements CustomStoryProvider {
           keywords_json AS keywordsJson, plot_notes AS plotNotes, tone,
           episode_count AS episodeCount, reader_stage AS readerStage,
           checkpoint_json AS checkpointJson,
-          checkpoint_episode_count AS checkpointEpisodeCount
+          checkpoint_episode_count AS checkpointEpisodeCount,
+          automatic_retry_count AS automaticRetryCount
          FROM custom_story_requests WHERE id = ?`,
       )
       .get(requestId) as CustomStoryRequestRow | undefined;
   }
 
-  private async generate(requestId: string, automaticQualityRetry = 0): Promise<void> {
+  private async generate(requestId: string): Promise<void> {
     const request = this.request(requestId);
     if (!request) return;
     const checkpoint = this.parseCheckpoint(request.checkpointJson);
@@ -190,23 +194,25 @@ export class CustomStoryService implements CustomStoryProvider {
         : null;
       const errorMessage = error instanceof Error ? error.message : "故事生成失败";
       if (
-        automaticQualityRetry < automaticQualityRetryLimit
+        request.automaticRetryCount < automaticQualityRetryLimit
         && isRecoverableStoryQualityFailure(errorMessage, Boolean(savedCheckpoint))
       ) {
-        const nextAttempt = automaticQualityRetry + 1;
+        const nextAttempt = request.automaticRetryCount + 1;
         console.log(
           `[custom-story:${request.id}] 本轮稿件未达到发布质量，但检查点完整；`
           + `正在自动吸取废稿经验并换稿（自动续跑 ${nextAttempt}/${automaticQualityRetryLimit}）：${errorMessage}`,
         );
         this.db.prepare(
           `UPDATE custom_story_requests SET status = 'generating', error_message = '',
+           automatic_retry_count = ?,
            progress_stage = 'drafting', progress_message = ?, updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`,
         ).run(
+          nextAttempt,
           `本轮稿件未达标，正在吸取经验并自动重写（${nextAttempt}/${automaticQualityRetryLimit}）`,
           request.id,
         );
-        return this.generate(requestId, nextAttempt);
+        return this.generate(requestId);
       }
       const resumeMessage = savedCheckpoint
         ? savedCheckpoint.activeEpisode

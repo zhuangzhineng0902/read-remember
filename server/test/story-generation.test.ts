@@ -22,6 +22,7 @@ import {
   normalizeContinuitySummary,
   normalizeEpisodeNarrative,
   normalizePlanningArtifact,
+  normalizeStoryCritique,
   normalizeTargetWords,
   narrativePreflightIssues,
   parseJson,
@@ -31,6 +32,7 @@ import {
   repeatedNarrativeIssues,
   resolveReaderProfile,
   runStoryGeneration,
+  selectBackboneStoryCritique,
   selectBestStoryCritique,
   selectDraftLessonsForPrompt,
   semanticPlanningModelPolicy,
@@ -368,6 +370,21 @@ test("transient planning artifacts accept richer objects and array-shaped sectio
   });
 });
 
+test("split critique arrays are merged before strict validation", () => {
+  const normalized = normalizeStoryCritique([
+    { dimension: "plot", score: 8, issues: [] },
+    { childAppeal: strongCritique.childAppeal },
+    { dimension: "gradedLanguage", score: 8.5, issues: [] },
+    { continuity: strongCritique.continuity },
+    { rewritePriorities: ["保持当前清晰推进"] },
+  ]) as StoryCritique;
+  assert.equal(normalized.plot.score, 8);
+  assert.deepEqual(normalized.childAppeal, strongCritique.childAppeal);
+  assert.deepEqual(normalized.gradedLanguage, strongCritique.gradedLanguage);
+  assert.deepEqual(normalized.continuity, strongCritique.continuity);
+  assert.deepEqual(normalized.rewritePriorities, strongCritique.rewritePriorities);
+});
+
 test("saved quality failures are eligible for bounded automatic story continuation", () => {
   assert.equal(
     isRecoverableStoryQualityFailure("第 2 集语义质量未达标：连续性 6.0 < 7", true),
@@ -392,11 +409,20 @@ test("semantic quality gate rejects a weaker later episode", () => {
   assert.deepEqual(semanticQualityIssues(strongCritique, strongCritique), []);
 });
 
-test("strict candidate gating requires every dimension to reach eight", () => {
-  const weak = structuredClone(strongCritique);
-  weak.continuity.score = 7.9;
+test("calibrated candidate gating requires every dimension to reach seven and average 7.5", () => {
+  const acceptable = structuredClone(strongCritique);
+  acceptable.continuity.score = 7;
+  const weakDimension = structuredClone(strongCritique);
+  weakDimension.continuity.score = 6.9;
+  const weakAverage = structuredClone(strongCritique);
+  weakAverage.plot.score = 7;
+  weakAverage.childAppeal.score = 7;
+  weakAverage.gradedLanguage.score = 7;
+  weakAverage.continuity.score = 7;
   assert.equal(isStrictStoryCritique(strongCritique), true);
-  assert.equal(isStrictStoryCritique(weak), false);
+  assert.equal(isStrictStoryCritique(acceptable), true);
+  assert.equal(isStrictStoryCritique(weakDimension), false);
+  assert.equal(isStrictStoryCritique(weakAverage), false);
 });
 
 test("an optimized story is adopted only when it remains strict and improves the average", () => {
@@ -456,11 +482,13 @@ test("discarded drafts persist actionable lessons for the next generation round"
   assert.ok(lessons.includes("上一轮：避免重复解释旧线索"));
 });
 
-test("candidate drafts use thinking mode with a larger independent budget", () => {
+test("candidate drafts use M3 direct JSON mode to prevent reasoning-only exhaustion", () => {
   assert.deepEqual(creativeDraftModelPolicy({ rewriteTimeoutMs: 480_000 }), {
     timeoutMs: 480_000,
-    maxCompletionTokens: 16_384,
-    disableThinking: false,
+    networkRetries: 1,
+    structureRetries: 2,
+    maxCompletionTokens: 8_192,
+    disableThinking: true,
   });
 });
 
@@ -474,13 +502,13 @@ test("semantic full rewrites use MiniMax M3 direct output with a recovery retry"
   });
 });
 
-test("semantic rewrite planning thinks before the direct JSON execution stage", () => {
+test("semantic rewrite planning uses a separate M3 direct blueprint before execution", () => {
   assert.deepEqual(semanticPlanningModelPolicy({ rewriteTimeoutMs: 480_000 }), {
     timeoutMs: 480_000,
     networkRetries: 1,
     structureRetries: 2,
-    maxCompletionTokens: 16_384,
-    disableThinking: false,
+    maxCompletionTokens: 8_192,
+    disableThinking: true,
   });
 });
 
@@ -502,6 +530,14 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
     { clueId: "C1", action: "payoff" },
     { clueId: "C2", action: "payoff" },
   ]);
+});
+
+test("each exam stage uses its own later-episode reading length cap", () => {
+  assert.deepEqual(buildEpisodeWritingContract({ examId: "middle" }, validPlan, 2).wordRange, [220, 310]);
+  assert.deepEqual(buildEpisodeWritingContract({ examId: "high" }, validPlan, 2).wordRange, [260, 320]);
+  assert.deepEqual(buildEpisodeWritingContract({ examId: "toeic" }, validPlan, 2).wordRange, [240, 300]);
+  assert.deepEqual(buildEpisodeWritingContract({ examId: "toefl" }, validPlan, 2).wordRange, [600, 800]);
+  assert.deepEqual(buildEpisodeWritingContract({ examId: "ielts" }, validPlan, 2).wordRange, [520, 700]);
 });
 
 test("discarded draft feedback is compacted before entering a new prompt", () => {
@@ -528,6 +564,21 @@ test("candidate selection favors plot and child appeal quality", () => {
   flatter.childAppeal.score = 7.5;
   flatter.gradedLanguage.score = 10;
   assert.equal(selectBestStoryCritique([flatter, strongCritique]), 1);
+});
+
+test("five-draft backbone selection preserves the original candidate index", () => {
+  const weaker = structuredClone(strongCritique);
+  weaker.plot.score = 7;
+  weaker.childAppeal.score = 7;
+  const strongest = structuredClone(strongCritique);
+  strongest.plot.score = 9.5;
+  strongest.childAppeal.score = 9;
+
+  assert.equal(
+    selectBackboneStoryCritique([weaker, null, strongCritique, strongest, null]),
+    3,
+  );
+  assert.throws(() => selectBackboneStoryCritique([null, null]), /至少需要一份可用/);
 });
 
 test("cross-episode detector blocks near-duplicate narrative sentences", () => {
@@ -721,6 +772,7 @@ test("an in-progress episode checkpoint resumes from its exact generation stage"
     version: 2,
     plan: validPlan,
     episodes: [],
+    reviewCalibrationVersion: "independent-four-dimension-v2-calibrated-7-7.5",
     activeEpisode: {
       index: 0,
       stage: "mechanical_repaired",
@@ -734,6 +786,7 @@ test("an in-progress episode checkpoint resumes from its exact generation stage"
   assert.equal(checkpoint?.activeEpisode?.stage, "mechanical_repaired");
   assert.equal(checkpoint?.activeEpisode?.fullRewriteCount, 2);
   assert.equal(checkpoint?.activeEpisode?.episode.title, "Saved Draft");
+  assert.equal(checkpoint?.reviewCalibrationVersion, "independent-four-dimension-v2-calibrated-7-7.5");
 });
 
 test("story quality blocks mixed Chinese and questions without source evidence", () => {
