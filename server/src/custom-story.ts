@@ -22,6 +22,7 @@ type CustomStoryRequestRow = {
   readerStage: ReaderStageId;
   checkpointJson: string;
   checkpointEpisodeCount: number;
+  automaticRetryEpisode: number;
   automaticRetryCount: number;
 };
 
@@ -47,9 +48,25 @@ const checkpointStageLabels: Record<string, string> = {
   semantic_rewritten: "剧情修稿",
 };
 
-// One automatic continuation plus the initial run. Each run has its own bounded
-// two-batch/two-fusion budget, so a chapter cannot loop indefinitely.
-const automaticQualityRetryLimit = 1;
+// Each episode gets three automatic continuations in addition to its initial
+// run. The persisted episode number prevents one difficult chapter from using
+// the retry budget of every later chapter.
+export const automaticQualityRetryLimit = 3;
+
+export function episodeAutomaticRetryState(
+  storedEpisode: number,
+  storedCount: number,
+  failedEpisode: number,
+) {
+  const used = storedEpisode === failedEpisode
+    ? Math.max(0, Math.trunc(storedCount))
+    : 0;
+  return {
+    used,
+    next: used + 1,
+    canRetry: used < automaticQualityRetryLimit,
+  };
+}
 
 export function isRecoverableStoryQualityFailure(message: string, resumeAvailable: boolean) {
   if (!resumeAvailable) return false;
@@ -103,6 +120,7 @@ export class CustomStoryService implements CustomStoryProvider {
           episode_count AS episodeCount, reader_stage AS readerStage,
           checkpoint_json AS checkpointJson,
           checkpoint_episode_count AS checkpointEpisodeCount,
+          automatic_retry_episode AS automaticRetryEpisode,
           automatic_retry_count AS automaticRetryCount
          FROM custom_story_requests WHERE id = ?`,
       )
@@ -176,6 +194,7 @@ export class CustomStoryService implements CustomStoryProvider {
            article_ids_json = ?, completed_at = CURRENT_TIMESTAMP,
            progress_stage = 'completed', progress_message = '故事已完成，可以开始阅读',
            progress_percent = 100, checkpoint_json = '', checkpoint_episode_count = 0,
+           automatic_retry_episode = 0, automatic_retry_count = 0,
            updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         ).run(result.seriesTitle, JSON.stringify(result.articleIds), request.id);
         this.db.exec("COMMIT");
@@ -193,23 +212,35 @@ export class CustomStoryService implements CustomStoryProvider {
         ? this.parseCheckpoint(saved.checkpointJson)
         : null;
       const errorMessage = error instanceof Error ? error.message : "故事生成失败";
+      const failedEpisode = savedCheckpoint
+        ? Math.min(
+            request.episodeCount,
+            (savedCheckpoint.activeEpisode?.index ?? savedCheckpoint.episodes.length) + 1,
+          )
+        : Math.min(request.episodeCount, Math.max(1, (saved?.checkpointEpisodeCount ?? 0) + 1));
+      const retryState = episodeAutomaticRetryState(
+        request.automaticRetryEpisode,
+        request.automaticRetryCount,
+        failedEpisode,
+      );
       if (
-        request.automaticRetryCount < automaticQualityRetryLimit
+        retryState.canRetry
         && isRecoverableStoryQualityFailure(errorMessage, Boolean(savedCheckpoint))
       ) {
-        const nextAttempt = request.automaticRetryCount + 1;
+        const nextAttempt = retryState.next;
         console.log(
-          `[custom-story:${request.id}] 本轮稿件未达到发布质量，但检查点完整；`
-          + `正在自动吸取废稿经验并换稿（自动续跑 ${nextAttempt}/${automaticQualityRetryLimit}）：${errorMessage}`,
+          `[custom-story:${request.id}] 第 ${failedEpisode} 集本轮稿件未达到发布质量，但检查点完整；`
+          + `正在自动吸取废稿经验并换稿（本集自动续跑 ${nextAttempt}/${automaticQualityRetryLimit}）：${errorMessage}`,
         );
         this.db.prepare(
           `UPDATE custom_story_requests SET status = 'generating', error_message = '',
-           automatic_retry_count = ?,
+           automatic_retry_episode = ?, automatic_retry_count = ?,
            progress_stage = 'drafting', progress_message = ?, updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`,
         ).run(
+          failedEpisode,
           nextAttempt,
-          `本轮稿件未达标，正在吸取经验并自动重写（${nextAttempt}/${automaticQualityRetryLimit}）`,
+          `第 ${failedEpisode} 集本轮稿件未达标，正在吸取经验并自动重写（本集 ${nextAttempt}/${automaticQualityRetryLimit}）`,
           request.id,
         );
         return this.generate(requestId);
@@ -266,9 +297,16 @@ export class CustomStoryService implements CustomStoryProvider {
       ).all(request.id) as Array<{ id: string }>).map((article) => article.id);
       this.db.prepare(
         `UPDATE custom_story_requests
-         SET series_title = ?, article_ids_json = ?, updated_at = CURRENT_TIMESTAMP
+         SET series_title = ?, article_ids_json = ?,
+             automatic_retry_episode = ?, automatic_retry_count = 0,
+             updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-      ).run(episode.seriesTitle, JSON.stringify(articleIds), request.id);
+      ).run(
+        episode.seriesTitle,
+        JSON.stringify(articleIds),
+        episode.episodeNumber < request.episodeCount ? episode.episodeNumber + 1 : 0,
+        request.id,
+      );
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

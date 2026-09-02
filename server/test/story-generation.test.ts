@@ -48,7 +48,30 @@ import {
   type StoryRunOptions,
 } from "../scripts/generate-story-series";
 import { createDatabase } from "../src/database";
-import { isRecoverableStoryQualityFailure } from "../src/custom-story";
+import {
+  automaticQualityRetryLimit,
+  episodeAutomaticRetryState,
+  isRecoverableStoryQualityFailure,
+} from "../src/custom-story";
+
+test("automatic quality retries are counted independently for each episode", () => {
+  assert.equal(automaticQualityRetryLimit, 3);
+  assert.deepEqual(episodeAutomaticRetryState(2, 2, 2), {
+    used: 2,
+    next: 3,
+    canRetry: true,
+  });
+  assert.deepEqual(episodeAutomaticRetryState(2, 3, 2), {
+    used: 3,
+    next: 4,
+    canRetry: false,
+  });
+  assert.deepEqual(episodeAutomaticRetryState(2, 3, 3), {
+    used: 0,
+    next: 1,
+    canRetry: true,
+  });
+});
 
 test("classic story prompt uses a public-domain source and controlled reader stage", () => {
   const prompt = buildSeriesPlanPrompt({

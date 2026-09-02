@@ -873,6 +873,7 @@ export function createApp(
     progress_stage AS progressStage, progress_message AS progressMessage,
     progress_percent AS progressPercent,
     checkpoint_episode_count AS completedEpisodeCount,
+    automatic_retry_episode AS automaticRetryEpisode,
     automatic_retry_count AS automaticRetryCount,
     CASE WHEN checkpoint_json <> '' THEN 1 ELSE 0 END AS resumeAvailable,
     created_at AS createdAt, updated_at AS updatedAt, completed_at AS completedAt
@@ -895,6 +896,7 @@ export function createApp(
     progressMessage: string;
     progressPercent: number;
     completedEpisodeCount: number;
+    automaticRetryEpisode: number;
     automaticRetryCount: number;
     resumeAvailable: number;
     createdAt: string;
@@ -930,6 +932,7 @@ export function createApp(
       progressMessage: row.progressMessage,
       progressPercent: row.progressPercent,
       completedEpisodeCount: row.completedEpisodeCount,
+      automaticRetryEpisode: row.automaticRetryEpisode,
       automaticRetryCount: row.automaticRetryCount,
       resumeAvailable: Boolean(row.resumeAvailable),
       createdAt: sqliteTimestampToIso(row.createdAt),
@@ -989,7 +992,8 @@ export function createApp(
       ? Math.round(20 + (row.completedEpisodeCount / row.episodeCount) * 74)
       : 0;
     db.prepare(
-      `UPDATE custom_story_requests SET status = 'queued', error_message = '', automatic_retry_count = 0,
+      `UPDATE custom_story_requests SET status = 'queued', error_message = '',
+       automatic_retry_episode = 0, automatic_retry_count = 0,
        progress_stage = 'queued', progress_message = ?, progress_percent = ?,
        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
     ).run(resumeMessage, resumePercent, row.id);

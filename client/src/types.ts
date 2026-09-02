@@ -243,6 +243,8 @@ export type CustomStory = CustomStoryInput & {
   progressMessage: string;
   progressPercent: number;
   completedEpisodeCount: number;
+  automaticRetryEpisode: number;
+  automaticRetryCount: number;
   resumeAvailable: boolean;
   seriesTitle: string;
   errorMessage: string;

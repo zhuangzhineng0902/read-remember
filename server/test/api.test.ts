@@ -400,6 +400,7 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(story.progressMessage, "等待开始创作");
   assert.equal(story.progressPercent, 0);
   assert.equal(story.completedEpisodeCount, 0);
+  assert.equal(story.automaticRetryEpisode, 0);
   assert.equal(story.automaticRetryCount, 0);
   assert.equal(story.resumeAvailable, false);
   assert.equal(story.episodeCount, 3);
@@ -421,7 +422,10 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(invalid.status, 400);
 
   db.prepare(
-    "UPDATE custom_story_requests SET status = 'failed', error_message = 'bad json', automatic_retry_count = 1 WHERE id = ?",
+    `UPDATE custom_story_requests
+     SET status = 'failed', error_message = 'bad json',
+         automatic_retry_episode = 1, automatic_retry_count = 1
+     WHERE id = ?`,
   ).run(story.id);
   const retried = await request(`/api/v1/custom-stories/${story.id}/retry`, {
     method: "POST",
@@ -431,6 +435,7 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(retriedStory.status, "queued");
   assert.equal(retriedStory.progressMessage, "等待重新开始创作");
   assert.equal(retriedStory.progressPercent, 0);
+  assert.equal(retriedStory.automaticRetryEpisode, 0);
   assert.equal(retriedStory.automaticRetryCount, 0);
   assert.deepEqual(enqueuedCustomStories, [story.id, story.id]);
 

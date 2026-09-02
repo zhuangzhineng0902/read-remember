@@ -138,6 +138,7 @@ export function createDatabase(filename: string): AppDatabase {
       progress_percent INTEGER NOT NULL DEFAULT 0 CHECK(progress_percent BETWEEN 0 AND 100),
       checkpoint_json TEXT NOT NULL DEFAULT '',
       checkpoint_episode_count INTEGER NOT NULL DEFAULT 0,
+      automatic_retry_episode INTEGER NOT NULL DEFAULT 0,
       automatic_retry_count INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -440,6 +441,11 @@ export function createDatabase(filename: string): AppDatabase {
     "custom_story_requests",
     "checkpoint_episode_count",
     "checkpoint_episode_count INTEGER NOT NULL DEFAULT 0",
+  );
+  ensureColumn(
+    "custom_story_requests",
+    "automatic_retry_episode",
+    "automatic_retry_episode INTEGER NOT NULL DEFAULT 0",
   );
   ensureColumn(
     "custom_story_requests",
