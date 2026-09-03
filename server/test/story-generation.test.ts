@@ -21,6 +21,7 @@ import {
   normalizeCandidateCritiqueBatch,
   normalizeContinuitySummary,
   normalizeEpisodeNarrative,
+  normalizeLexicalToken,
   normalizePlanningArtifact,
   normalizeSeriesPlan,
   normalizeStoryCritique,
@@ -28,6 +29,7 @@ import {
   narrativePreflightIssues,
   parseJson,
   parseStoryGenerationCheckpoint,
+  prioritizeTargetWords,
   readStreamingModelContent,
   passesStoryQualityFloor,
   repeatedNarrativeIssues,
@@ -36,9 +38,11 @@ import {
   selectBackboneStoryCritique,
   selectBestStoryCritique,
   selectDraftLessonsForPrompt,
+  shouldAdoptMechanicalRepair,
   semanticPlanningModelPolicy,
   semanticRewriteModelPolicy,
   semanticQualityIssues,
+  storyWordLimits,
   structureModelForAttempt,
   storyGenerationCheckpointSchema,
   structuredJsonValues,
@@ -502,6 +506,61 @@ test("narrative preflight rejects bad length, paragraph count, and mixed Chinese
   assert.ok(issues.some((issue) => /夹杂中文/.test(issue)));
 });
 
+test("all stages share one publication length boundary", () => {
+  const narrativeWithWords = (count: number) => ({
+    title: "The Shared Gate",
+    paragraphs: Array.from({ length: 4 }, (_, paragraphIndex) => {
+      const base = Math.floor(count / 4);
+      const size = base + (paragraphIndex < count % 4 ? 1 : 0);
+      return Array(size).fill("word").join(" ");
+    }),
+  });
+
+  assert.deepEqual(storyWordLimits({ examId: "middle" }, 1), {
+    targetRange: [180, 280],
+    publishRange: [180, 310],
+  });
+  assert.deepEqual(
+    narrativePreflightIssues(
+      { examId: "middle", readerStage: "stage1" },
+      validPlan,
+      1,
+      narrativeWithWords(300),
+    ),
+    [],
+  );
+  assert.match(
+    narrativePreflightIssues(
+      { examId: "middle", readerStage: "stage1" },
+      validPlan,
+      1,
+      narrativeWithWords(311),
+    ).join(" "),
+    /发布硬范围 180-310/,
+  );
+
+  const withinPublishLimit = checkpointEpisode("Within Publish Limit");
+  withinPublishLimit.paragraphs = narrativeWithWords(300).paragraphs;
+  const overPublishLimit = structuredClone(withinPublishLimit);
+  overPublishLimit.paragraphs = narrativeWithWords(311).paragraphs;
+  assert.doesNotMatch(
+    assessStoryQuality(
+      withinPublishLimit,
+      { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 },
+      1,
+    ).blockingIssues.join(" "),
+    /正文过长/,
+  );
+  assert.match(
+    assessStoryQuality(
+      overPublishLimit,
+      { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 },
+      1,
+    ).blockingIssues.join(" "),
+    /发布硬上限 310/,
+  );
+});
+
 test("discarded drafts persist actionable lessons for the next generation round", () => {
   const weak = structuredClone(strongCritique);
   weak.plot.score = 5;
@@ -575,8 +634,9 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
   const contract = buildEpisodeWritingContract({ examId: "middle" }, overloaded, 2);
 
   assert.equal(contract.paragraphCards.length, 4);
-  assert.equal(contract.requiredEvents.length, 6);
+  assert.equal(contract.requiredEvents.length, 7);
   assert.match(contract.requiredEvents[4], /铜盒/);
+  assert.match(contract.requiredEvents[5], /伙伴合作必须实际改变结果/);
   assert.ok(contract.optionalIfSpace.some((item) => /广播员/.test(item)));
   assert.ok(contract.optionalIfSpace.some((item) => /Ben/.test(item)));
   assert.deepEqual(contract.requiredClueActions, [
@@ -591,6 +651,32 @@ test("each exam stage uses its own later-episode reading length cap", () => {
   assert.deepEqual(buildEpisodeWritingContract({ examId: "toeic" }, validPlan, 2).wordRange, [240, 300]);
   assert.deepEqual(buildEpisodeWritingContract({ examId: "toefl" }, validPlan, 2).wordRange, [600, 800]);
   assert.deepEqual(buildEpisodeWritingContract({ examId: "ielts" }, validPlan, 2).wordRange, [520, 700]);
+});
+
+test("frequent unfamiliar words become explicit learning targets instead of forcing a full rewrite", () => {
+  const selected = prioritizeTargetWords(
+    {
+      paragraphs: [
+        "A dragon crossed the flame while dust filled the gate.",
+        "The dragon hid behind the gate.",
+        "The flame showed a crack in the gate.",
+        "The friends followed the dragon together.",
+      ],
+      targetWords: ["gate", "friends", "followed", "crossed"],
+    },
+    {
+      score: 88,
+      wordCount: 35,
+      averageSentenceWords: 8.8,
+      lexicalCoverage: 0.895,
+      unfamiliarWords: ["dragon", "flame", "dust", "crack"],
+      issues: ["高频词覆盖率不足"],
+      blockingIssues: [],
+    },
+    5,
+    (word) => ["gate", "friends", "followed", "crossed"].includes(word),
+  );
+  assert.deepEqual(selected, ["dragon", "flame", "dust", "crack", "gate"]);
 });
 
 test("discarded draft feedback is compacted before entering a new prompt", () => {
@@ -813,6 +899,40 @@ test("story quality measures actual frequency coverage", () => {
   assert.equal(parseStoryGenerationCheckpoint({ version: 2 }), null);
 });
 
+test("lexical normalization treats possessive story names as their allowed base name", () => {
+  assert.equal(normalizeLexicalToken("Aelith's"), "aelith");
+  assert.equal(normalizeLexicalToken("AELITH"), "aelith");
+});
+
+test("mechanical repair never replaces a readable draft with a truncated story", () => {
+  const before = {
+    score: 88,
+    wordCount: 266,
+    averageSentenceWords: 10,
+    lexicalCoverage: 0.898,
+    unfamiliarWords: ["dragon"],
+    issues: ["高频词覆盖率不足"],
+    blockingIssues: [],
+  };
+  const truncated = {
+    ...before,
+    score: 76,
+    wordCount: 53,
+    lexicalCoverage: 0.906,
+    issues: ["正文过短：53 < 180"],
+    blockingIssues: ["正文过短：53 < 180"],
+  };
+  const improved = {
+    ...before,
+    score: 100,
+    wordCount: 250,
+    lexicalCoverage: 0.91,
+    issues: [],
+  };
+  assert.equal(shouldAdoptMechanicalRepair(before, truncated, 0.95), false);
+  assert.equal(shouldAdoptMechanicalRepair(before, improved, 0.95), true);
+});
+
 test("an in-progress episode checkpoint resumes from its exact generation stage", () => {
   const episode = checkpointEpisode("Saved Draft");
   const { questions: _questions, ...content } = episode;
@@ -899,7 +1019,7 @@ test("short quoted dialogue is excluded from the fragment sentence ratio", () =>
   assert.ok(fragmentSentenceRatio(withNarrativeFragments) > 0);
 });
 
-test("story quality keeps 95 percent as a target but publishes above the 90 percent floor", () => {
+test("story quality keeps 95 percent as a target and allows one token of rounding at the 90 percent floor", () => {
   const baseQuality = {
     score: 88,
     wordCount: 240,
@@ -912,6 +1032,10 @@ test("story quality keeps 95 percent as a target but publishes above the 90 perc
   assert.equal(passesStoryQualityFloor(baseQuality, 0.95), true);
   assert.equal(
     passesStoryQualityFloor({ ...baseQuality, lexicalCoverage: 0.899 }, 0.95),
+    true,
+  );
+  assert.equal(
+    passesStoryQualityFloor({ ...baseQuality, lexicalCoverage: 0.895 }, 0.95),
     false,
   );
 });

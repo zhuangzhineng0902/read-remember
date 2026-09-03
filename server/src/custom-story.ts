@@ -243,7 +243,11 @@ export class CustomStoryService implements CustomStoryProvider {
           `第 ${failedEpisode} 集本轮稿件未达标，正在吸取经验并自动重写（本集 ${nextAttempt}/${automaticQualityRetryLimit}）`,
           request.id,
         );
-        return this.generate(requestId);
+        // Schedule the next bounded attempt after the current queue item has
+        // unwound. This keeps retry state persisted between attempts and avoids
+        // growing a recursive promise chain when several episodes need rescue.
+        this.enqueue(requestId);
+        return;
       }
       const resumeMessage = savedCheckpoint
         ? savedCheckpoint.activeEpisode
