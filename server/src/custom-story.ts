@@ -205,9 +205,16 @@ export class CustomStoryService implements CustomStoryProvider {
     } catch (error) {
       const saved = this.db.prepare(
         `SELECT checkpoint_json AS checkpointJson,
-          checkpoint_episode_count AS checkpointEpisodeCount
+          checkpoint_episode_count AS checkpointEpisodeCount,
+          automatic_retry_episode AS automaticRetryEpisode,
+          automatic_retry_count AS automaticRetryCount
          FROM custom_story_requests WHERE id = ?`,
-      ).get(request.id) as { checkpointJson: string; checkpointEpisodeCount: number } | undefined;
+      ).get(request.id) as {
+        checkpointJson: string;
+        checkpointEpisodeCount: number;
+        automaticRetryEpisode: number;
+        automaticRetryCount: number;
+      } | undefined;
       const savedCheckpoint = saved?.checkpointJson
         ? this.parseCheckpoint(saved.checkpointJson)
         : null;
@@ -219,8 +226,8 @@ export class CustomStoryService implements CustomStoryProvider {
           )
         : Math.min(request.episodeCount, Math.max(1, (saved?.checkpointEpisodeCount ?? 0) + 1));
       const retryState = episodeAutomaticRetryState(
-        request.automaticRetryEpisode,
-        request.automaticRetryCount,
+        saved?.automaticRetryEpisode ?? request.automaticRetryEpisode,
+        saved?.automaticRetryCount ?? request.automaticRetryCount,
         failedEpisode,
       );
       if (

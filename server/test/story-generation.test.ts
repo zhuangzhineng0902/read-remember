@@ -13,6 +13,8 @@ import {
   buildSeriesPlanPrompt,
   callStructured,
   creativeDraftModelPolicy,
+  episodeDraftFailureSummary,
+  episodeWritingContractCapacityIssues,
   fragmentSentenceRatio,
   isStrictStoryCritique,
   isStoryCritiqueImprovement,
@@ -325,7 +327,7 @@ test("series plan normalization repairs harmless model cardinality and numeric d
   assert.deepEqual(normalizedEpisodes[0].mustNotRepeat, []);
   assert.match(
     String((normalizedEpisodes[1].mustNotRepeat as unknown[])[0]),
-    /不得把上一集已知事实再次写成新发现/,
+    /允许用一句话承接当前状态.*不得把以下已知事实再次写成新发现/,
   );
   assert.equal(normalizedClues[0].introducedIn, 1);
 
@@ -454,6 +456,13 @@ test("saved quality failures are eligible for bounded automatic story continuati
   assert.equal(
     isRecoverableStoryQualityFailure("数据库写入失败", true),
     false,
+  );
+  assert.equal(
+    isRecoverableStoryQualityFailure(
+      "第 3 集候选初稿连续未达到编辑底线：高分原稿保守压缩后未通过核心事件复核",
+      true,
+    ),
+    true,
   );
 });
 
@@ -634,15 +643,37 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
   const contract = buildEpisodeWritingContract({ examId: "middle" }, overloaded, 2);
 
   assert.equal(contract.paragraphCards.length, 4);
-  assert.equal(contract.requiredEvents.length, 7);
-  assert.match(contract.requiredEvents[4], /铜盒/);
-  assert.match(contract.requiredEvents[5], /伙伴合作必须实际改变结果/);
+  assert.equal(contract.requiredEvents.length, 4);
+  assert.match(contract.requiredEvents[1], /伙伴合作/);
+  assert.match(contract.requiredEvents[2], /铜盒/);
   assert.ok(contract.optionalIfSpace.some((item) => /广播员/.test(item)));
   assert.ok(contract.optionalIfSpace.some((item) => /Ben/.test(item)));
   assert.deepEqual(contract.requiredClueActions, [
     { clueId: "C1", action: "payoff" },
     { clueId: "C2", action: "payoff" },
   ]);
+  assert.deepEqual(episodeWritingContractCapacityIssues(contract), []);
+});
+
+test("episode contract capacity validation rejects overloaded hard requirements", () => {
+  const contract = buildEpisodeWritingContract({ examId: "middle" }, validPlan, 2);
+  assert.deepEqual(episodeWritingContractCapacityIssues({
+    ...contract,
+    requiredEvents: [...contract.requiredEvents, "fifth hard event"],
+    requiredClueActions: [
+      ...contract.requiredClueActions,
+      { clueId: "C3", action: "plant" },
+    ],
+  }), ["每集硬叙事任务不得超过四项", "每集强制线索动作不得超过两项"]);
+});
+
+test("episode draft failures report length pressure and the best four-dimensional scores", () => {
+  assert.match(episodeDraftFailureSummary({
+    rawWordCounts: [266, 491, 360],
+    preflightRejected: 3,
+    reviewed: 6,
+    bestReview: strongCritique,
+  }), /原始候选词数 266-491；前置硬门禁淘汰 3 稿；已完成 6 次独立评分；最佳四维/);
 });
 
 test("each exam stage uses its own later-episode reading length cap", () => {
@@ -727,7 +758,7 @@ test("cross-episode detector blocks near-duplicate narrative sentences", () => {
   assert.match(repeatedNarrativeIssues(repeated, previous).join(" "), /近似重复上一集/);
 });
 
-test("a completed checkpoint skips model calls and imports saved episodes", async () => {
+test("a completed checkpoint restores rows without republishing saved episodes", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "read-remember-story-checkpoint-"));
   const databasePath = path.join(directory, "checkpoint.sqlite");
   const episodeOne = checkpointEpisode("The First Clock");
@@ -809,7 +840,7 @@ test("a completed checkpoint skips model calls and imports saved episodes", asyn
     const result = await runStoryGeneration(options);
     assert.equal(result.generated, 2);
     assert.equal(result.imported, 2);
-    assert.deepEqual(importedEpisodes, [1, 2]);
+    assert.deepEqual(importedEpisodes, []);
     assert.match(logs.join(" "), /已从检查点恢复/);
     const db = createDatabase(databasePath);
     try {
