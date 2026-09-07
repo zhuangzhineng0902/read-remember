@@ -12,7 +12,9 @@ import {
   buildEpisodeWritingContract,
   buildSeriesPlanPrompt,
   callStructured,
+  compressionDriftIssues,
   creativeDraftModelPolicy,
+  draftSentenceBudgetIssues,
   episodeDraftFailureSummary,
   episodeWritingContractCapacityIssues,
   fragmentSentenceRatio,
@@ -29,6 +31,7 @@ import {
   normalizeStoryCritique,
   normalizeTargetWords,
   narrativePreflightIssues,
+  narrativeCompletionTokenBudget,
   parseJson,
   parseStoryGenerationCheckpoint,
   prioritizeTargetWords,
@@ -47,6 +50,7 @@ import {
   storyWordLimits,
   structureModelForAttempt,
   storyGenerationCheckpointSchema,
+  storyEpisodeAttemptBudget,
   structuredJsonValues,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
@@ -59,6 +63,7 @@ import {
   automaticQualityRetryLimit,
   episodeAutomaticRetryState,
   isRecoverableStoryQualityFailure,
+  shouldResumeInterruptedStory,
 } from "../src/custom-story";
 
 test("automatic quality retries are counted independently for each episode", () => {
@@ -78,6 +83,20 @@ test("automatic quality retries are counted independently for each episode", () 
     next: 1,
     canRetry: true,
   });
+});
+
+test("one visible episode attempt cannot hide extra candidate or synthesis rounds", () => {
+  assert.deepEqual(storyEpisodeAttemptBudget, {
+    candidateBatchesPerQueueAttempt: 1,
+    synthesisDraftsPerQueueAttempt: 1,
+  });
+});
+
+test("an interrupted task cannot restart a fresh episode after its retry budget is exhausted", () => {
+  assert.equal(shouldResumeInterruptedStory(3, 3, 2, 5, false), false);
+  assert.equal(shouldResumeInterruptedStory(3, 2, 2, 5, false), true);
+  assert.equal(shouldResumeInterruptedStory(3, 3, 2, 5, true), true);
+  assert.equal(shouldResumeInterruptedStory(2, 3, 2, 5, false), true);
 });
 
 test("classic story prompt uses a public-domain source and controlled reader stage", () => {
@@ -458,6 +477,10 @@ test("saved quality failures are eligible for bounded automatic story continuati
     false,
   );
   assert.equal(
+    isRecoverableStoryQualityFailure("模型服务繁忙导致本批只有 2 份可用初稿", true),
+    false,
+  );
+  assert.equal(
     isRecoverableStoryQualityFailure(
       "第 3 集候选初稿连续未达到编辑底线：高分原稿保守压缩后未通过核心事件复核",
       true,
@@ -644,6 +667,8 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
 
   assert.equal(contract.paragraphCards.length, 4);
   assert.equal(contract.requiredEvents.length, 4);
+  assert.ok(contract.paragraphCards.every((card) => card.targetSentences >= 4));
+  assert.ok(contract.paragraphCards.every((card) => card.maxWordsPerSentence <= 13));
   assert.match(contract.requiredEvents[1], /伙伴合作/);
   assert.match(contract.requiredEvents[2], /铜盒/);
   assert.ok(contract.optionalIfSpace.some((item) => /广播员/.test(item)));
@@ -653,6 +678,54 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
     { clueId: "C2", action: "payoff" },
   ]);
   assert.deepEqual(episodeWritingContractCapacityIssues(contract), []);
+});
+
+test("short-reading completion budgets stay bounded while leaving room to close JSON", () => {
+  assert.equal(narrativeCompletionTokenBudget(310), 670);
+  assert.equal(narrativeCompletionTokenBudget(800), 1380);
+  assert.equal(narrativeCompletionTokenBudget(2000), 2048);
+});
+
+test("draft sentence budgets detect paragraph expansion without rejecting small variation", () => {
+  const contract = buildEpisodeWritingContract({ examId: "middle" }, validPlan, 2);
+  const withinBudget = {
+    paragraphs: contract.paragraphCards.map((card) =>
+      Array.from({ length: card.targetSentences }, () => "The friends move through the quiet tunnel with care.").join(" ")
+    ),
+  };
+  assert.deepEqual(draftSentenceBudgetIssues(contract, withinBudget), []);
+  const expanded = structuredClone(withinBudget);
+  expanded.paragraphs[0] += " This sentence adds too many extra words because the writer keeps explaining every small action in unnecessary detail.";
+  assert.match(draftSentenceBudgetIssues(contract, expanded).join(" "), /第 1 段/);
+});
+
+test("compression drift guard rejects invented rewrites but accepts conservative deletion", () => {
+  const original = {
+    paragraphs: [
+      "Mia opened the old gate and heard the bell ring. Ben held the lamp while they crossed the wet floor.",
+      "A cold wind moved through the tunnel. The friends followed the silver marks together.",
+      "The last mark stopped beside a wooden box. Mia used the key and found a folded map.",
+      "They carried the map home before sunset. A red star appeared over the northern tower.",
+    ],
+  };
+  const deleted = {
+    paragraphs: [
+      "Mia opened the old gate and heard the bell ring.",
+      "The friends followed the silver marks together.",
+      "Mia used the key and found a folded map.",
+      "They carried the map home before sunset.",
+    ],
+  };
+  const invented = {
+    paragraphs: [
+      "Zara flew a crystal rocket above the burning ocean.",
+      "Robots fired purple lasers from a hidden moon base.",
+      "A wizard changed the engine into a golden dragon.",
+      "The captain vanished through a magical mirror at midnight.",
+    ],
+  };
+  assert.deepEqual(compressionDriftIssues(original, deleted), []);
+  assert.match(compressionDriftIssues(original, invented).join(" "), /疑似改写或新增情节/);
 });
 
 test("episode contract capacity validation rejects overloaded hard requirements", () => {

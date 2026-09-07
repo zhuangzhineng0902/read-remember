@@ -79,6 +79,19 @@ export function isRecoverableStoryQualityFailure(message: string, resumeAvailabl
   ].some((marker) => message.includes(marker));
 }
 
+export function shouldResumeInterruptedStory(
+  retryEpisode: number,
+  retryCount: number,
+  checkpointEpisodeCount: number,
+  episodeCount: number,
+  hasActiveEpisode: boolean,
+) {
+  const nextEpisode = Math.min(episodeCount, Math.max(1, checkpointEpisodeCount + 1));
+  return hasActiveEpisode
+    || retryEpisode !== nextEpisode
+    || retryCount < automaticQualityRetryLimit;
+}
+
 export class CustomStoryService implements CustomStoryProvider {
   private queue = Promise.resolve();
 
@@ -94,16 +107,56 @@ export class CustomStoryService implements CustomStoryProvider {
   resume() {
     const rows = this.db
       .prepare(
-        `SELECT id FROM custom_story_requests
+        `SELECT id, status, episode_count AS episodeCount,
+          checkpoint_json AS checkpointJson,
+          checkpoint_episode_count AS checkpointEpisodeCount,
+          automatic_retry_episode AS automaticRetryEpisode,
+          automatic_retry_count AS automaticRetryCount
+         FROM custom_story_requests
          WHERE status IN ('queued', 'generating') ORDER BY created_at`,
       )
-      .all() as Array<{ id: string }>;
-    this.db.prepare(
-      `UPDATE custom_story_requests SET status = 'queued',
-       progress_stage = 'queued', progress_message = '服务已重启，等待继续创作',
-       updated_at = CURRENT_TIMESTAMP WHERE status = 'generating'`,
-    ).run();
-    for (const row of rows) this.enqueue(row.id);
+      .all() as Array<{
+        id: string;
+        status: string;
+        episodeCount: number;
+        checkpointJson: string;
+        checkpointEpisodeCount: number;
+        automaticRetryEpisode: number;
+        automaticRetryCount: number;
+      }>;
+    for (const row of rows) {
+      const checkpoint = this.parseCheckpoint(row.checkpointJson);
+      if (
+        row.status === "generating"
+        && !shouldResumeInterruptedStory(
+          row.automaticRetryEpisode,
+          row.automaticRetryCount,
+          row.checkpointEpisodeCount,
+          row.episodeCount,
+          Boolean(checkpoint?.activeEpisode),
+        )
+      ) {
+        const episodeNumber = Math.min(row.episodeCount, Math.max(1, row.checkpointEpisodeCount + 1));
+        this.db.prepare(
+          `UPDATE custom_story_requests SET status = 'failed',
+           progress_stage = 'failed', error_message = ?, progress_message = ?,
+           updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'generating'`,
+        ).run(
+          `第 ${episodeNumber} 集已用完 ${automaticQualityRetryLimit} 次自动续跑，服务中断后不会再次从头生成`,
+          `已保存前 ${row.checkpointEpisodeCount} 集；第 ${episodeNumber} 集自动重试已达上限，可手动重试`,
+          row.id,
+        );
+        continue;
+      }
+      if (row.status === "generating") {
+        this.db.prepare(
+          `UPDATE custom_story_requests SET status = 'queued',
+           progress_stage = 'queued', progress_message = '服务已重启，等待继续创作',
+           updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'generating'`,
+        ).run(row.id);
+      }
+      this.enqueue(row.id);
+    }
   }
 
   enqueue(requestId: string) {

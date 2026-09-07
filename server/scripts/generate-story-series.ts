@@ -571,6 +571,16 @@ const episodeNarrativeSchema = z.object({
   paragraphs: z.array(z.string().trim().min(2).max(3000)).min(3).max(8),
 });
 
+const sentenceSlotNarrativeSchema = z.object({
+  title: z.string().trim().min(3).max(160),
+  paragraphs: z.array(
+    z.union([
+      z.string().trim().min(2).max(3000),
+      z.array(z.string().trim().min(1).max(500)).min(1).max(16),
+    ]),
+  ).length(4),
+});
+
 const episodeMetadataSchema = z.object({
   targetWords: z.preprocess(
     normalizeTargetWords,
@@ -895,7 +905,7 @@ const activeEpisodeStages = [
 ] as const;
 
 const currentReviewCalibrationVersion = "independent-four-dimension-v2-calibrated-7-7.5";
-const currentStoryContractVersion = "capacity-and-continuity-v4";
+const currentStoryContractVersion = "sentence-budget-and-safe-compression-v5";
 
 const storyQualityCheckpointSchema = z.object({
   score: z.number().min(0).max(100),
@@ -1909,6 +1919,166 @@ async function callEpisodeNarrative(
   );
 }
 
+export function narrativeCompletionTokenBudget(maximumWords: number) {
+  // English prose plus JSON punctuation is normally well below 1.45 tokens per
+  // word. Keep a closing-JSON reserve while avoiding the former 8K allowance,
+  // which gave short-reading requests no useful output-length pressure.
+  return Math.min(2_048, Math.max(560, Math.ceil(maximumWords * 1.45) + 220));
+}
+
+export const storyEpisodeAttemptBudget = Object.freeze({
+  candidateBatchesPerQueueAttempt: 1,
+  synthesisDraftsPerQueueAttempt: 1,
+});
+
+export function draftSentenceBudgetIssues(
+  contract: EpisodeWritingContract,
+  narrative: Pick<GeneratedStoryContent, "paragraphs">,
+) {
+  const issues: string[] = [];
+  for (const [index, card] of contract.paragraphCards.entries()) {
+    const sentences = narrativeSentences(narrative.paragraphs[index] ?? "");
+    if (Math.abs(sentences.length - card.targetSentences) > 1) {
+      issues.push(`第 ${index + 1} 段句子数 ${sentences.length}，目标 ${card.targetSentences}`);
+    }
+    const longest = Math.max(
+      0,
+      ...sentences.map((sentence) => sentence.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0),
+    );
+    if (longest > card.maxWordsPerSentence + 2) {
+      issues.push(`第 ${index + 1} 段最长句 ${longest} 词，预算 ${card.maxWordsPerSentence}`);
+    }
+  }
+  return issues;
+}
+
+let narrativeContentRepairQueue: Promise<void> = Promise.resolve();
+let narrativeContentRepairBlockedUntil = 0;
+
+function isTransientModelCapacityError(error: unknown) {
+  const message = modelRequestError(error);
+  return /(?:\b429\b|\b529\b|overloaded|服务器短暂繁忙|\(2064\))/i.test(message);
+}
+
+function runSerializedNarrativeContentRepair<T>(operation: () => Promise<T>) {
+  const pending = narrativeContentRepairQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (Date.now() < narrativeContentRepairBlockedUntil) {
+        throw new Error("模型服务繁忙，已停止本批后续长度校正请求");
+      }
+      try {
+        return await operation();
+      } catch (error) {
+        if (isTransientModelCapacityError(error)) {
+          narrativeContentRepairBlockedUntil = Date.now() + 60_000;
+        }
+        throw error;
+      }
+    });
+  narrativeContentRepairQueue = pending.then(() => undefined, () => undefined);
+  return pending;
+}
+
+async function callSentenceSlotNarrative(
+  options: StoryRunOptions,
+  system: string,
+  user: string,
+  model: string,
+  temperature: number,
+  policy: ModelCallPolicy,
+) {
+  const slotted = await callStructured(
+    options,
+    sentenceSlotNarrativeSchema,
+    system,
+    user,
+    model,
+    temperature,
+    policy,
+  );
+  return episodeNarrativeSchema.parse({
+    title: slotted.title,
+    paragraphs: slotted.paragraphs.map((paragraph) =>
+      Array.isArray(paragraph) ? paragraph.join(" ").trim() : paragraph.trim()
+    ),
+  });
+}
+
+async function callBudgetedEpisodeNarrative(
+  options: StoryRunOptions,
+  plan: SeriesPlan,
+  index: number,
+  previousEpisode: GeneratedStoryEpisode | null,
+  system: string,
+  user: string,
+  model: string,
+  temperature: number,
+  policy: ModelCallPolicy,
+) {
+  const episodeNumber = index + 1;
+  const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+  const maxCompletionTokens = narrativeCompletionTokenBudget(contract.publishWordRange[1]);
+  let narrative = await callSentenceSlotNarrative(
+    options,
+    system,
+    user,
+    model,
+    temperature,
+    { ...policy, maxCompletionTokens },
+  );
+  let completedContentRepairs = 0;
+  for (let contentAttempt = 0; contentAttempt < 2; contentAttempt++) {
+    const hardIssues = narrativePreflightIssues(options, plan, episodeNumber, narrative);
+    const sentenceIssues = draftSentenceBudgetIssues(contract, narrative);
+    if (!hardIssues.length && !sentenceIssues.length) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] ${completedContentRepairs > 0 ? `第 ${completedContentRepairs} 次定长校正` : "首稿"}`
+        + `一次命中长度与句子预算：${narrativeWordCount(narrative)} 词。`,
+      );
+      return narrative;
+    }
+    if (!hardIssues.length) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] ${completedContentRepairs > 0 ? `第 ${completedContentRepairs} 次定长校正稿` : "首稿"}`
+        + `已在词数范围内（${narrativeWordCount(narrative)} 词）；句子预算存在轻微偏差（${sentenceIssues.join("；")}），`
+        + "保留正文交给独立质量评审，避免为机械格式重写好稿。",
+      );
+      return narrative;
+    }
+    options.log(
+      `[${episodeNumber}/${options.episodes}] 首稿内容预算未通过（${hardIssues.join("；")}）；`
+      + `正在用仅含当前稿的短提示做第 ${contentAttempt + 1}/2 次定长校正。`,
+    );
+    narrative = await runSerializedNarrativeContentRepair(() => callSentenceSlotNarrative(
+      options,
+      "你只输出 title 和 paragraphs 的合法 JSON。你是定长编辑，只缩短或补足当前稿，不增加事件，不改变四段顺序。paragraphs 必须是四个句子数组。",
+      `四段句子与词数预算：${JSON.stringify(contract.paragraphCards)}\n`
+        + `全文硬范围：${contract.publishWordRange[0]}-${contract.publishWordRange[1]} 英文词。\n`
+        + `必须保留的四项事件：${JSON.stringify(contract.requiredEvents)}\n`
+        + `必须保留的线索动作：${JSON.stringify(contract.requiredClueActions)}\n`
+        + `当前唯一可编辑稿：${JSON.stringify(narrative)}\n`
+        + `当前问题：${hardIssues.join("；")}。\n`
+        + "paragraphs 的每个元素必须是句子字符串数组，数组长度严格等于对应 targetSentences；只返回修正后的单一 JSON 对象。",
+      options.structureRepairModel || options.reviewModel || model,
+      0.1,
+      {
+        timeoutMs: options.timeoutMs,
+        networkRetries: 1,
+        structureRetries: 1,
+        maxCompletionTokens,
+        disableThinking: true,
+      },
+    ));
+    completedContentRepairs += 1;
+  }
+  const remaining = narrativePreflightIssues(options, plan, episodeNumber, narrative);
+  if (remaining.length) {
+    throw new Error(`第 ${episodeNumber} 集两次定长校正后仍不合法：${remaining.join("；")}`);
+  }
+  return narrative;
+}
+
 function sourceBrief(
   options: Pick<StoryRunOptions, "sourceMode" | "classicId" | "sourceTitle" | "sourceNotes">,
 ) {
@@ -2025,6 +2195,8 @@ export type EpisodeWritingContract = {
   paragraphCards: Array<{
     paragraph: number;
     targetWords: [number, number];
+    targetSentences: number;
+    maxWordsPerSentence: number;
     purpose: string;
   }>;
   requiredClueActions: EpisodeClueAction[];
@@ -2057,6 +2229,17 @@ export function buildEpisodeWritingContract(
   // hard preflight instead of wasting an entire critique round.
   const paragraphMin = Math.max(35, average - 10);
   const paragraphMax = Math.max(paragraphMin + 8, average);
+  const initialSentenceMaximum = Math.max(10, examGuide[options.examId].maxSentenceWords - 2);
+  const preferredTotal = Math.floor((preferredMin + preferredMax) / 2);
+  const sentenceTotal = Math.max(12, Math.ceil(preferredTotal / Math.max(9, initialSentenceMaximum - 1)));
+  const maximumWordsPerSentence = Math.max(
+    9,
+    Math.min(initialSentenceMaximum, Math.floor(preferredMax / sentenceTotal)),
+  );
+  const paragraphSentenceCounts = Array.from(
+    { length: 4 },
+    (_, index) => Math.floor(sentenceTotal / 4) + (index < sentenceTotal % 4 ? 1 : 0),
+  );
   const primaryDiscovery = beat.newInformation[0] ?? beat.clue;
   const contract: EpisodeWritingContract = {
     wordRange: range,
@@ -2065,21 +2248,29 @@ export function buildEpisodeWritingContract(
       {
         paragraph: 1,
         targetWords: [paragraphMin, paragraphMax],
+        targetSentences: paragraphSentenceCounts[0],
+        maxWordsPerSentence: maximumWordsPerSentence,
         purpose: `用立即发生的画面或对话完成钩子，并让读者明白唯一目标：${beat.goal}`,
       },
       {
         paragraph: 2,
         targetWords: [paragraphMin, paragraphMax],
+        targetSentences: paragraphSentenceCounts[1],
+        maxWordsPerSentence: maximumWordsPerSentence,
         purpose: `把阻碍场景化，让伙伴们不得不作出选择：阻碍=${beat.obstacle}；选择=${beat.choice}`,
       },
       {
         paragraph: 3,
         targetWords: [paragraphMin, paragraphMax],
+        targetSentences: paragraphSentenceCounts[2],
+        maxWordsPerSentence: maximumWordsPerSentence,
         purpose: `展示选择导致的可见后果，通过动作发现一条核心新信息：后果=${beat.consequence}；核心新信息=${primaryDiscovery}`,
       },
       {
         paragraph: 4,
         targetWords: [paragraphMin, paragraphMax],
+        targetSentences: paragraphSentenceCounts[3],
+        maxWordsPerSentence: maximumWordsPerSentence,
         purpose: `让上述选择造成不可逆变化，再用一个集中的可视悬念结束：变化=${beat.irreversibleChange}；悬念=${beat.cliffhanger}`,
       },
     ],
@@ -2109,6 +2300,8 @@ function episodePrompt(
   plan: SeriesPlan,
   episodeIndex: number,
   previousEpisode: GeneratedStoryEpisode | null,
+  includePreviousText = true,
+  sentenceSlotOutput = false,
 ) {
   const level = examGuide[options.examId];
   const readerProfile = resolveReaderProfile(options);
@@ -2123,7 +2316,7 @@ function episodePrompt(
 本集涉及的线索原始设定：${JSON.stringify(plan.clueLedger.filter((clue) => contract.requiredClueActions.some((required) => required.clueId === clue.id)))}
 上一集连续性摘要：${previousEpisode?.continuitySummary || "这是第一集，从一个立刻发生的异常事件开始。"}
 上一集结构化状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集尚无历史状态"}
-上一集最终英文正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集尚无正文"}
+上一集最终英文正文：${previousEpisode ? (includePreviousText ? JSON.stringify(previousEpisode.paragraphs) : "已省略；使用上面的摘要、结构化状态和 mustNotRepeat 承接") : "第一集尚无正文"}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
 ${buildNarrativeCraftBrief(options, beat.number)}
@@ -2138,7 +2331,7 @@ ${buildNarrativeCraftBrief(options, beat.number)}
 
 叙事控制：
 - 前两句必须形成钩子。
-- 严格按 paragraphCards 写成恰好 4 段，每段只完成该卡的一个叙事任务；用 because、so、but、when、after 等自然关系或明确动作写清“为什么发生”和“因此发生什么”。
+- 严格按 paragraphCards 写成恰好 4 段，每段只完成该卡的一个叙事任务。每段必须恰好使用 targetSentences 指定的完整句子，每句不得超过 maxWordsPerSentence；这是最高优先级长度合同，任何创意要求与它冲突时都以句子预算为准。用 because、so、but、when、after 等自然关系或明确动作写清“为什么发生”和“因此发生什么”。
 - 至少写入两种五感中的具体细节，用声音、光线、气味、味道、温度、触感或身体反应帮助读者看懂人物在哪里、危险从哪来；感官描写必须服务线索或情绪，不能堆形容词。
 - requiredEvents 是本集全部硬任务，必须在四段内以可见动作完成“目标→阻碍→选择→后果→新问题”；选择必须有代价，后果必须由选择引起。optionalIfSpace 不是必写项，只能在不增加新场景、不超词数时自然融入，绝不得为了塞满旧季纲而牺牲因果。
 - 与上一集最终正文逐段比较：不得重复相同的解释、动作顺序或悬念；每段必须至少推进一次新行动、新判断或新后果。
@@ -2147,11 +2340,20 @@ ${buildNarrativeCraftBrief(options, beat.number)}
 - 文章本身要精彩，不要用“这告诉我们团队合作很重要”之类说教句。
 
 输出前静默执行一次硬门禁自检，不要输出自检过程：
-- 词数必须落在 ${range[0]}-${range[1]} 内，最好离上下限各留 8 个词余量；除带引号短对话外，不超过 4 词的叙述句不得超过全部叙述句的 30%。
+- 逐段核对句子数和每句词数，再核对全文；词数必须落在 ${range[0]}-${range[1]} 内，最好离上下限各留 8 个词余量；除带引号短对话外，不超过 4 词的叙述句不得超过全部叙述句的 30%。
 - 本阶段只生成 title 和 paragraphs，不要生成 targetWords、continuitySummary、storyState、qualityEvidence 或 questions；这些会在最佳正文选出后单独生成。
 
 只返回 JSON：
-{"title":"English title","paragraphs":["paragraph 1","paragraph 2","paragraph 3","paragraph 4"]}`;
+${sentenceSlotOutput
+    ? `${JSON.stringify({
+      title: "English title",
+      paragraphs: contract.paragraphCards.map((card) =>
+        Array.from({ length: card.targetSentences }, (_, sentenceIndex) =>
+          `paragraph ${card.paragraph} sentence ${sentenceIndex + 1}`
+        )
+      ),
+    })}。这是结构示例，不得照抄占位文字。paragraphs 必须是四个句子数组，每个内层数组的元素数严格等于对应 paragraphCard.targetSentences；不要把整段合成一个字符串。`
+    : '{"title":"English title","paragraphs":["paragraph 1","paragraph 2","paragraph 3","paragraph 4"]}'}`;
 }
 
 function critiquePrompt(
@@ -2911,6 +3113,28 @@ export function episodeDraftFailureSummary(diagnostics: EpisodeDraftDiagnostics)
   return `${overlong}；前置硬门禁淘汰 ${diagnostics.preflightRejected} 稿；已完成 ${diagnostics.reviewed} 次独立评分；${score}`;
 }
 
+export function compressionDriftIssues(
+  original: Pick<GeneratedStoryContent, "paragraphs">,
+  compressed: Pick<GeneratedStoryContent, "paragraphs">,
+) {
+  const issues: string[] = [];
+  const originalWordCount = narrativeWordCount(original);
+  const compressedWordCount = narrativeWordCount(compressed);
+  if (compressedWordCount >= originalWordCount) {
+    issues.push(`压缩稿没有变短：${originalWordCount} → ${compressedWordCount} 词`);
+  }
+  for (let index = 0; index < Math.min(original.paragraphs.length, compressed.paragraphs.length); index++) {
+    const sourceWords = new Set(narrativeWords(original.paragraphs[index]));
+    const outputWords = narrativeWords(compressed.paragraphs[index]);
+    if (!outputWords.length) continue;
+    const retained = outputWords.filter((word) => sourceWords.has(word)).length / outputWords.length;
+    if (retained < 0.68) {
+      issues.push(`第 ${index + 1} 段与原段词汇重合仅 ${(retained * 100).toFixed(0)}%，疑似改写或新增情节`);
+    }
+  }
+  return issues;
+}
+
 async function prepareNarrativeForStrictReview(
   options: StoryRunOptions,
   plan: SeriesPlan,
@@ -2925,12 +3149,6 @@ async function prepareNarrativeForStrictReview(
   const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
   if (!onlyOverlong || wordCount <= contract.publishWordRange[1]) return null;
 
-  const earlyCompressionSchema = episodeNarrativeSchema.superRefine((value, context) => {
-    const compressedIssues = narrativePreflightIssues(options, plan, episodeNumber, value);
-    for (const issue of compressedIssues) {
-      context.addIssue({ code: "custom", path: ["paragraphs"], message: issue });
-    }
-  });
   const compressionSafetyMargin = Math.max(
     30,
     Math.round((contract.wordRange[1] - contract.wordRange[0]) * 0.3),
@@ -2943,39 +3161,58 @@ async function prepareNarrativeForStrictReview(
     `[${episodeNumber}/${options.episodes}] 候选正文 ${wordCount} 词，仅长度越界；`
     + "在四维评审前先用无思考模式做一次定长压缩。",
   );
-  try {
-    const compressed = await callStructured(
-      options,
-      earlyCompressionSchema,
-      "你只输出 title 和 paragraphs 的合法 JSON。你是分级故事定长编辑，只删减冗余，不改变剧情事实、因果、线索、人物选择或结尾悬念。",
-      `本集写作合同：${JSON.stringify(contract)}\n`
-        + `上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n`
-        + `待压缩正文：${JSON.stringify(narrative)}\n\n`
-        + `压缩为恰好 4 段、目标总计 ${contract.wordRange[0]}-${compressionTargetMax} 个英文单词；`
-        + `校验硬上限为 ${contract.publishWordRange[1]}，目标上限仍为 ${contract.wordRange[1]}。`
-        + "逐段遵守 paragraphCards.targetWords；只删除解释、重复、optionalIfSpace 和多余形容，绝不新增事件或改动 requiredEvents。"
-        + "输出前自行计数；只返回 {\"title\":\"...\",\"paragraphs\":[\"...\",\"...\",\"...\",\"...\"]}。",
-      options.structureRepairModel || options.reviewModel || options.model,
-      0.1,
-      {
-        timeoutMs: options.timeoutMs,
-        networkRetries: 1,
-        structureRetries: 2,
-        maxCompletionTokens: 3072,
-        disableThinking: true,
-      },
-    );
-    options.log(
-      `[${episodeNumber}/${options.episodes}] 候选已在评审前压缩到 `
-      + `${compressed.paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0} 词。`,
-    );
-    return compressed;
-  } catch (error) {
-    options.log(
-      `[${episodeNumber}/${options.episodes}] 候选前置定长压缩失败，直接淘汰该稿：${modelRequestError(error)}`,
-    );
-    return null;
+  let current = narrative;
+  for (let contentAttempt = 1; contentAttempt <= 2; contentAttempt++) {
+    try {
+      const compressed = await callEpisodeNarrative(
+        options,
+        "你只输出 title 和 paragraphs 的合法 JSON。你是分级故事删减编辑，只能删除或缩短，不得新增、换序或重新设计剧情。",
+        `四段写作合同：${JSON.stringify(contract)}\n`
+          + `当前唯一可编辑正文：${JSON.stringify(current)}\n\n`
+          + `压缩为恰好 4 段、目标总计 ${contract.wordRange[0]}-${compressionTargetMax} 个英文单词；`
+          + `绝不能超过 ${contract.publishWordRange[1]}。逐段遵守 targetSentences、maxWordsPerSentence 和 targetWords。`
+          + "优先原样保留完成 requiredEvents、requiredClueActions、人物选择、因果连接和结尾悬念的句子；"
+          + "只删除 optionalIfSpace、重复解释、不改变结果的对话和装饰词。尽量复制原句，不用同义改写，不得加入原文没有的新名词、地点、物件或动作。"
+          + "只返回 {\"title\":\"...\",\"paragraphs\":[\"...\",\"...\",\"...\",\"...\"]}。",
+        options.structureRepairModel || options.reviewModel || options.model,
+        0.1,
+        {
+          timeoutMs: options.timeoutMs,
+          networkRetries: 1,
+          structureRetries: 1,
+          maxCompletionTokens: narrativeCompletionTokenBudget(contract.publishWordRange[1]),
+          disableThinking: true,
+        },
+      );
+      const compressedIssues = narrativePreflightIssues(options, plan, episodeNumber, compressed);
+      if (compressedIssues.length) {
+        options.log(
+          `[${episodeNumber}/${options.episodes}] 第 ${contentAttempt}/2 次定长压缩内容仍不合格：${compressedIssues.join("；")}。`,
+        );
+        current = compressed;
+        continue;
+      }
+      const driftIssues = compressionDriftIssues(narrative, compressed);
+      if (driftIssues.length) {
+        options.log(
+          `[${episodeNumber}/${options.episodes}] 第 ${contentAttempt}/2 次压缩触发防改写检查：${driftIssues.join("；")}。`,
+        );
+        current = narrative;
+        continue;
+      }
+      options.log(
+        `[${episodeNumber}/${options.episodes}] 候选已在评审前压缩到 ${narrativeWordCount(compressed)} 词，`
+        + "并通过逐段词汇保真检查。",
+      );
+      return compressed;
+    } catch (error) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] 第 ${contentAttempt}/2 次定长压缩的 JSON 结构或网络请求失败：${modelRequestError(error)}`,
+      );
+    }
   }
+  options.log(`[${episodeNumber}/${options.episodes}] 两次定长压缩均未通过内容门禁，直接淘汰该稿。`);
+  return null;
 }
 
 async function rescueStrongOverlongNarrative(
@@ -2988,19 +3225,13 @@ async function rescueStrongOverlongNarrative(
 ) {
   const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
   const targetMax = Math.max(contract.wordRange[0], contract.wordRange[1] - 35);
-  const rescueSchema = episodeNarrativeSchema.superRefine((value, context) => {
-    for (const issue of narrativePreflightIssues(options, plan, episodeNumber, value)) {
-      context.addIssue({ code: "custom", path: ["paragraphs"], message: issue });
-    }
-  });
   options.log(
     `[${episodeNumber}/${options.episodes}] 高分原稿仅因超长未能直通；`
-    + "正在从原稿做最后一次保守压缩，不混入其他候选事件。",
+    + "正在只编辑第一次短稿做最后一次保守压缩，不混入原长稿或其他候选事件。",
   );
   try {
-    return await callStructured(
+    const rescued = await callEpisodeNarrative(
       options,
-      rescueSchema,
       "你只输出 title 和 paragraphs 的合法 JSON。你是保守压缩编辑：只压缩高分原稿，不融合、不新增、不改写主线。",
       `本集四段写作合同：${JSON.stringify(contract)}\n`
         + `上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n`
@@ -3015,8 +3246,21 @@ async function rescueStrongOverlongNarrative(
         + "输出前逐项核对四个 requiredEvents 仍有明确原文证据；只返回 title 和 paragraphs。",
       options.reviewModel || options.model,
       0.1,
-      semanticRewriteModelPolicy(options),
+      {
+        ...semanticRewriteModelPolicy(options),
+        structureRetries: 1,
+        maxCompletionTokens: narrativeCompletionTokenBudget(contract.publishWordRange[1]),
+      },
     );
+    const hardIssues = narrativePreflightIssues(options, plan, episodeNumber, rescued);
+    const driftIssues = compressionDriftIssues(firstCompression, rescued);
+    if (hardIssues.length || driftIssues.length) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] 高分短稿保守压缩未通过：${[...hardIssues, ...driftIssues].join("；")}`,
+      );
+      return null;
+    }
+    return rescued;
   } catch (error) {
     options.log(
       `[${episodeNumber}/${options.episodes}] 高分原稿的保守压缩不可用：${modelRequestError(error)}`,
@@ -3065,7 +3309,7 @@ async function synthesizeEpisodeDrafts(
   }));
   options.log(
     `[${episodeNumber}/${options.episodes}] 已按统一规则选定候选 ${backboneCandidateIndex + 1} 为最高分主骨架；`
-    + `正在从 ${drafts.length} 份初稿提炼局部优点（融合尝试 ${synthesisAttempt}/2）。`,
+    + `正在从 ${drafts.length} 份初稿提炼局部优点（本轮唯一融合 ${synthesisAttempt}/1）。`,
   );
   const synthesisPlan = await callStructured(
     options,
@@ -3095,10 +3339,13 @@ async function synthesizeEpisodeDrafts(
     backboneCandidateIndex,
     backboneLockedByProgram: true,
   };
-  const synthesized = await callEpisodeNarrative(
+  const synthesized = await callBudgetedEpisodeNarrative(
     options,
-    "你只输出 title 和 paragraphs 的合法 JSON。你是儿童分级故事主编；对编辑底稿做保守增量修改，不重新拼装故事，不输出分析过程。",
-    `${episodePrompt(options, plan, index, previousEpisode)}\n\n`
+    plan,
+    index,
+    previousEpisode,
+    "你只输出 title 和 paragraphs 的合法 JSON。你是儿童分级故事主编；对编辑底稿做保守增量修改，不重新拼装故事，不输出分析过程。paragraphs 必须是四个句子数组。",
+    `${episodePrompt(options, plan, index, previousEpisode, false, true)}\n\n`
       + `融合蓝图：${JSON.stringify(lockedSynthesisPlan)}\n`
       + `程序锁定的最高分主骨架编号：${backboneCandidateIndex}\n`
       + `必须保守修改并完整返回的编辑底稿：${JSON.stringify(editorialBaseNarrative)}\n`
@@ -3110,7 +3357,7 @@ async function synthesizeEpisodeDrafts(
       + "先保证 requiredEvents 和因果完整，再删 optionalIfSpace、解释句和装饰细节；不要加入 rejectElements。"
       + `必须恰好 4 段，每段尽量控制在 ${paragraphWordRange[0]}-${paragraphWordRange[1]} 个英文单词，`
       + `总词数优先控制在 ${preferredWordRange[0]}-${preferredWordRange[1]}，发布硬范围是 ${contract.publishWordRange[0]}-${contract.publishWordRange[1]}，绝不能超过发布上限。`
-      + "只返回 title 和 paragraphs。",
+      + "paragraphs 的每个元素必须是句子字符串数组，数组长度严格等于对应 paragraphCard.targetSentences；只返回 title 和 paragraphs。",
     options.reviewModel || options.model,
     Math.max(options.reviewTemperature, 0.25),
     semanticRewriteModelPolicy(options),
@@ -3145,7 +3392,12 @@ async function generateEpisodeDraft(
   },
 ) {
   const episodeNumber = index + 1;
-  const maximumStrictRounds = 2;
+  // One queue attempt owns exactly one fresh candidate batch and one fusion.
+  // Quality retries are persisted and budgeted by CustomStoryService; keeping
+  // a second hidden batch here used to multiply one visible retry into many
+  // generations and made interrupted tasks look as if they were looping.
+  const maximumStrictRounds = storyEpisodeAttemptBudget.candidateBatchesPerQueueAttempt;
+  const maximumSynthesisAttempts = storyEpisodeAttemptBudget.synthesisDraftsPerQueueAttempt;
   const promptLessons = selectDraftLessonsForPrompt(discardedDraftLessons);
   const failureLessonBrief = promptLessons.length
     ? `\n\n以前被质量门禁作废的稿件留下了以下精简经验。它们不是故事事实，禁止在正文中提及“评审、分数、旧稿或失败”；动笔前逐条转换为预防动作：\n${promptLessons.map((lesson, lessonIndex) => `${lessonIndex + 1}. ${lesson}`).join("\n")}`
@@ -3157,12 +3409,15 @@ async function generateEpisodeDraft(
     episodeProgress(options, index, 0),
   );
   const candidateResults = await Promise.allSettled(Array.from({ length: options.episodeCandidates }, (_, candidateIndex) =>
-    callEpisodeNarrative(
+    callBudgetedEpisodeNarrative(
       options,
+      plan,
+      index,
+      previousEpisode,
       "你只输出包含 title 和 paragraphs 的合法 JSON。你是擅长悬念、幽默、伙伴感与分级英语的儿童故事作家。",
-      `${episodePrompt(options, plan, index, previousEpisode)}${failureLessonBrief}\n\n这是候选初稿 ${candidateIndex + 1}/${options.episodeCandidates}。请用与其他候选不同但符合季纲的具体阻碍、角色互动和感官细节完成本集任务合同。`,
+      `${episodePrompt(options, plan, index, previousEpisode, false, true)}${failureLessonBrief}\n\n这是候选初稿 ${candidateIndex + 1}/${options.episodeCandidates}。请用与其他候选不同但符合季纲的具体阻碍、角色互动和感官细节完成本集任务合同。长度合同优先于补充更多细节。`,
       options.model,
-      options.temperature,
+      Math.min(options.temperature, 0.5),
       creativeDraftModelPolicy(options),
     ),
   ));
@@ -3176,6 +3431,15 @@ async function generateEpisodeDraft(
   });
   diagnostics.rawWordCounts.push(...freshDrafts.map(narrativeWordCount));
   if (freshDrafts.length < 3) {
+    const capacityFailures = candidateResults.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected" && isTransientModelCapacityError(result.reason),
+    ).length;
+    if (capacityFailures > 0) {
+      throw new Error(
+        `模型服务繁忙导致本批只有 ${freshDrafts.length} 份可用初稿（${capacityFailures} 个请求被限流或过载）；`
+        + "已停止本次任务，未将基础设施错误计为稿件质量失败，请稍后手动重试",
+      );
+    }
     if (strictRound < maximumStrictRounds) {
       options.log(
         `[${episodeNumber}/${options.episodes}] 本轮只有 ${freshDrafts.length} 份可用新初稿，不足以做多稿聚合；正在换一批素材。`,
@@ -3365,15 +3629,19 @@ async function generateEpisodeDraft(
     }
     throw new Error(
       `第 ${episodeNumber} 集候选初稿连续未达到编辑底线：高分原稿仅因超长进入保守压缩，`
-      + `但两轮仍未通过核心事件复核；已禁止再融合以避免退化；`
+      + `但本轮仍未通过核心事件复核；已禁止再融合以避免退化；`
       + episodeDraftFailureSummary(diagnostics),
     );
   }
-  for (let synthesisAttempt = 1; !narrative && synthesisAttempt <= 2; synthesisAttempt++) {
+  for (
+    let synthesisAttempt = 1;
+    !narrative && synthesisAttempt <= maximumSynthesisAttempts;
+    synthesisAttempt++
+  ) {
     reportProgress(
       options,
       "selecting_plan",
-      `第 ${episodeNumber} 集素材初稿已完成，正在聚合优点并生成统一融合稿（${synthesisAttempt}/2）`,
+      `第 ${episodeNumber} 集素材初稿已完成，正在聚合优点并生成本轮唯一融合稿`,
       episodeProgress(options, index, 0.32 + synthesisAttempt * 0.07),
     );
     const synthesized = await synthesizeEpisodeDrafts(
@@ -3392,7 +3660,7 @@ async function generateEpisodeDraft(
     if (!synthesized) {
       diagnostics.preflightRejected++;
       options.log(
-        `[${episodeNumber}/${options.episodes}] 第 ${synthesisAttempt}/2 份融合稿未通过前置段数、词数或纯英文硬门禁。`,
+        `[${episodeNumber}/${options.episodes}] 本轮融合稿未通过前置段数、词数或纯英文硬门禁。`,
       );
       continue;
     }
@@ -3441,8 +3709,8 @@ async function generateEpisodeDraft(
     }
     onLessons?.(synthesisLessons, bestRejected);
     options.log(
-      `[${episodeNumber}/${options.episodes}] 第 ${synthesisAttempt}/2 份融合稿未达到“四项至少 7 分、均分至少 7.5”：`
-      + `${strictIssues.join("；")}。不进入元数据或润色，下一次聚合将吸取本稿问题。`,
+      `[${episodeNumber}/${options.episodes}] 本轮融合稿未达到“四项至少 7 分、均分至少 7.5”：`
+      + `${strictIssues.join("；")}。不进入元数据或润色；下次有明确额度的自动重试会吸取本稿问题。`,
     );
   }
   if (!narrative || !critique) {
@@ -3995,6 +4263,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
   const engagementBrief = loadStoryEngagementBrief(options.databasePath, options.interest, options.examId);
   options.log(engagementBrief);
   let restored = parseStoryGenerationCheckpoint(options.checkpoint);
+  let upgradedStoryContract = false;
   if (restored) {
     try {
       validateSeriesPlan(restored.plan, options.episodes);
@@ -4026,6 +4295,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       rejectedElite: undefined,
       activeEpisode: undefined,
     };
+    upgradedStoryContract = true;
   }
   const plan = restored?.plan ?? await generatePlan(options, engagementBrief);
   const generated: GeneratedStoryEpisode[] = restored?.episodes.map((item) => item.episode) ?? [];
@@ -4055,6 +4325,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       ...(active ? { activeEpisode: active } : {}),
     });
   };
+  if (upgradedStoryContract) saveCheckpoint();
   let previousEpisode: GeneratedStoryEpisode | null = generated.at(-1) ?? null;
   if (restored) {
     const nextEpisode = generated.length + 1;
