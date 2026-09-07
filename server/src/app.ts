@@ -994,9 +994,14 @@ export function createApp(
     db.prepare(
       `UPDATE custom_story_requests SET status = 'queued', error_message = '',
        automatic_retry_episode = 0, automatic_retry_count = 0,
+       last_failure_fingerprint = '', repeated_failure_count = 0,
        progress_stage = 'queued', progress_message = ?, progress_percent = ?,
        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
     ).run(resumeMessage, resumePercent, row.id);
+    db.prepare(
+      `INSERT INTO custom_story_logs(request_id, level, message)
+       VALUES (?, 'info', '用户通过重试接口手动重新启动任务')`,
+    ).run(row.id);
     customStories.enqueue(row.id);
     const retried = db
       .prepare(`SELECT ${customStorySelect} FROM custom_story_requests WHERE id = ?`)

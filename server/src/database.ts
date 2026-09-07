@@ -140,9 +140,19 @@ export function createDatabase(filename: string): AppDatabase {
       checkpoint_episode_count INTEGER NOT NULL DEFAULT 0,
       automatic_retry_episode INTEGER NOT NULL DEFAULT 0,
       automatic_retry_count INTEGER NOT NULL DEFAULT 0,
+      last_failure_fingerprint TEXT NOT NULL DEFAULT '',
+      repeated_failure_count INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       completed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS custom_story_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id TEXT NOT NULL REFERENCES custom_story_requests(id) ON DELETE CASCADE,
+      level TEXT NOT NULL DEFAULT 'info' CHECK(level IN ('info', 'warn', 'error')),
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS article_reading_states (
@@ -452,6 +462,16 @@ export function createDatabase(filename: string): AppDatabase {
     "automatic_retry_count",
     "automatic_retry_count INTEGER NOT NULL DEFAULT 0",
   );
+  ensureColumn(
+    "custom_story_requests",
+    "last_failure_fingerprint",
+    "last_failure_fingerprint TEXT NOT NULL DEFAULT ''",
+  );
+  ensureColumn(
+    "custom_story_requests",
+    "repeated_failure_count",
+    "repeated_failure_count INTEGER NOT NULL DEFAULT 0",
+  );
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_articles_interest
     ON articles(content_kind, interest_id, exam_id);
@@ -459,6 +479,8 @@ export function createDatabase(filename: string): AppDatabase {
     ON articles(series_key, episode_number);
     CREATE INDEX IF NOT EXISTS idx_custom_story_requests_user
     ON custom_story_requests(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_custom_story_logs_request_time
+    ON custom_story_logs(request_id, created_at DESC);
   `);
 
   const deliveryColumns = db.prepare("PRAGMA table_info(deliveries)").all() as Array<{

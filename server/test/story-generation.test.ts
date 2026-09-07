@@ -14,17 +14,23 @@ import {
   callStructured,
   compressionDriftIssues,
   creativeDraftModelPolicy,
+  draftSevereSentenceBudgetIssues,
   draftSentenceBudgetIssues,
   episodeDraftFailureSummary,
   episodeWritingContractCapacityIssues,
+  examVocabularyTags,
   fragmentSentenceRatio,
+  isBorderlineStoryCritique,
+  isTransientModelCapacityError,
   isStrictStoryCritique,
   isStoryCritiqueImprovement,
   loadStoryEngagementBrief,
+  lexicalEditDriftIssues,
   mergeEpisodeStructure,
   normalizeCandidateCritiqueBatch,
   normalizeContinuitySummary,
   normalizeEpisodeNarrative,
+  normalizeFourParagraphNarrative,
   normalizeLexicalToken,
   normalizePlanningArtifact,
   normalizeSeriesPlan,
@@ -46,12 +52,14 @@ import {
   shouldAdoptMechanicalRepair,
   semanticPlanningModelPolicy,
   semanticRewriteModelPolicy,
+  seriesPlanClueCapacityAdjustments,
   semanticQualityIssues,
   storyWordLimits,
   structureModelForAttempt,
   storyGenerationCheckpointSchema,
   storyEpisodeAttemptBudget,
   structuredJsonValues,
+  trimTinyNarrativeOverflow,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
   type SeriesPlan,
@@ -64,6 +72,7 @@ import {
   episodeAutomaticRetryState,
   isRecoverableStoryQualityFailure,
   shouldResumeInterruptedStory,
+  storyFailureFingerprint,
 } from "../src/custom-story";
 
 test("automatic quality retries are counted independently for each episode", () => {
@@ -89,6 +98,9 @@ test("one visible episode attempt cannot hide extra candidate or synthesis round
   assert.deepEqual(storyEpisodeAttemptBudget, {
     candidateBatchesPerQueueAttempt: 1,
     synthesisDraftsPerQueueAttempt: 1,
+    initialCandidates: 3,
+    supplementalCandidates: 2,
+    minimumCandidatePool: 3,
   });
 });
 
@@ -321,12 +333,32 @@ function checkpointEpisode(title: string): GeneratedStoryEpisode {
   };
 }
 
-test("series plan validator enforces clue chronology", () => {
+test("series plan validator enforces chronology and normalizes overloaded clue actions", () => {
   assert.equal(validateSeriesPlan(validPlan, 2).seriesTitle, validPlan.seriesTitle);
   const invalid = structuredClone(validPlan);
   invalid.clueLedger[0].introducedIn = 2;
   invalid.clueLedger[0].usedIn = 1;
   assert.throws(() => validateSeriesPlan(invalid, 2), /顺序不合法/);
+
+  const overloaded = structuredClone(validPlan);
+  overloaded.clueLedger.push({
+    id: "C3",
+    clue: "旧船票藏在钟后",
+    introducedIn: 1,
+    misdirection: "像是废纸",
+    usedIn: 2,
+    payoffIn: 2,
+    payoff: "船票记录了真正的潮汐时间",
+  });
+  assert.equal(validateSeriesPlan(overloaded, 2).seriesTitle, overloaded.seriesTitle);
+  const adjustments = seriesPlanClueCapacityAdjustments(overloaded);
+  assert.equal(adjustments.length, 2);
+  assert.deepEqual(adjustments[0].primary.map((action) => action.clueId), ["C1", "C2"]);
+  assert.deepEqual(adjustments[0].supporting.map((action) => action.clueId), ["C3"]);
+  assert.deepEqual(
+    buildEpisodeWritingContract({ examId: "middle" }, overloaded, 1).requiredClueActions,
+    adjustments[0].primary,
+  );
 });
 
 test("series plan normalization repairs harmless model cardinality and numeric drift locally", () => {
@@ -400,6 +432,27 @@ test("a complete one-paragraph narrative is split locally instead of regenerated
     qualityEvidence: complete.qualityEvidence,
   };
   assert.ok(mergeEpisodeStructure({ title: complete.title, paragraphs: [singleParagraph] }, metadata));
+});
+
+test("model paragraph-count drift is normalized locally to the four-paragraph contract", () => {
+  const sourceParagraphs = Array.from({ length: 9 }, (_, index) =>
+    `Scene ${index + 1} moves forward because the team follows a clear clue.`,
+  );
+  const normalized = normalizeFourParagraphNarrative({
+    title: "The Clockwork Trail",
+    paragraphs: sourceParagraphs,
+  }) as { title: string; paragraphs: string[] };
+
+  assert.equal(normalized.paragraphs.length, 4);
+  const sourceWords = sourceParagraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g);
+  const normalizedWords = normalized.paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g);
+  assert.deepEqual(normalizedWords, sourceWords);
+
+  const withEmptyFifth = normalizeFourParagraphNarrative({
+    title: "The Clockwork Trail",
+    paragraphs: [...sourceParagraphs.slice(0, 4), ""],
+  }) as { paragraphs: string[] };
+  assert.deepEqual(withEmptyFifth.paragraphs, sourceParagraphs.slice(0, 4));
 });
 
 const strongCritique: StoryCritique = {
@@ -487,6 +540,10 @@ test("saved quality failures are eligible for bounded automatic story continuati
     ),
     true,
   );
+  assert.equal(
+    isRecoverableStoryQualityFailure("第 4 集两次定长校正后仍不合法：第 3 段最长句 24 词", true),
+    true,
+  );
 });
 
 test("semantic quality gate rejects a weaker later episode", () => {
@@ -512,6 +569,19 @@ test("calibrated candidate gating requires every dimension to reach seven and av
   assert.equal(isStrictStoryCritique(acceptable), true);
   assert.equal(isStrictStoryCritique(weakDimension), false);
   assert.equal(isStrictStoryCritique(weakAverage), false);
+});
+
+test("a 7.25 all-seven draft can enter targeted enhancement without lowering the final gate", () => {
+  const borderline = structuredClone(strongCritique);
+  borderline.plot.score = 8;
+  borderline.childAppeal.score = 7;
+  borderline.gradedLanguage.score = 7;
+  borderline.continuity.score = 7;
+  assert.equal(isBorderlineStoryCritique(borderline), true);
+  assert.equal(isStrictStoryCritique(borderline), false);
+
+  borderline.childAppeal.score = 6.9;
+  assert.equal(isBorderlineStoryCritique(borderline), false);
 });
 
 test("an optimized story is adopted only when it remains strict and improves the average", () => {
@@ -550,6 +620,10 @@ test("all stages share one publication length boundary", () => {
 
   assert.deepEqual(storyWordLimits({ examId: "middle" }, 1), {
     targetRange: [180, 280],
+    publishRange: [180, 310],
+  });
+  assert.deepEqual(storyWordLimits({ examId: "middle" }, 3), {
+    targetRange: [220, 310],
     publishRange: [180, 310],
   });
   assert.deepEqual(
@@ -639,7 +713,7 @@ test("candidate drafts use M3 direct JSON mode to prevent reasoning-only exhaust
 test("semantic full rewrites use MiniMax M3 direct output with a recovery retry", () => {
   assert.deepEqual(semanticRewriteModelPolicy({ rewriteTimeoutMs: 480_000 }), {
     timeoutMs: 480_000,
-    networkRetries: 1,
+    networkRetries: 2,
     structureRetries: 2,
     maxCompletionTokens: 8_192,
     disableThinking: true,
@@ -649,7 +723,7 @@ test("semantic full rewrites use MiniMax M3 direct output with a recovery retry"
 test("semantic rewrite planning uses a separate M3 direct blueprint before execution", () => {
   assert.deepEqual(semanticPlanningModelPolicy({ rewriteTimeoutMs: 480_000 }), {
     timeoutMs: 480_000,
-    networkRetries: 1,
+    networkRetries: 2,
     structureRetries: 2,
     maxCompletionTokens: 8_192,
     disableThinking: true,
@@ -681,9 +755,14 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
 });
 
 test("short-reading completion budgets stay bounded while leaving room to close JSON", () => {
-  assert.equal(narrativeCompletionTokenBudget(310), 670);
-  assert.equal(narrativeCompletionTokenBudget(800), 1380);
+  assert.equal(narrativeCompletionTokenBudget(310), 487);
+  assert.equal(narrativeCompletionTokenBudget(800), 1114);
   assert.equal(narrativeCompletionTokenBudget(2000), 2048);
+});
+
+test("middle-school publication accepts both junior and senior school dictionary tags", () => {
+  assert.deepEqual(examVocabularyTags("middle"), ["zk", "gk"]);
+  assert.deepEqual(examVocabularyTags("high"), ["zk", "gk"]);
 });
 
 test("draft sentence budgets detect paragraph expansion without rejecting small variation", () => {
@@ -697,6 +776,38 @@ test("draft sentence budgets detect paragraph expansion without rejecting small 
   const expanded = structuredClone(withinBudget);
   expanded.paragraphs[0] += " This sentence adds too many extra words because the writer keeps explaining every small action in unnecessary detail.";
   assert.match(draftSentenceBudgetIssues(contract, expanded).join(" "), /第 1 段/);
+});
+
+test("severe sentence-budget drift cannot be mislabeled as a harmless variation", () => {
+  const contract = buildEpisodeWritingContract({ examId: "middle" }, validPlan, 2);
+  const severe = {
+    paragraphs: contract.paragraphCards.map((_card, index) => index === 0
+      ? "One very long sentence carries far too many separate actions because the writer keeps adding events without stopping to help a young reader understand them clearly."
+      : "One. Two. Three. Four. Five. Six."),
+  };
+  assert.match(draftSevereSentenceBudgetIssues(contract, severe).join("；"), /严重/);
+
+  const severalShortSentences = {
+    paragraphs: contract.paragraphCards.map((card) =>
+      Array.from({ length: card.targetSentences + 4 }, () => "Mia moved with care.").join(" ")
+    ),
+  };
+  assert.deepEqual(draftSevereSentenceBudgetIssues(contract, severalShortSentences), []);
+});
+
+test("a modest middle-school sentence outlier remains editorial instead of killing the draft", () => {
+  const contract = buildEpisodeWritingContract({ examId: "middle" }, validPlan, 2);
+  const target = contract.paragraphCards[0].maxWordsPerSentence;
+  const modest = {
+    paragraphs: contract.paragraphCards.map((_card, index) => index === 0
+      ? `${Array.from({ length: target + 7 }, () => "word").join(" ")}.`
+      : "One. Two. Three. Four. Five. Six."),
+  };
+  assert.match(draftSentenceBudgetIssues(contract, modest).join("；"), /最长句/);
+  assert.deepEqual(draftSevereSentenceBudgetIssues(contract, modest), []);
+
+  modest.paragraphs[0] = `${Array.from({ length: target + 11 }, () => "word").join(" ")}.`;
+  assert.match(draftSevereSentenceBudgetIssues(contract, modest).join("；"), /严重/);
 });
 
 test("compression drift guard rejects invented rewrites but accepts conservative deletion", () => {
@@ -726,6 +837,52 @@ test("compression drift guard rejects invented rewrites but accepts conservative
   };
   assert.deepEqual(compressionDriftIssues(original, deleted), []);
   assert.match(compressionDriftIssues(original, invented).join(" "), /疑似改写或新增情节/);
+});
+
+test("tiny prose overflow is trimmed locally only when dispensable words are available", () => {
+  const narrative = {
+    title: "A Small Door",
+    paragraphs: [
+      "Mia moved very slowly.",
+      "Ben held the door.",
+      "They crossed together.",
+      "The bell rang softly.",
+    ],
+  };
+  const words = narrative.paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length ?? 0;
+  const trimmed = trimTinyNarrativeOverflow(narrative, words - 2);
+  assert.equal(
+    trimmed.paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g)?.length,
+    words - 2,
+  );
+  assert.equal(trimTinyNarrativeOverflow(narrative, words - 4), narrative);
+});
+
+test("lexical simplification must stay near the original length and structure", () => {
+  const original = {
+    title: "The Hidden Gate",
+    paragraphs: [
+      "Mia held the heavy lantern while Ben opened the narrow gate.",
+      "Cold rain struck the stones, but both friends stayed beside the wall.",
+      "Ben replaced the difficult mechanism with a simple wooden handle.",
+      "The gate moved at last, and a warm light showed the road home.",
+    ],
+  };
+  const localEdit = {
+    ...original,
+    paragraphs: [
+      original.paragraphs[0],
+      original.paragraphs[1],
+      "Ben replaced the difficult machine with a simple wooden handle.",
+      original.paragraphs[3],
+    ],
+  };
+  const shortened = {
+    ...original,
+    paragraphs: ["Mia held a lamp.", "Rain fell.", "Ben fixed the gate.", "They went home."],
+  };
+  assert.deepEqual(lexicalEditDriftIssues(original, localEdit), []);
+  assert.match(lexicalEditDriftIssues(original, shortened).join("；"), /改变正文长度过多|超出局部换词范围/);
 });
 
 test("episode contract capacity validation rejects overloaded hard requirements", () => {
@@ -795,9 +952,10 @@ test("discarded draft feedback is compacted before entering a new prompt", () =>
     "自动门禁：正文过长",
   ]);
 
-  assert.ok(lessons.length <= 8);
+  assert.ok(lessons.length <= 6);
+  assert.ok(lessons.every((lesson) => lesson.length <= 160));
   assert.equal(lessons.filter((lesson) => lesson.startsWith("剧情逻辑")).length, 1);
-  assert.equal(lessons.filter((lesson) => lesson.startsWith("优先改进")).length, 3);
+  assert.equal(lessons.filter((lesson) => lesson.startsWith("优先改进")).length, 1);
   assert.ok(lessons.some((lesson) => lesson.startsWith("自动门禁")));
 });
 
@@ -1058,10 +1216,12 @@ test("an in-progress episode checkpoint resumes from its exact generation stage"
       fullRewriteCount: 2,
       mechanicalRepairUsed: true,
       semanticRewriteUsed: false,
+      lexicalRepairExhausted: true,
     },
   });
   assert.equal(checkpoint?.activeEpisode?.stage, "mechanical_repaired");
   assert.equal(checkpoint?.activeEpisode?.fullRewriteCount, 2);
+  assert.equal(checkpoint?.activeEpisode?.lexicalRepairExhausted, true);
   assert.equal(checkpoint?.activeEpisode?.episode.title, "Saved Draft");
   assert.equal(checkpoint?.reviewCalibrationVersion, "independent-four-dimension-v2-calibrated-7-7.5");
 });
@@ -1266,6 +1426,70 @@ test("reasoning-only length responses recover through MiniMax M3 direct output i
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test("a 529 during partial recovery stays an infrastructure error instead of becoming a schema error", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      choices: [{ message: { content: '{"ok":true}' }, finish_reason: "stop" }],
+    }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    await assert.rejects(
+      callStructured(
+        {
+          baseUrl: `http://127.0.0.1:${address.port}`,
+          apiPath: "/chat/completions",
+          apiKey: "",
+          model: "MiniMax-M3",
+          reviewModel: "MiniMax-M3",
+          structureRepairModel: "MiniMax-M3",
+          temperature: 0.1,
+          reviewTemperature: 0.1,
+          timeoutMs: 1_000,
+          rewriteTimeoutMs: 1_000,
+          networkRetries: 1,
+          structureRetries: 1,
+          log: () => undefined,
+        } as unknown as StoryRunOptions,
+        z.object({ ok: z.boolean(), metadata: z.string() }),
+        "Return JSON.",
+        "Return an object.",
+        "MiniMax-M3",
+        0.1,
+        {
+          structureRetries: 1,
+          recoverPartial: async () => {
+            throw new Error("ModelHttpError · 模型接口返回 529: overloaded_error (2064)");
+          },
+        },
+      ),
+      (error: unknown) => {
+        assert.equal(isTransientModelCapacityError(error), true);
+        assert.doesNotMatch((error as Error).message, /模型连续|正文局部恢复失败/);
+        return true;
+      },
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("serialized repair backpressure remains classified as model capacity", () => {
+  assert.equal(isTransientModelCapacityError(new Error("模型服务繁忙，已停止本批后续长度校正请求")), true);
+  assert.equal(isTransientModelCapacityError(new Error("TypeError · terminated · ECONNRESET · read ECONNRESET")), true);
+  assert.equal(isTransientModelCapacityError(new Error("fetch failed · UND_ERR_CONNECT_TIMEOUT")), true);
+});
+
+test("identical story failures share a fingerprint but changed checkpoints do not", () => {
+  const first = storyFailureFingerprint("same failure", null, 3);
+  assert.equal(storyFailureFingerprint("same failure", null, 3), first);
+  assert.notEqual(storyFailureFingerprint("different failure", null, 3), first);
+  assert.notEqual(storyFailureFingerprint("same failure", null, 4), first);
 });
 
 test("model JSON parser skips regex examples before the real object", () => {

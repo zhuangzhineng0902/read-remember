@@ -1,7 +1,11 @@
+import { createHash } from "node:crypto";
 import type { AppDatabase } from "./database";
 import {
+  isTransientModelCapacityError,
   parseStoryGenerationCheckpoint,
   runStoryGeneration,
+  StoryGenerationFailure,
+  storyGenerationPolicy,
   type ReaderStageId,
   type StoryGenerationCheckpoint,
   type StoryGenerationProgress,
@@ -11,6 +15,7 @@ import {
 
 type CustomStoryRequestRow = {
   id: string;
+  status: "queued" | "generating" | "completed" | "failed";
   userId: string;
   examId: StoryRunOptions["examId"];
   idea: string;
@@ -24,6 +29,8 @@ type CustomStoryRequestRow = {
   checkpointEpisodeCount: number;
   automaticRetryEpisode: number;
   automaticRetryCount: number;
+  lastFailureFingerprint: string;
+  repeatedFailureCount: number;
 };
 
 export type CustomStoryProvider = {
@@ -51,7 +58,7 @@ const checkpointStageLabels: Record<string, string> = {
 // Each episode gets three automatic continuations in addition to its initial
 // run. The persisted episode number prevents one difficult chapter from using
 // the retry budget of every later chapter.
-export const automaticQualityRetryLimit = 3;
+export const automaticQualityRetryLimit = storyGenerationPolicy.retry.automaticPerEpisode;
 
 export function episodeAutomaticRetryState(
   storedEpisode: number,
@@ -68,15 +75,43 @@ export function episodeAutomaticRetryState(
   };
 }
 
-export function isRecoverableStoryQualityFailure(message: string, resumeAvailable: boolean) {
+export function isRecoverableStoryQualityFailure(messageOrError: string | unknown, resumeAvailable: boolean) {
   if (!resumeAvailable) return false;
+  if (messageOrError instanceof StoryGenerationFailure) {
+    return messageOrError.retryScope !== "manual";
+  }
+  const message = typeof messageOrError === "string" ? messageOrError : "";
   return [
     "候选初稿连续未达到编辑底线",
     "语义质量未达标",
     "最终结构修稿造成语义退化",
     "最终结构与词汇修稿后仍未达标",
     "独立命题连续 2 次未通过原文证据检查",
+    "定长校正后仍不合法",
   ].some((marker) => message.includes(marker));
+}
+
+export function storyFailureFingerprint(
+  message: string,
+  checkpoint: StoryGenerationCheckpoint | null,
+  failedEpisode: number,
+) {
+  const active = checkpoint?.activeEpisode;
+  return createHash("sha256").update(JSON.stringify({
+    failedEpisode,
+    message: message.replace(/\s+/g, " ").trim(),
+    completedEpisodes: checkpoint?.episodes.length ?? 0,
+    active: active ? {
+      index: active.index,
+      stage: active.stage,
+      fullRewriteCount: active.fullRewriteCount,
+      mechanicalRepairUsed: active.mechanicalRepairUsed,
+      semanticRewriteUsed: active.semanticRewriteUsed,
+      lexicalRepairExhausted: active.lexicalRepairExhausted ?? false,
+      title: active.episode.title,
+      paragraphs: active.episode.paragraphs,
+    } : null,
+  })).digest("hex");
 }
 
 export function shouldResumeInterruptedStory(
@@ -160,6 +195,10 @@ export class CustomStoryService implements CustomStoryProvider {
   }
 
   enqueue(requestId: string) {
+    const row = this.db.prepare(
+      "SELECT status FROM custom_story_requests WHERE id = ?",
+    ).get(requestId) as { status: string } | undefined;
+    if (row?.status !== "queued") return;
     this.queue = this.queue
       .catch(() => undefined)
       .then(() => this.generate(requestId));
@@ -168,13 +207,15 @@ export class CustomStoryService implements CustomStoryProvider {
   private request(requestId: string) {
     return this.db
       .prepare(
-        `SELECT id, user_id AS userId, exam_id AS examId, idea, characters,
+        `SELECT id, status, user_id AS userId, exam_id AS examId, idea, characters,
           keywords_json AS keywordsJson, plot_notes AS plotNotes, tone,
           episode_count AS episodeCount, reader_stage AS readerStage,
           checkpoint_json AS checkpointJson,
           checkpoint_episode_count AS checkpointEpisodeCount,
           automatic_retry_episode AS automaticRetryEpisode,
-          automatic_retry_count AS automaticRetryCount
+          automatic_retry_count AS automaticRetryCount,
+          last_failure_fingerprint AS lastFailureFingerprint,
+          repeated_failure_count AS repeatedFailureCount
          FROM custom_story_requests WHERE id = ?`,
       )
       .get(requestId) as CustomStoryRequestRow | undefined;
@@ -182,13 +223,13 @@ export class CustomStoryService implements CustomStoryProvider {
 
   private async generate(requestId: string): Promise<void> {
     const request = this.request(requestId);
-    if (!request) return;
+    if (!request || request.status !== "queued") return;
     const checkpoint = this.parseCheckpoint(request.checkpointJson);
-    this.db.prepare(
+    const claim = this.db.prepare(
       `UPDATE custom_story_requests SET status = 'generating',
        error_message = '', progress_stage = ?, progress_message = ?,
        progress_percent = ?,
-       updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+       updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'queued'`,
     ).run(
       checkpoint ? "drafting" : "planning",
       checkpoint
@@ -201,6 +242,7 @@ export class CustomStoryService implements CustomStoryProvider {
       checkpoint ? Math.round(20 + (request.checkpointEpisodeCount / request.episodeCount) * 74) : 1,
       requestId,
     );
+    if (claim.changes !== 1) return;
     const keywords = JSON.parse(request.keywordsJson) as string[];
     const notes = [
       `用户的故事构想：${request.idea}`,
@@ -225,7 +267,10 @@ export class CustomStoryService implements CustomStoryProvider {
         dryRun: false,
         force: false,
         checkpoint,
-        log: (message) => console.log(`[custom-story:${request.id}] ${message}`),
+        log: (message) => {
+          console.log(`[custom-story:${request.id}] ${message}`);
+          this.appendStoryLog(request.id, "info", message);
+        },
         onProgress: (progress) => this.saveProgress(request.id, progress),
         onCheckpoint: (saved) => this.saveCheckpoint(request.id, saved),
         onEpisodeImported: (episode) => this.publishEpisode(request, episode),
@@ -248,6 +293,7 @@ export class CustomStoryService implements CustomStoryProvider {
            progress_stage = 'completed', progress_message = '故事已完成，可以开始阅读',
            progress_percent = 100, checkpoint_json = '', checkpoint_episode_count = 0,
            automatic_retry_episode = 0, automatic_retry_count = 0,
+           last_failure_fingerprint = '', repeated_failure_count = 0,
            updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         ).run(result.seriesTitle, JSON.stringify(result.articleIds), request.id);
         this.db.exec("COMMIT");
@@ -260,18 +306,34 @@ export class CustomStoryService implements CustomStoryProvider {
         `SELECT checkpoint_json AS checkpointJson,
           checkpoint_episode_count AS checkpointEpisodeCount,
           automatic_retry_episode AS automaticRetryEpisode,
-          automatic_retry_count AS automaticRetryCount
+          automatic_retry_count AS automaticRetryCount,
+          last_failure_fingerprint AS lastFailureFingerprint,
+          repeated_failure_count AS repeatedFailureCount
          FROM custom_story_requests WHERE id = ?`,
       ).get(request.id) as {
         checkpointJson: string;
         checkpointEpisodeCount: number;
         automaticRetryEpisode: number;
         automaticRetryCount: number;
+        lastFailureFingerprint: string;
+        repeatedFailureCount: number;
       } | undefined;
       const savedCheckpoint = saved?.checkpointJson
         ? this.parseCheckpoint(saved.checkpointJson)
         : null;
-      const errorMessage = error instanceof Error ? error.message : "故事生成失败";
+      const rawErrorMessage = error instanceof Error ? error.message : "故事生成失败";
+      const infrastructureFailure = isTransientModelCapacityError(error);
+      const errorMessage = infrastructureFailure
+        ? "模型服务连接中断或当前繁忙，本次已停止且不会计为稿件质量失败；已保存当前进度，请稍后手动重试"
+        : rawErrorMessage;
+      if (infrastructureFailure) {
+        console.warn(
+          `[custom-story:${request.id}] 模型基础设施错误已与 JSON/内容错误分离，任务安全停止：${rawErrorMessage}`,
+        );
+        this.appendStoryLog(request.id, "warn", errorMessage);
+      } else {
+        this.appendStoryLog(request.id, "error", rawErrorMessage);
+      }
       const failedEpisode = savedCheckpoint
         ? Math.min(
             request.episodeCount,
@@ -283,23 +345,48 @@ export class CustomStoryService implements CustomStoryProvider {
         saved?.automaticRetryCount ?? request.automaticRetryCount,
         failedEpisode,
       );
+      const failureFingerprint = storyFailureFingerprint(
+        rawErrorMessage,
+        savedCheckpoint,
+        failedEpisode,
+      );
+      const repeatedFailureCount = saved?.lastFailureFingerprint === failureFingerprint
+        ? Math.max(0, saved.repeatedFailureCount) + 1
+        : 1;
+      const repeatedCheckpointFailure = !infrastructureFailure && repeatedFailureCount >= 2;
+      if (repeatedCheckpointFailure) {
+        this.appendStoryLog(
+          request.id,
+          "warn",
+          `检测到相同检查点连续 ${repeatedFailureCount} 次产生相同错误，已熔断剩余自动重试：${rawErrorMessage}`,
+        );
+      }
       if (
-        retryState.canRetry
-        && isRecoverableStoryQualityFailure(errorMessage, Boolean(savedCheckpoint))
+        !repeatedCheckpointFailure
+        && retryState.canRetry
+        && isRecoverableStoryQualityFailure(error, Boolean(savedCheckpoint))
       ) {
         const nextAttempt = retryState.next;
         console.log(
           `[custom-story:${request.id}] 第 ${failedEpisode} 集本轮稿件未达到发布质量，但检查点完整；`
           + `正在自动吸取废稿经验并换稿（本集自动续跑 ${nextAttempt}/${automaticQualityRetryLimit}）：${errorMessage}`,
         );
+        this.appendStoryLog(
+          request.id,
+          "info",
+          `第 ${failedEpisode} 集质量自动续跑 ${nextAttempt}/${automaticQualityRetryLimit}：${errorMessage}`,
+        );
         this.db.prepare(
-          `UPDATE custom_story_requests SET status = 'generating', error_message = '',
+          `UPDATE custom_story_requests SET status = 'queued', error_message = '',
            automatic_retry_episode = ?, automatic_retry_count = ?,
+           last_failure_fingerprint = ?, repeated_failure_count = ?,
            progress_stage = 'drafting', progress_message = ?, updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`,
         ).run(
           failedEpisode,
           nextAttempt,
+          failureFingerprint,
+          repeatedFailureCount,
           `第 ${failedEpisode} 集本轮稿件未达标，正在吸取经验并自动重写（本集 ${nextAttempt}/${automaticQualityRetryLimit}）`,
           request.id,
         );
@@ -319,10 +406,15 @@ export class CustomStoryService implements CustomStoryProvider {
       this.db.prepare(
         `UPDATE custom_story_requests SET status = 'failed', error_message = ?,
          progress_stage = 'failed', progress_message = ?,
+         last_failure_fingerprint = ?, repeated_failure_count = ?,
          updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
       ).run(
-        errorMessage.slice(0, 1000),
+        (repeatedCheckpointFailure
+          ? `${errorMessage}；检测到相同检查点重复失败，已熔断剩余自动重试`
+          : errorMessage).slice(0, 1000),
         resumeMessage,
+        failureFingerprint,
+        repeatedFailureCount,
         request.id,
       );
     }
@@ -363,6 +455,7 @@ export class CustomStoryService implements CustomStoryProvider {
         `UPDATE custom_story_requests
          SET series_title = ?, article_ids_json = ?,
              automatic_retry_episode = ?, automatic_retry_count = 0,
+             last_failure_fingerprint = '', repeated_failure_count = 0,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
       ).run(
@@ -385,6 +478,21 @@ export class CustomStoryService implements CustomStoryProvider {
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ? AND status = 'generating'`,
     ).run(progress.stage, progress.message, progress.percent, requestId);
+  }
+
+  private appendStoryLog(requestId: string, level: "info" | "warn" | "error", message: string) {
+    try {
+      this.db.prepare(
+        `INSERT INTO custom_story_logs(request_id, level, message)
+         VALUES (?, ?, ?)`,
+      ).run(requestId, level, message.slice(0, 4000));
+    } catch (error) {
+      // Diagnostics must never turn a recoverable generation failure into a
+      // second database error that hides the real cause.
+      console.warn(
+        `[custom-story:${requestId}] 持久化故事日志失败：${error instanceof Error ? error.message : error}`,
+      );
+    }
   }
 
   private saveCheckpoint(requestId: string, checkpoint: StoryGenerationCheckpoint) {
