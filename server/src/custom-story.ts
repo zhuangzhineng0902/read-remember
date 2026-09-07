@@ -76,11 +76,20 @@ export function episodeAutomaticRetryState(
 }
 
 export function isRecoverableStoryQualityFailure(messageOrError: string | unknown, resumeAvailable: boolean) {
-  if (!resumeAvailable) return false;
   if (messageOrError instanceof StoryGenerationFailure) {
-    return messageOrError.retryScope !== "manual";
+    return resumeAvailable && messageOrError.retryScope !== "manual";
   }
-  const message = typeof messageOrError === "string" ? messageOrError : "";
+  const message = typeof messageOrError === "string"
+    ? messageOrError
+    : messageOrError instanceof Error
+      ? messageOrError.message
+      : "";
+  const planningFailure = [
+    "所有候选季纲均不可用",
+    "模型未能提供至少一套完整故事方案",
+  ].some((marker) => message.includes(marker));
+  if (planningFailure) return true;
+  if (!resumeAvailable) return false;
   return [
     "候选初稿连续未达到编辑底线",
     "语义质量未达标",
@@ -353,7 +362,13 @@ export class CustomStoryService implements CustomStoryProvider {
       const repeatedFailureCount = saved?.lastFailureFingerprint === failureFingerprint
         ? Math.max(0, saved.repeatedFailureCount) + 1
         : 1;
-      const repeatedCheckpointFailure = !infrastructureFailure && repeatedFailureCount >= 2;
+      // Identical errors without a checkpoint can still come from different
+      // fresh model outputs. Only fuse repeated failures when the exact same
+      // persisted artifact is being retried; otherwise the normal bounded
+      // automatic retry budget should apply.
+      const repeatedCheckpointFailure = Boolean(savedCheckpoint)
+        && !infrastructureFailure
+        && repeatedFailureCount >= 2;
       if (repeatedCheckpointFailure) {
         this.appendStoryLog(
           request.id,

@@ -54,6 +54,7 @@ export {
   callStructured,
   creativeDraftModelPolicy,
   readStreamingModelContent,
+  recoverStructuredComposite,
   semanticPlanningModelPolicy,
   semanticRewriteModelPolicy,
   structureModelForAttempt,
@@ -216,7 +217,21 @@ export function normalizeSeriesPlan(value: unknown) {
           ...storyBibleRecord,
           worldRules: boundedArray(storyBibleRecord.worldRules, 8),
           fixedTerms: boundedArray(storyBibleRecord.fixedTerms, 16),
-          characterArcs: boundedArray(storyBibleRecord.characterArcs, 8),
+          characterArcs: Array.isArray(boundedArray(storyBibleRecord.characterArcs, 8))
+            ? (boundedArray(storyBibleRecord.characterArcs, 8) as unknown[]).map((arc) => {
+                if (!arc || typeof arc !== "object" || Array.isArray(arc)) return arc;
+                const record = arc as Record<string, unknown>;
+                return {
+                  ...record,
+                  // Voice is editorial guidance rather than story state. A
+                  // missing value can be filled safely without regenerating a
+                  // complete season plan.
+                  voice: typeof record.voice === "string" && record.voice.trim()
+                    ? record.voice
+                    : "使用简短自然的句子表达观察、选择和感受",
+                };
+              })
+            : boundedArray(storyBibleRecord.characterArcs, 8),
         }
       : plan.storyBible,
     clueLedger: Array.isArray(objectArray(plan.clueLedger))
@@ -249,7 +264,10 @@ const planSelectionSchema = z.object({
     integerLike,
     z.number().int().min(1).max(4),
   ),
-  rationale: z.string().trim().min(8).max(800),
+  rationale: z.preprocess(
+    (value) => typeof value === "string" ? value.trim().slice(0, 800) : value,
+    z.string().min(8).max(800),
+  ),
 });
 
 const questionSchema = z.object({
@@ -1137,7 +1155,11 @@ async function callBudgetedEpisodeNarrative(
 ) {
   const episodeNumber = index + 1;
   const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
-  const maxCompletionTokens = narrativeCompletionTokenBudget(contract.publishWordRange[1]);
+  const requestedWords = contract.paragraphCards.reduce(
+    (total, card) => total + card.targetWords[1],
+    0,
+  );
+  const maxCompletionTokens = narrativeCompletionTokenBudget(requestedWords);
   let narrative = await callFourParagraphNarrative(
     options,
     system,
@@ -1511,7 +1533,7 @@ ${buildNarrativeCraftBrief(options, beat.number)}
 
 叙事控制：
 - 前两句必须形成钩子。
-- 严格按 paragraphCards 写成恰好 4 段，每段只完成该卡的一个叙事任务。targetSentences 是建议值，允许上下浮动 1 句；maxWordsPerSentence 是多数句子的可读性目标，不要为了机械拆句破坏自然英语。全文发布词数和 requiredEvents 才是硬约束。用 because、so、but、when、after 等自然关系或明确动作写清“为什么发生”和“因此发生什么”。
+- 严格按 paragraphCards 写成恰好 4 段，每段只完成该卡的一个叙事任务。每段不得超过对应 targetWords 的上限；写完一段后先在内部累计英文词数，达到上限就停止该段，不输出计数过程。targetSentences 是建议值，允许上下浮动 1 句；maxWordsPerSentence 是多数句子的可读性目标，不要为了机械拆句破坏自然英语。全文发布词数和 requiredEvents 才是硬约束。用 because、so、but、when、after 等自然关系或明确动作写清“为什么发生”和“因此发生什么”。
 - 至少写入两种五感中的具体细节，用声音、光线、气味、味道、温度、触感或身体反应帮助读者看懂人物在哪里、危险从哪来；感官描写必须服务线索或情绪，不能堆形容词。
 - requiredEvents 是本集全部硬任务，必须在四段内以可见动作完成“目标→阻碍→选择→后果→新问题”；选择必须有代价，后果必须由选择引起。optionalIfSpace 不是必写项，只能在不增加新场景、不超词数时自然融入，绝不得为了塞满旧季纲而牺牲因果。
 - 与上一集最终正文逐段比较：不得重复相同的解释、动作顺序或悬念；每段必须至少推进一次新行动、新判断或新后果。允许用一句话承接已知线索；若本集要求 use/payoff，承接后必须立即增加新的因果解释或可见后果，不能把旧线索再次写成首次发现。
@@ -1520,7 +1542,7 @@ ${buildNarrativeCraftBrief(options, beat.number)}
 - 文章本身要精彩，不要用“这告诉我们团队合作很重要”之类说教句。
 
 输出前静默执行一次硬门禁自检，不要输出自检过程：
-- 逐段核对句子数和句长，再核对全文；词数必须落在 ${range[0]}-${range[1]} 内，最好离上下限各留 15 个词余量；每段句子数允许比 targetSentences 多或少 1，绝大多数句子控制在 maxWordsPerSentence 附近；除带引号短对话外，不超过 4 词的叙述句不得超过全部叙述句的 30%。
+- 逐段核对词数、句子数和句长，再核对全文；任何一段超过 targetWords 上限时先删去装饰语，全文词数必须落在 ${range[0]}-${range[1]} 内，最好离上下限各留 15 个词余量；每段句子数允许比 targetSentences 多或少 1，绝大多数句子控制在 maxWordsPerSentence 附近；除带引号短对话外，不超过 4 词的叙述句不得超过全部叙述句的 30%。
 - 本阶段只生成 title 和 paragraphs，不要生成 targetWords、continuitySummary、storyState、qualityEvidence 或 questions；这些会在最佳正文选出后单独生成。
 
 只返回 JSON：
@@ -4220,9 +4242,25 @@ export async function runStoryGeneration(options: StoryRunOptions) {
             });
             semanticIssues = semanticQualityIssues(semanticReview, firstEpisodeBaseline);
             if (semanticIssues.length) {
-              throw new Error(
-                `第 ${episodeNumber} 集最终结构修稿造成语义退化：严格门禁要求四项仍至少 7 分且均分至少 7.5（${semanticIssues.join("；")}）`,
+              episode = episodeBeforeMechanicalRepair;
+              quality = qualityBeforeMechanicalRepair;
+              semanticReview = semanticReviewBeforeMechanicalRepair;
+              options.log(
+                `[${episodeNumber}/${options.episodes}] 最终结构修稿虽通过机械门禁，但语义复评退化（${semanticIssues.join("；")}）；`
+                + "已回退到严选原稿及其原始评分，继续走有界修复，不再把同一篇合格候选误判为坏稿。",
               );
+              saveCheckpoint({
+                index,
+                stage: "semantic_reviewed",
+                episode,
+                quality,
+                critique,
+                semanticReview,
+                fullRewriteCount,
+                mechanicalRepairUsed,
+                semanticRewriteUsed,
+              });
+              continue;
             }
           }
         }

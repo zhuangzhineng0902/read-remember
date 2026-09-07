@@ -42,6 +42,7 @@ import {
   parseStoryGenerationCheckpoint,
   prioritizeTargetWords,
   readStreamingModelContent,
+  recoverStructuredComposite,
   passesStoryQualityFloor,
   repeatedNarrativeIssues,
   resolveReaderProfile,
@@ -544,6 +545,14 @@ test("saved quality failures are eligible for bounded automatic story continuati
     isRecoverableStoryQualityFailure("第 4 集两次定长校正后仍不合法：第 3 段最长句 24 词", true),
     true,
   );
+  assert.equal(
+    isRecoverableStoryQualityFailure(new Error("第 3 集最终结构修稿造成语义退化：吸引力下降"), true),
+    true,
+  );
+  assert.equal(
+    isRecoverableStoryQualityFailure(new Error("所有候选季纲均不可用；模型未能提供至少一套完整故事方案"), false),
+    true,
+  );
 });
 
 test("semantic quality gate rejects a weaker later episode", () => {
@@ -755,9 +764,24 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
 });
 
 test("short-reading completion budgets stay bounded while leaving room to close JSON", () => {
-  assert.equal(narrativeCompletionTokenBudget(310), 487);
-  assert.equal(narrativeCompletionTokenBudget(800), 1114);
+  assert.equal(narrativeCompletionTokenBudget(310), 400);
+  assert.equal(narrativeCompletionTokenBudget(800), 947);
   assert.equal(narrativeCompletionTokenBudget(2000), 2048);
+});
+
+test("separate root JSON fragments are reattached only when the schema validates them", () => {
+  const schema = z.object({
+    title: z.string(),
+    episodes: z.array(z.object({ number: z.number(), title: z.string() })).min(2),
+  });
+  assert.deepEqual(recoverStructuredComposite([
+    { title: "A Small Season" },
+    [{ number: 1, title: "One" }, { number: 2, title: "Two" }],
+    ["unrelated", "values"],
+  ], schema), {
+    title: "A Small Season",
+    episodes: [{ number: 1, title: "One" }, { number: 2, title: "Two" }],
+  });
 });
 
 test("middle-school publication accepts both junior and senior school dictionary tags", () => {

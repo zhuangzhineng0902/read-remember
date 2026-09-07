@@ -46,6 +46,56 @@ export type ModelCallPolicy = {
   recoverPartial?: (value: unknown, issues: string) => Promise<unknown | null>;
 };
 
+function schemaIssueCount<T>(result: z.ZodSafeParseResult<T>) {
+  return result.success ? 0 : result.error.issues.length;
+}
+
+/**
+ * Some OpenAI-compatible JSON-object providers emit a valid root object and
+ * then place one omitted root array in a second JSON fragment. Reattach only
+ * fragments that make the caller's actual Zod schema strictly closer to valid;
+ * the schema, rather than field-name guesses, decides whether a merge is safe.
+ */
+export function recoverStructuredComposite<T>(values: unknown[], schema: z.ZodType<T>): T | null {
+  const objects = values.filter(
+    (value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value),
+  );
+  const fragments = values.filter((value) => Array.isArray(value) || (value && typeof value === "object"));
+  for (const source of objects) {
+    let candidate: Record<string, unknown> = { ...source };
+    let result = schema.safeParse(candidate);
+    if (result.success) return result.data;
+    for (let pass = 0; pass < 4; pass++) {
+      const missingRootFields: string[] = result.error.issues.flatMap((issue): string[] =>
+        issue.path.length === 1
+        && typeof issue.path[0] === "string"
+        && /received undefined/.test(issue.message)
+          ? [issue.path[0]]
+          : []
+      );
+      let best: { candidate: Record<string, unknown>; result: z.ZodSafeParseResult<T> } | null = null;
+      for (const field of [...new Set<string>(missingRootFields)]) {
+        for (const fragment of fragments) {
+          if (fragment === source || fragment === candidate) continue;
+          const trial: Record<string, unknown> = { ...candidate, [field]: fragment };
+          const trialResult = schema.safeParse(trial);
+          if (
+            !best
+            || schemaIssueCount(trialResult) < schemaIssueCount(best.result)
+          ) {
+            best = { candidate: trial, result: trialResult };
+          }
+        }
+      }
+      if (!best || schemaIssueCount(best.result) >= schemaIssueCount(result)) break;
+      candidate = best.candidate;
+      result = best.result;
+      if (result.success) return result.data;
+    }
+  }
+  return null;
+}
+
 export const modelTokenBudgets = {
   plan: 10240,
   episode: 8192,
@@ -428,6 +478,11 @@ export async function callStructured<T>(
     const attempts = values.map((value) => ({ value, result: schema.safeParse(value) }));
     const valid = attempts.find((entry) => entry.result.success);
     if (valid?.result.success) return valid.result.data;
+    const composite = recoverStructuredComposite(values, schema);
+    if (composite) {
+      options.log("模型把根对象和字段数组拆成了多个 JSON 片段；已按业务 Schema 在本地无损拼合，不占用结构重试。");
+      return composite;
+    }
     const objectAttempts = attempts.filter(
       (entry) => Boolean(entry.value) && typeof entry.value === "object" && !Array.isArray(entry.value),
     );

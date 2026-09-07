@@ -1,9 +1,9 @@
 export function narrativeCompletionTokenBudget(maximumWords: number) {
-  // M3 direct output was routinely filling the old 670-token allowance with
-  // 350-500 English words for a 310-word request. A tighter prose allowance
-  // still leaves JSON-closing headroom but applies useful pressure before the
-  // model writes an overlong draft that would need lossy compression.
-  return Math.min(2_048, Math.max(440, Math.ceil(maximumWords * 1.28) + 90));
+  // MiniMax's English token/word ratio is close enough to 1 that the former
+  // 1.28x allowance still let 310-word requests expand to 350-410 words. Keep
+  // enough room for JSON punctuation and the title, but make the server-side
+  // ceiling reinforce the prompt instead of silently permitting a long essay.
+  return Math.min(2_048, Math.max(400, Math.ceil(maximumWords * 1.12) + 50));
 }
 
 export const storyEpisodeAttemptBudget = Object.freeze({
