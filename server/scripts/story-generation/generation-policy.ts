@@ -16,7 +16,7 @@ export const storyGenerationPolicy = Object.freeze({
     skipOptionalOptimizationAtAverage: 8,
   },
   length: {
-    severeSentenceExtraWords: 10,
+    severeSentenceExtraWords: 9,
     tinyOverflowWords: 3,
   },
   retry: {

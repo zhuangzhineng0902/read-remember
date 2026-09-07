@@ -24,6 +24,7 @@ import {
   isTransientModelCapacityError,
   isStrictStoryCritique,
   isStoryCritiqueImprovement,
+  isSemanticRepairProgress,
   loadStoryEngagementBrief,
   lexicalEditDriftIssues,
   mergeEpisodeStructure,
@@ -58,6 +59,7 @@ import {
   storyWordLimits,
   structureModelForAttempt,
   storyGenerationCheckpointSchema,
+  storyPlanCapacity,
   storyEpisodeAttemptBudget,
   structuredJsonValues,
   trimTinyNarrativeOverflow,
@@ -167,6 +169,10 @@ test("favorite story prompt keeps the appeal while requiring new expression", ()
   assert.match(prompt, /幽默宠物、伙伴闯关、校园谜题/);
   assert.match(prompt, /角色、世界和谜题必须可独立识别为原创/);
   assert.match(prompt, /250 个核心高频词/);
+  assert.match(prompt, /Starter 也不能写成 3-6 岁幼儿故事/);
+  assert.match(prompt, /consequence 只写选择立刻造成的一次可见代价/);
+  assert.match(prompt, /cliffhanger 必须比 openingHook 和 goal 多出一项/);
+  assert.match(prompt, /整季最多 3 位主要角色、最多 3 条线索/);
 });
 
 test("automatic reader stages follow the learner exam level", () => {
@@ -178,6 +184,26 @@ test("automatic reader stages follow the learner exam level", () => {
     maxNewWords: 5,
   });
   assert.equal(resolveReaderProfile({ examId: "high", readerStage: "auto" }).id, "stage3");
+});
+
+test("starter season plans limit cognitive load without making the theme childish", () => {
+  assert.deepEqual(
+    storyPlanCapacity({ examId: "middle", readerStage: "starter", episodes: 3 }),
+    {
+      maximumMainCharacters: 3,
+      maximumSeasonClues: 3,
+      maximumWorldRules: 5,
+      maximumNewFactsPerEpisode: 2,
+    },
+  );
+  assert.deepEqual(storyWordLimits({ examId: "middle", readerStage: "starter" }, 1), {
+    targetRange: [180, 240],
+    publishRange: [180, 310],
+  });
+  assert.deepEqual(storyWordLimits({ examId: "middle", readerStage: "starter" }, 2), {
+    targetRange: [200, 260],
+    publishRange: [180, 310],
+  });
 });
 
 test("story planning has a safe fallback before engagement data exists", () => {
@@ -605,6 +631,28 @@ test("an optimized story is adopted only when it remains strict and improves the
   assert.equal(isStoryCritiqueImprovement(regressed, strongCritique), false);
 });
 
+test("mandatory semantic rewrites retain the best-so-far draft instead of compounding regressions", () => {
+  const original = structuredClone(strongCritique);
+  original.plot.score = 7;
+  original.childAppeal.score = 7;
+  original.gradedLanguage.score = 6;
+  original.continuity.score = 8;
+
+  const better = structuredClone(original);
+  better.gradedLanguage.score = 7;
+  const worse = structuredClone(original);
+  worse.plot.score = 6;
+  worse.childAppeal.score = 6;
+  const higherAverageButNewWeakDimension = structuredClone(original);
+  higherAverageButNewWeakDimension.plot.score = 6;
+  higherAverageButNewWeakDimension.childAppeal.score = 9;
+  higherAverageButNewWeakDimension.gradedLanguage.score = 8;
+
+  assert.equal(isSemanticRepairProgress(better, original), true);
+  assert.equal(isSemanticRepairProgress(worse, original), false);
+  assert.equal(isSemanticRepairProgress(higherAverageButNewWeakDimension, original), false);
+});
+
 test("narrative preflight rejects bad length, paragraph count, and mixed Chinese before model review", () => {
   const issues = narrativePreflightIssues(
     { examId: "middle", readerStage: "stage1" },
@@ -753,9 +801,9 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
   assert.ok(contract.paragraphCards.every((card) => card.targetSentences >= 4));
   assert.ok(contract.paragraphCards.every((card) => card.maxWordsPerSentence <= 13));
   assert.match(contract.requiredEvents[1], /伙伴合作/);
-  assert.match(contract.requiredEvents[2], /铜盒/);
+  assert.match(contract.requiredEvents[2], /Ben/);
+  assert.ok(contract.optionalIfSpace.some((item) => /铜盒/.test(item)));
   assert.ok(contract.optionalIfSpace.some((item) => /广播员/.test(item)));
-  assert.ok(contract.optionalIfSpace.some((item) => /Ben/.test(item)));
   assert.deepEqual(contract.requiredClueActions, [
     { clueId: "C1", action: "payoff" },
     { clueId: "C2", action: "payoff" },
@@ -763,8 +811,16 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
   assert.deepEqual(episodeWritingContractCapacityIssues(contract), []);
 });
 
+test("the final paragraph continues the consequence instead of replaying its trigger", () => {
+  const contract = buildEpisodeWritingContract({ examId: "middle" }, validPlan, 1);
+  assert.match(contract.paragraphCards[3].purpose, /绝不重演触发动作/);
+  assert.match(contract.requiredEvents[3], /不得重复其触发动作/);
+  assert.match(contract.requiredEvents[3], /具体新证据或新风险/);
+});
+
 test("short-reading completion budgets stay bounded while leaving room to close JSON", () => {
-  assert.equal(narrativeCompletionTokenBudget(310), 400);
+  assert.equal(narrativeCompletionTokenBudget(208), 340);
+  assert.equal(narrativeCompletionTokenBudget(310), 398);
   assert.equal(narrativeCompletionTokenBudget(800), 947);
   assert.equal(narrativeCompletionTokenBudget(2000), 2048);
 });

@@ -3,7 +3,7 @@ export function narrativeCompletionTokenBudget(maximumWords: number) {
   // 1.28x allowance still let 310-word requests expand to 350-410 words. Keep
   // enough room for JSON punctuation and the title, but make the server-side
   // ceiling reinforce the prompt instead of silently permitting a long essay.
-  return Math.min(2_048, Math.max(400, Math.ceil(maximumWords * 1.12) + 50));
+  return Math.min(2_048, Math.max(340, Math.ceil(maximumWords * 1.12) + 50));
 }
 
 export const storyEpisodeAttemptBudget = Object.freeze({
