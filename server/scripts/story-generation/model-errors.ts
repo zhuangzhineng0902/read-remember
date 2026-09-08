@@ -7,5 +7,5 @@ function readableError(error: unknown) {
 }
 
 export function isTransientModelCapacityError(error: unknown) {
-  return /(?:\b429\b|\b529\b|overloaded|服务器短暂繁忙|模型服务(?:当前)?繁忙|负载较高|限流|\(2064\)|ECONNRESET|ETIMEDOUT|UND_ERR_|fetch failed|\bterminated\b)/i.test(readableError(error));
+  return /(?:\b429\b|\b529\b|overloaded|TimeoutError|aborted due to timeout|服务器短暂繁忙|模型服务(?:当前)?繁忙|负载较高|限流|\(2064\)|ECONNRESET|ETIMEDOUT|UND_ERR_|fetch failed|\bterminated\b)/i.test(readableError(error));
 }

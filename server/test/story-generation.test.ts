@@ -57,6 +57,7 @@ import {
   seriesPlanClueCapacityAdjustments,
   semanticQualityIssues,
   storyWordLimits,
+  repairObjectFields,
   structureModelForAttempt,
   storyGenerationCheckpointSchema,
   storyPlanCapacity,
@@ -671,7 +672,7 @@ test("all stages share one publication length boundary", () => {
     paragraphs: Array.from({ length: 4 }, (_, paragraphIndex) => {
       const base = Math.floor(count / 4);
       const size = base + (paragraphIndex < count % 4 ? 1 : 0);
-      return Array(size).fill("word").join(" ");
+      return Array(size).fill("word").join(" ") + ".";
     }),
   });
 
@@ -801,9 +802,11 @@ test("episode writing contracts cap hard story work at four paragraph cards", ()
   assert.ok(contract.paragraphCards.every((card) => card.targetSentences >= 4));
   assert.ok(contract.paragraphCards.every((card) => card.maxWordsPerSentence <= 13));
   assert.match(contract.requiredEvents[1], /伙伴合作/);
-  assert.match(contract.requiredEvents[2], /Ben/);
+  assert.doesNotMatch(contract.requiredEvents[2], /Ben 当着所有人/);
+  assert.ok(contract.requiredEvents[2].includes(overloaded.clueLedger[0].payoff));
   assert.ok(contract.optionalIfSpace.some((item) => /铜盒/.test(item)));
   assert.ok(contract.optionalIfSpace.some((item) => /广播员/.test(item)));
+  assert.ok(contract.optionalIfSpace.some((item) => /Ben/.test(item)));
   assert.deepEqual(contract.requiredClueActions, [
     { clueId: "C1", action: "payoff" },
     { clueId: "C2", action: "payoff" },
@@ -818,11 +821,50 @@ test("the final paragraph continues the consequence instead of replaying its tri
   assert.match(contract.requiredEvents[3], /具体新证据或新风险/);
 });
 
+test("season finale closes the mystery instead of requiring another cliffhanger", () => {
+  const final = buildEpisodeWritingContract({ examId: "middle" }, validPlan, validPlan.episodes.length);
+  assert.equal(final.endingMode, "resolution");
+  assert.match(final.paragraphCards[3].purpose, /完成当前中心目标/);
+  assert.match(final.requiredEvents[3], /不强制采用旧 cliffhanger/);
+  assert.match(final.editorialRules, /两种有效感官即达标/);
+  assert.match(final.editorialRules, /不复述旧物件不等于矛盾/);
+  const opening = buildEpisodeWritingContract({ examId: "middle" }, validPlan, 1);
+  assert.equal(opening.endingMode, "cliffhanger");
+});
+
 test("short-reading completion budgets stay bounded while leaving room to close JSON", () => {
-  assert.equal(narrativeCompletionTokenBudget(208), 340);
-  assert.equal(narrativeCompletionTokenBudget(310), 398);
-  assert.equal(narrativeCompletionTokenBudget(800), 947);
-  assert.equal(narrativeCompletionTokenBudget(2000), 2048);
+  assert.ok(narrativeCompletionTokenBudget(208) >= 700);
+  assert.ok(narrativeCompletionTokenBudget(310) > 310 * 2);
+  assert.ok(narrativeCompletionTokenBudget(800) > 800 * 2);
+  assert.ok(narrativeCompletionTokenBudget(2000) <= 4096);
+});
+
+test("a JSON-valid truncated chapter is rejected before scoring", () => {
+  const draft = {
+    title: "The Drain",
+    paragraphs: Array.from({ length: 4 }, () => Array(50).fill("word").join(" ") + "."),
+  };
+  draft.paragraphs[3] += ' "This time you smell, I listen," Dash';
+  assert.match(narrativePreflightIssues({ examId: "middle", readerStage: "starter" }, validPlan, 1, draft).join(";"), /结尾不完整/);
+  draft.paragraphs[3] += " said.";
+  assert.doesNotMatch(narrativePreflightIssues({ examId: "middle", readerStage: "starter" }, validPlan, 1, draft).join(";"), /结尾不完整/);
+});
+
+test("request timeouts are infrastructure failures rather than quality failures", () => {
+  assert.equal(isTransientModelCapacityError(new DOMException("The operation was aborted due to timeout", "TimeoutError")), true);
+  assert.equal(isTransientModelCapacityError(new Error("剧情质量不足")), false);
+});
+
+test("nested metadata recovery requests only invalid leaves and preserves valid siblings", async () => {
+  const schema = z.object({ title: z.string(), evidence: z.object({ quote: z.string(), progression: z.object({ cause: z.string() }) }) });
+  const paths: string[] = [];
+  const value = await repairObjectFields(schema, { title: "Kept", evidence: { quote: "Exact quote" } }, async (_schema, _value, path) => {
+    paths.push(path.join("."));
+    return { cause: "Exact cause" };
+  });
+  assert.deepEqual(paths, ["evidence.progression"]);
+  assert.deepEqual(value, { title: "Kept", evidence: { quote: "Exact quote", progression: { cause: "Exact cause" } } });
+  await assert.rejects(repairObjectFields(schema, {}, async () => 42));
 });
 
 test("separate root JSON fragments are reattached only when the schema validates them", () => {

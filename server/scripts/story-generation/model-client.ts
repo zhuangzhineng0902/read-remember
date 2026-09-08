@@ -206,7 +206,7 @@ function modelDispatcher(timeoutMs: number) {
   });
 }
 
-export async function readStreamingModelContent(response: Awaited<ReturnType<typeof fetch>>) {
+export async function readStreamingModelContent(response: Awaited<ReturnType<typeof fetch>>, log?: (message: string) => void) {
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
     let payload: {
@@ -227,6 +227,7 @@ export async function readStreamingModelContent(response: Awaited<ReturnType<typ
     }
     const choice = payload.choices?.[0];
     const content = modelContentText(choice?.message?.content) || modelContentText(choice?.text);
+    if (choice?.finish_reason === "length") log?.(`模型输出触及 Token 上限（finish=length，正文字符 ${content.length}），进入结构和内容完整性检查。`);
     if (!content) {
       const filtered = payload.output_sensitive || choice?.finish_reason === "content_filter";
       throw new ModelContentError(
@@ -318,6 +319,7 @@ export async function readStreamingModelContent(response: Awaited<ReturnType<typ
       reasoningTail,
     );
   }
+  if (finishReason === "length") log?.(`模型输出触及 Token 上限（finish=length，正文字符 ${content.length}，events=${eventCount}），进入结构和内容完整性检查。`);
   return content;
 }
 
@@ -333,6 +335,7 @@ async function callModelText(
   disableThinking = false,
 ) {
   let lastError: unknown;
+  let capacityRetries = 0;
   for (let attempt = 1; attempt <= networkRetries; attempt++) {
     const dispatcher = modelDispatcher(timeoutMs);
     try {
@@ -363,12 +366,19 @@ async function callModelText(
         const responseText = (await response.text()).slice(0, 1000);
         throw new ModelHttpError(
           `模型接口返回 ${response.status}: ${responseText}`,
-          [408, 409, 425, 429, 500, 502, 503, 504].includes(response.status),
+          [408, 409, 425, 429, 500, 502, 503, 504, 529].includes(response.status),
         );
       }
-      return await readStreamingModelContent(response);
+      return await readStreamingModelContent(response, options.log);
     } catch (error) {
       lastError = error;
+      if (error instanceof ModelHttpError && /(?:\b429\b|\b529\b)/.test(error.message) && capacityRetries < 2) {
+        capacityRetries += 1;
+        options.log(`模型容量不足，保留当前请求输入，等待 ${capacityRetries * 5} 秒后恢复（容量重试 ${capacityRetries}/2，不占质量重试）。`);
+        await new Promise((resolve) => setTimeout(resolve, capacityRetries * 5_000));
+        attempt -= 1;
+        continue;
+      }
       const contentFailure = error instanceof ModelContentError;
       const retryableHttp = !(error instanceof ModelHttpError) || error.retryable;
       const willRetry = !contentFailure && retryableHttp && attempt < networkRetries;
