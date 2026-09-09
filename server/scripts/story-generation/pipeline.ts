@@ -11,6 +11,10 @@ import {
 import { StoryGenerationFailure, storyGenerationPolicy } from "./generation-policy";
 import { compressionDriftIssues, lexicalEditDriftIssues, lexicalEditWordBudget, trimTinyNarrativeOverflow } from "./edit-guards";
 import { isTransientModelCapacityError } from "./model-errors";
+import { spineFeasibilitySchema, spineIsFeasible, feasibilityReviewInstructions,
+  lexicalFailureBatchSchema, recurringPlanWords } from "./plan-feasibility";
+import { seasonSpineSchema, handoffTextSchema, entryBridgeSchema, publishedNarrativeHash,
+  serialReadingContext, serialSeamContext, groundedSerialAuditSchema, type PublishedNarrative } from "./serial-narrative";
 import { readingDifficulty, readingLanguageBrief } from "./reading-difficulty";
 import {
   buildNarrativeCraftBrief,
@@ -82,6 +86,7 @@ const storyBibleSchema = z.object({
 });
 
 const episodeBeatSchema = z.object({
+  entryBridge: entryBridgeSchema.optional(),
   number: z.number().int().min(1).max(100),
   title: z.string().trim().min(3).max(160),
   episodeMission: z.string().trim().min(10).max(500),
@@ -112,6 +117,7 @@ const clueLedgerEntrySchema = z.object({
 });
 
 const planObjectSchema = z.object({
+  narrativeSpine: seasonSpineSchema.optional(),
   seriesTitle: z.string().trim().min(3).max(120),
   premise: z.string().trim().min(30).max(1000),
   cast: z.array(
@@ -363,6 +369,22 @@ export function normalizeTargetWords(value: unknown) {
     return selected ? [selected.toLowerCase()] : [];
   });
   return [...new Set(normalized)].slice(0, 10);
+}
+
+export function selectNarrativeTargetWords(
+  paragraphs: string[], maximum: number, preferred: string[] = [], excluded: string[] = [],
+) {
+  const stop = new Set(("a an the to of in on at for from with and or but so because is am are was were be been being do does did have has had i you he she it we they me him her us them my your his its our their this that these those who what when where why how not no yes as if then than too very just can could will would should must".split(" ")));
+  for (const name of excluded) for (const token of name.toLowerCase().match(/[a-z]+/g) ?? []) stop.add(token);
+  const counts = new Map<string, number>();
+  for (const token of paragraphs.join(" ").replace(/[’‘]/g, "'").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? []) {
+    const word = token.toLowerCase();
+    if (word.length < 3 || word.includes("'") || stop.has(word)) continue;
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  const ranked = [...counts.keys()].sort((a, b) => counts.get(b)! - counts.get(a)! || a.localeCompare(b));
+  return [...new Set([...preferred.map((word) => word.toLowerCase()).filter((word) => counts.has(word)), ...ranked])]
+    .slice(0, Math.max(4, Math.min(10, maximum)));
 }
 
 export function normalizeContinuitySummary(value: unknown) {
@@ -702,6 +724,10 @@ export type StoryEpisodeImported = {
 };
 
 export type StoryRunOptions = {
+  planningContext?: string;
+  onLexicalBatchFailure?: (episode: number, words: string[]) => void;
+  /** Per-run, read-only published prose supplied to serial checks. Never user instructions. */
+  publishedStoryContext?: PublishedNarrative[];
   databasePath: string;
   ecdictPath: string;
   baseUrl: string;
@@ -762,7 +788,7 @@ const activeEpisodeStages = [
 ] as const;
 
 const currentReviewCalibrationVersion = "independent-single-final-v4-calibrated-7-7.5";
-const currentStoryContractVersion = "action-consequence-contract-v11";
+const currentStoryContractVersion = "feasible-serial-contract-v13";
 
 const storyQualityCheckpointSchema = z.object({
   score: z.number().min(0).max(100),
@@ -793,6 +819,8 @@ const currentStoryGenerationCheckpointSchema = z.object({
   reviewCalibrationVersion: z.string().trim().min(1).max(80).optional(),
   storyContractVersion: z.string().trim().min(1).max(80).optional(),
   replannedEpisodes: z.array(z.number().int().min(1).max(30)).max(30).optional(),
+  lexicalFailureBatches: z.array(lexicalFailureBatchSchema).max(12).optional(),
+  lexicalPlanRevisions: z.array(z.number().int().min(1).max(30)).max(30).optional(),
   discardedDraftLessons: z.array(z.string().trim().min(4).max(500)).max(20).optional(),
   rejectedElite: z.object({
     index: z.number().int().min(0).max(29),
@@ -1011,20 +1039,24 @@ async function completeEpisodeMetadata(
   const readerProfile = resolveReaderProfile(options);
   const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
   const requiredClueActions = contract.requiredClueActions;
-  const metadata = await callStructured(
+  const metadataModelSchema = episodeMetadataSchema.omit({ targetWords: true });
+  const targetWords = selectNarrativeTargetWords(narrative.paragraphs, readerProfile.maxNewWords,
+    draftVocabulary(options, plan, narrative).unfamiliarWords, plan.cast.map((character) => character.name));
+  if (targetWords.length < 4) throw new Error("正文缺少至少四个可选学习词，请检查正文内容；不调用模型反复补词");
+  const metadataFields = await callStructured(
     options,
-    episodeMetadataSchema,
+    metadataModelSchema,
     "你只输出合法 JSON。你是故事数据整理编辑，只为已经定稿的英文正文补齐结构化元数据，绝不改写或重复正文。",
     `本集写作合同：${JSON.stringify(contract)}\n`
       + `本集必须且只能返回的线索动作：${JSON.stringify(requiredClueActions)}\n`
       + `上一集状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集"}\n`
       + `已定稿标题与正文：${JSON.stringify(narrative)}\n\n`
-      + "只根据这份最终正文生成 targetWords、continuitySummary、storyState、qualityEvidence。"
-      + `targetWords 选 4-${readerProfile.maxNewWords} 个且必须逐字出现在正文；continuitySummary 用 80-300 个中文字符记录结尾状态、关键发现和未解问题；`
+      + "只根据这份最终正文生成 continuitySummary、storyState、qualityEvidence。"
+      + `targetWords 已由程序从正文选定为 ${JSON.stringify(targetWords)}，不要生成或修改此字段；continuitySummary 用 80-300 个中文字符记录结尾状态、关键发现和未解问题；`
       + "storyState 使用中文字符串数组；qualityEvidence 的所有英文 quote 必须逐字存在于 paragraphs，因果和 progression 顺序必须与正文一致；"
       + "progression 四个 quote 必须互不相同并按 obstacle、choice、consequence、newInformation 的正文顺序出现；"
       + "clueEvidence 必须逐项且只覆盖上面列出的线索动作，不得改变 action、漏项或增加其他动作。本次禁止返回 title、paragraphs、questions。\n\n"
-      + "只返回：{\"targetWords\":[\"word\"],\"continuitySummary\":\"中文\",\"storyState\":{\"characterPositions\":[\"中文\"],\"knownFacts\":[\"中文\"],\"unresolvedQuestions\":[\"中文\"],\"items\":[\"中文\"],\"relationshipChanges\":[\"中文\"]},\"qualityEvidence\":{\"idiomaticPhrase\":\"exact quote\",\"sensoryQuote\":\"exact quote\",\"causalLinks\":[{\"causeQuote\":\"exact earlier quote\",\"effectQuote\":\"exact later quote\"}],\"clueEvidence\":[{\"clueId\":\"C1\",\"action\":\"plant\",\"evidenceQuote\":\"exact quote\"}],\"progression\":{\"obstacleQuote\":\"exact quote\",\"choiceQuote\":\"exact quote\",\"consequenceQuote\":\"exact quote\",\"newInformationQuote\":\"exact quote\"}}}",
+      + "只返回：{\"continuitySummary\":\"中文\",\"storyState\":{\"characterPositions\":[\"中文\"],\"knownFacts\":[\"中文\"],\"unresolvedQuestions\":[\"中文\"],\"items\":[\"中文\"],\"relationshipChanges\":[\"中文\"]},\"qualityEvidence\":{\"idiomaticPhrase\":\"exact quote\",\"sensoryQuote\":\"exact quote\",\"causalLinks\":[{\"causeQuote\":\"exact earlier quote\",\"effectQuote\":\"exact later quote\"}],\"clueEvidence\":[{\"clueId\":\"C1\",\"action\":\"plant\",\"evidenceQuote\":\"exact quote\"}],\"progression\":{\"obstacleQuote\":\"exact quote\",\"choiceQuote\":\"exact quote\",\"consequenceQuote\":\"exact quote\",\"newInformationQuote\":\"exact quote\"}}}",
     options.structureRepairModel || options.reviewModel || options.model,
     Math.min(options.reviewTemperature, 0.15),
     {
@@ -1033,7 +1065,7 @@ async function completeEpisodeMetadata(
       structureRetries: options.structureRetries,
       maxCompletionTokens: 4096,
       disableThinking: true,
-      recoverPartial: async (value) => repairObjectFields(episodeMetadataSchema, value, async (fieldSchema, current, fieldPath) => {
+      recoverPartial: async (value) => repairObjectFields(metadataModelSchema, value, async (fieldSchema, current, fieldPath) => {
         const key = fieldPath.at(-1)!;
         const wrapper = z.object({ [key]: fieldSchema });
         const result = await callStructured(
@@ -1049,6 +1081,8 @@ async function completeEpisodeMetadata(
       }),
     },
   );
+  const metadata = { ...metadataFields, targetWords };
+  options.log(`[${episodeNumber}/${options.episodes}] 已从正文确定 ${targetWords.length} 个学习词，不消耗模型字段纠错重试。`);
   // A valid JSON shape is not proof that its quotes were copied correctly.
   // Correct only invalid evidence strings, leaving the accepted story intact.
   const text = narrative.paragraphs.join(" ");
@@ -1485,6 +1519,8 @@ function continuityUsageContract(plan: SeriesPlan, episodeNumber: number) {
   const beat = plan.episodes[episodeNumber - 1];
   const requiredActions = requiredEpisodeClueActions(plan, episodeNumber);
   return {
+    entryBridge: beat?.entryBridge ?? null,
+    narrativeSpine: plan.narrativeSpine ?? null,
     knownFactsMayBeReferencedOnce: beat?.mustNotRepeat ?? [],
     requiredClueProgression: requiredActions.map((action) => ({
       ...action,
@@ -1686,6 +1722,7 @@ ${contract.endingMode === "resolution" ? "最高优先级结尾规则：本集�
 上一集连续性摘要：${previousEpisode?.continuitySummary || "这是第一集，从一个立刻发生的异常事件开始。"}
 上一集结构化状态：${previousEpisode ? JSON.stringify(previousEpisode.storyState) : "第一集尚无历史状态"}
 连续性使用合同：${JSON.stringify(continuityUsageContract(plan, beat.number))}
+${serialReadingContext(options.publishedStoryContext ?? (previousEpisode ? [previousEpisode] : []), beat.number === options.episodes)}
 上一集最终英文正文：${previousEpisode ? (includePreviousText ? JSON.stringify(previousEpisode.paragraphs) : "已省略；使用上面的摘要、结构化状态和 mustNotRepeat 承接") : "第一集尚无正文"}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
@@ -1736,6 +1773,7 @@ function critiquePrompt(
 上一集最终正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集"}
 连续性使用合同：${JSON.stringify(continuityUsageContract(plan, episodeNumber))}
 第 ${episodeNumber} 集待审稿：${JSON.stringify(episode)}
+${serialReadingContext(options.publishedStoryContext ?? (previousEpisode ? [previousEpisode] : []), episodeNumber === options.episodes)}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
 ${buildNarrativeCraftBrief(options, episodeNumber)}
@@ -1770,6 +1808,7 @@ function candidateCritiqueBatchPrompt(
 上一集最终正文：${previousEpisode ? JSON.stringify(previousEpisode.paragraphs) : "第一集"}
 连续性使用合同：${JSON.stringify(continuityUsageContract(plan, episodeNumber))}
 候选初稿（candidateIndex 必须沿用这里的编号）：${JSON.stringify(candidates.map((episode, candidateIndex) => ({ candidateIndex, episode })))}
+${serialReadingContext(options.publishedStoryContext ?? (previousEpisode ? [previousEpisode] : []), episodeNumber === options.episodes)}
 ${sourceBrief(options)}
 ${gradedReadingBrief(options)}
 ${buildNarrativeCraftBrief(options, episodeNumber)}
@@ -2514,8 +2553,39 @@ export function loadStoryEngagementBrief(
   }
 }
 
+async function approveNarrativeSpine(options: StoryRunOptions, initial: z.infer<typeof seasonSpineSchema>) {
+  let spine = initial;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const review = await callStructured(options, spineFeasibilitySchema,
+      feasibilityReviewInstructions,
+      `${gradedReadingBrief(options)}\n每集篇幅：${JSON.stringify(storyWordLimits(options, 1))}\n完整故事：${JSON.stringify(spine)}\n已发布正文及修改边界：${options.planningContext ?? "尚无已发布正文"}`,
+      options.reviewModel || options.model, options.reviewTemperature,
+      { ...semanticPlanningModelPolicy(options), networkRetries: 1, structureRetries: 2, maxCompletionTokens: 2048 });
+    if (spineIsFeasible(review)) {
+      options.log("整季主线已通过独立因果与分级表达可行性检查，允许进入分集策划。");
+      return spine;
+    }
+    options.log(`整季主线未通过可行性检查：${review.issues.join("；")}；${review.simplification}`);
+    if (attempt === 1) throw new StoryGenerationFailure("整季主线经一次简化仍不具备因果或语言可行性，未生成分集正文", "PLAN_FEASIBILITY_GATE", "narrative", "new_candidates");
+    spine = await callStructured(options, seasonSpineSchema,
+      "你是分级故事策划编辑。修改完整主线的设计，不是压缩摘要。只返回 JSON。",
+      `${gradedReadingBrief(options)}${vocabularyWritingGuide(options)}\n原主线：${JSON.stringify(spine)}\n独立检查：${JSON.stringify(review)}\n修改边界：${options.planningContext ?? "尚无已发布正文"}\n只返回 wholeStory、hiddenCause、resolutionMechanism。把难以解释的零件与材料机制换成可观察的简单行动；清楚说明为什么发生、怎样验证、为何解决。保留角色选择、代价和合作，禁止靠略去解释过关。`,
+      options.reviewModel || options.model, options.reviewTemperature,
+      { ...semanticPlanningModelPolicy(options), networkRetries: 1, structureRetries: 2, maxCompletionTokens: 3072 });
+  }
+  throw new Error("主线可行性检查未完成");
+}
+
+async function verifySplitPlanFeasibility(options: StoryRunOptions, plan: SeriesPlan) {
+  const review = await callStructured(options, spineFeasibilitySchema, feasibilityReviewInstructions,
+    `${gradedReadingBrief(options)}\n请检查拆集后的实际任务是否仍符合主线，是否偷偷增加了难以解释的术语、场景或不成立的解法。\n季纲：${JSON.stringify(plan)}\n已发布事实边界：${options.planningContext ?? "尚无"}`,
+    options.reviewModel || options.model, options.reviewTemperature,
+    { ...semanticPlanningModelPolicy(options), networkRetries: 1, structureRetries: 2, maxCompletionTokens: 2048 });
+  if (!spineIsFeasible(review)) throw new StoryGenerationFailure(`分集季纲可行性未通过：${review.issues.join("；")}；${review.simplification}`, "PLAN_FEASIBILITY_GATE", "narrative", "new_candidates");
+}
+
 async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
-  const basePrompt = `${buildSeriesPlanPrompt(options)}\n\n真实使用反馈（仅供策划）：${engagementBrief}`;
+  const basePrompt = `${buildSeriesPlanPrompt(options)}\n\n真实使用反馈（仅供策划）：${engagementBrief}\n${options.planningContext ?? ""}`;
   reportProgress(
     options,
     "planning",
@@ -2525,16 +2595,24 @@ async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
   options.log(`正在并行生成 ${options.planCandidates} 套候选季纲…`);
   const candidateResults = await Promise.allSettled(
     Array.from({ length: options.planCandidates }, async (_, index) => {
+      const initialSpine = await callStructured(options, seasonSpineSchema,
+        "先把一个完整故事讲通，再拆集。只返回 JSON，不输出章节列表。",
+        `${basePrompt}${vocabularyWritingGuide(options)}\n先不生成季纲字段。只返回 wholeStory、hiddenCause、resolutionMechanism 三个中文字符串。wholeStory 连贯讲清人物想要什么、为何遇阻、选择造成什么后果、伙伴如何合作解决；hiddenCause 说明异常真正原因；resolutionMechanism 说明如何验证原因并实际解决。不要把物件同时出现当因果，不使用终集才发明的规则。避免罗列事件，所有支线围绕一个主目标。必须能用该档位简单英语表达，避免专业零件、材料属性和多层传导机制。`,
+        options.reviewModel || options.model, options.reviewTemperature,
+        { ...semanticPlanningModelPolicy(options), maxCompletionTokens: 3072 });
+      const spine = await approveNarrativeSpine(options, initialSpine);
       const value = await callStructured(
         options,
         generatedPlanSchema(options),
         "你只输出合法 JSON。你擅长原创、连续、适龄、可读性高的儿童英语冒险故事策划。",
-        `${basePrompt}\n\n这是候选方案 ${index + 1}/${options.planCandidates}。请避开最先想到的套路，让核心谜题、角色缺点造成的选择和线索回收具有独特性。严格控制人物与线索容量；少而深优先于多而杂。`,
+        `${basePrompt}\n先前已经讲通的完整故事：${JSON.stringify(spine)}\n将它拆成 ${options.episodes} 集，不要逐集重新发明谜题或改换原因。每集末尾的眼前危险/疑问必须由下一集开头接住；终集验证并解决 hiddenCause。\n这是候选方案 ${index + 1}/${options.planCandidates}。严格控制人物与线索容量；少而深优先于多而杂。`,
         options.model,
         options.temperature,
         { maxCompletionTokens: modelTokenBudgets.plan, disableThinking: true },
       );
-      return validateSeriesPlan(value, options.episodes);
+      const candidate = validateSeriesPlan({ ...value, narrativeSpine: spine }, options.episodes);
+      await verifySplitPlanFeasibility(options, candidate);
+      return candidate;
     }),
   );
   const candidates = candidateResults.flatMap((result, index) => {
@@ -2546,6 +2624,8 @@ async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
     return [];
   });
   if (!candidates.length) {
+    const feasibilityFailure = candidateResults.find((result) => result.status === "rejected" && result.reason instanceof StoryGenerationFailure);
+    if (feasibilityFailure?.status === "rejected") throw feasibilityFailure.reason;
     throw new Error("所有候选季纲均不可用；模型未能提供至少一套完整故事方案");
   }
   const logCapacityNormalization = (plan: SeriesPlan) => {
@@ -3001,6 +3081,7 @@ async function generateEpisodeDraft(
   freshDrafts = freshDrafts.filter((_, candidateIndex) => eligible[candidateIndex]);
   onLessons?.(discardedDraftLessons, eliteRejected);
   if (vocabularyChecks.length && !freshDrafts.length && !eliteRejected) {
+    options.onLexicalBatchFailure?.(episodeNumber, [...new Set(vocabularyChecks.flatMap((quality) => quality.unfamiliarWords))].slice(0, 36));
     throw new StoryGenerationFailure(`第 ${episodeNumber} 集候选词汇门禁未通过；一次前置换词后仍未达标，已停止评审和元数据生成，保留难词经验供下一批使用`,
       "CANDIDATE_LEXICAL_GATE", "lexical", "new_candidates");
   }
@@ -4043,6 +4124,7 @@ function importStoryEpisode(
 }
 
 export async function runStoryGeneration(options: StoryRunOptions) {
+  options = { ...options, publishedStoryContext: [] };
   if (options.dryRun) {
     options.log(buildSeriesPlanPrompt(options));
     return { generated: 0, imported: 0, articleIds: [] as string[], seriesTitle: "", qualities: [] as StoryQuality[] };
@@ -4093,7 +4175,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       upgradedStoryContract = true;
     }
   }
-  const plan = restored?.plan ?? await generatePlan(options, engagementBrief);
+  let plan = restored?.plan ?? await generatePlan(options, engagementBrief);
   const generated: GeneratedStoryEpisode[] = restored?.episodes.map((item) => item.episode) ?? [];
   const qualities: StoryQuality[] = restored?.episodes.map((item) => item.quality) ?? [];
   const semanticReviews: Array<StoryCritique | undefined> = restored?.episodes.map(
@@ -4103,6 +4185,8 @@ export async function runStoryGeneration(options: StoryRunOptions) {
   let discardedDraftLessons = restored?.discardedDraftLessons ?? [];
   let rejectedElite = restored?.rejectedElite;
   const replannedEpisodes = new Set(restored?.replannedEpisodes ?? []);
+  let lexicalFailureBatches = restored?.lexicalFailureBatches ?? [];
+  const lexicalPlanRevisions = new Set(restored?.lexicalPlanRevisions ?? []);
   let reviewCalibrationVersion = restored?.reviewCalibrationVersion ?? "";
   const checkpointEpisodes = () => generated.map((savedEpisode, savedIndex) => ({
     episode: savedEpisode,
@@ -4117,11 +4201,17 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       episodes: checkpointEpisodes(),
       storyContractVersion: currentStoryContractVersion,
       replannedEpisodes: [...replannedEpisodes],
+      lexicalFailureBatches,
+      lexicalPlanRevisions: [...lexicalPlanRevisions],
       ...(reviewCalibrationVersion ? { reviewCalibrationVersion } : {}),
       ...(discardedDraftLessons.length ? { discardedDraftLessons } : {}),
       ...(rejectedElite ? { rejectedElite } : {}),
       ...(active ? { activeEpisode: active } : {}),
     });
+  };
+  options.onLexicalBatchFailure = (episode, words) => {
+    lexicalFailureBatches = [...lexicalFailureBatches, { episode, words }].slice(-12);
+    saveCheckpoint(activeEpisode);
   };
   if (upgradedStoryContract) saveCheckpoint();
   let previousEpisode: GeneratedStoryEpisode | null = generated.at(-1) ?? null;
@@ -4209,6 +4299,44 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       for (let index = generated.length; index < options.episodes; index++) {
         const episodeNumber = index + 1;
         const episodePrevious = previousEpisode;
+        options.publishedStoryContext = generated.map(({ title, paragraphs }) => ({ title, paragraphs }));
+        const repeatedWords = recurringPlanWords(lexicalFailureBatches, episodeNumber);
+        if (repeatedWords.length && !lexicalPlanRevisions.has(episodeNumber)) {
+          reportProgress(options, "planning", `第 ${episodeNumber} 集多批反复出现同类难词，正在回修未发布季纲（最多一次）`, episodeProgress(options, index, 0));
+          const planningContext = `重复难词：${repeatedWords.join(", ")}。两批不同正文仍依赖这些词，需简化任务设计，不是替换近义词或缩短摘要。\n旧季纲：${JSON.stringify(plan)}\n已发布正文（绝不能改动）：${JSON.stringify(options.publishedStoryContext)}\n保留用户题材、人物身份和已发布事实，仅调整未发布情节；删去非必要专业机制和支线，换成可观察的简单行动、选择与合作。不增加集数。`;
+          const revisionOptions = { ...options, planCandidates: 1, planningContext };
+          const revised = await generatePlan(revisionOptions, engagementBrief);
+          if (generated.length) {
+            revised.seriesTitle = plan.seriesTitle;
+            revised.cast = plan.cast;
+            revised.storyBible = plan.storyBible;
+            revised.episodes = [...plan.episodes.slice(0, generated.length), ...revised.episodes.slice(generated.length)];
+            await verifySplitPlanFeasibility(revisionOptions, revised);
+          }
+          plan = validateSeriesPlan(revised, options.episodes);
+          lexicalPlanRevisions.add(episodeNumber);
+          rejectedElite = undefined;
+          activeEpisode = undefined;
+          discardedDraftLessons = [`已根据重复难词简化未发布季纲：${repeatedWords.join(", ")}；按新季纲写作，不恢复旧专业机制。`];
+          if (lexical) lexical.allowedWords = lexicalAllowedWords(plan);
+          saveCheckpoint();
+          options.log(`[${episodeNumber}/${options.episodes}] 未发布季纲已回修并通过可行性检查；保留 ${generated.length} 集已发布正文，不增加本集自动重试额度。`);
+        }
+        if (episodePrevious && plan.episodes[index].entryBridge?.sourceHash !== publishedNarrativeHash(options.publishedStoryContext)) {
+          reportProgress(options, "planning", `第 ${episodeNumber} 集正在依据已发布正文衔接核心悬念`, episodeProgress(options, index, 0));
+          const adapted = await callStructured(options,
+            z.object({ handoff: handoffTextSchema, episode: episodeBeatSchema.omit({ entryBridge: true }) }),
+            "你是连续故事编辑，只调整尚未发布的本集季纲，不能改写已发布事实。只返回 JSON。",
+            `${serialReadingContext(options.publishedStoryContext, episodeNumber === options.episodes)}\n整季真实原因与解法：${JSON.stringify(plan.narrativeSpine ?? { premise: plan.premise, seasonMystery: plan.seasonMystery })}\n本集旧季纲：${JSON.stringify(plan.episodes[index])}\n后续计划：${JSON.stringify(plan.episodes.slice(index + 1))}\n先以最近一集结尾为依据返回 handoff:{immediateSituation,unresolvedPromise,nextAction,whyNow}，再返回 episode 为完整本集季纲。开头先交代眼前危险、人物位置、下一步行动及原因，再进入新任务。可以暂缓谜底，但必须保留疑问的明确状态。人物已知事实不可倒退；空间跳转须有路径，物件不能无来源。旧季纲与正文冲突时调整旧季纲，保留一个中心目标，不能增加分支。episode.number 必须为 ${episodeNumber}。`,
+            options.reviewModel || options.model, options.reviewTemperature,
+            { ...semanticPlanningModelPolicy(options), maxCompletionTokens: 4096 });
+          if (adapted.episode.number !== episodeNumber) throw new Error("章节交接返回了错误的集号，未修改季纲");
+          plan.episodes[index] = { ...adapted.episode, entryBridge: { ...adapted.handoff,
+            sourceHash: publishedNarrativeHash(options.publishedStoryContext), sourceEnding: episodePrevious.paragraphs.at(-1)! } };
+          validateSeriesPlan(plan, options.episodes);
+          saveCheckpoint(activeEpisode);
+          options.log(`[${episodeNumber}/${options.episodes}] 已保存与已发布正文指纹绑定的章节交接，续跑时复用，前面章节保持不变。`);
+        }
         let savedActive = activeEpisode?.index === index ? activeEpisode : undefined;
         let resumeMetadataOnly = false;
         if (!savedActive && rejectedElite?.index === index
@@ -4222,7 +4350,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
             options.reviewModel || options.model, 0.25,
             { timeoutMs: options.timeoutMs, networkRetries: 1, structureRetries: 2, maxCompletionTokens: 3072, disableThinking: true });
           // Identity and previously known facts cannot be changed by a repair.
-          plan.episodes[index] = { ...repaired.episode, number: episodeNumber, mustNotRepeat: oldBeat.mustNotRepeat };
+          plan.episodes[index] = { ...repaired.episode, number: episodeNumber, mustNotRepeat: oldBeat.mustNotRepeat, entryBridge: oldBeat.entryBridge };
           validateSeriesPlan(plan, options.episodes);
           replannedEpisodes.add(episodeNumber);
           rejectedElite = undefined;
@@ -4754,6 +4882,21 @@ export async function runStoryGeneration(options: StoryRunOptions) {
             + "但已达到发布底线（含最多 1 个词的词典或舍入容差），保留少量可查目标词并继续。",
           );
         }
+        reportProgress(options, "reviewing", `第 ${episodeNumber} 集正在与已发布章节连读，检查核心悬念和因果收束`, episodeProgress(options, index, 0.97));
+        const serialIssues = await callStructured(options,
+          groundedSerialAuditSchema([...options.publishedStoryContext!, episode]),
+          "你是独立连载故事编辑。只报告让读者无法理解主线的实质因果问题，不做文风打分。只返回 JSON。",
+          `${serialReadingContext(options.publishedStoryContext!, episodeNumber === options.episodes)}\n${serialSeamContext([...options.publishedStoryContext!, episode])}\n整季主线：${JSON.stringify(plan.narrativeSpine ?? null)}\n当前稿：${JSON.stringify({ title: episode.title, paragraphs: episode.paragraphs })}\n返回 {handoffs:[],issues:[]}。handoffs 对每个相邻接缝必须返回 {fromEpisode,handled,explanation}；第一集为空数组。核对眼前危险/待办在指定下一集如何处理或明确暂缓，不能用终集替代中间集。只有类似物件或主题不算承接，没有明确证据则 handled=false，禁止自行补过程。其他实质问题放 issues，最多4项 {kind,episodeNumber,paragraphNumber,explanation}；位置从1开始。kind 仅为 dropped_promise、unearned_rule、missing_cause、unproven_resolution。不要抄原文，由程序核对引用位置。不要求背景复述或非终集揭谜；已发布文字不改，只指出当前集应处理的缺口。`,
+          options.reviewModel || options.model, options.reviewTemperature,
+          { ...semanticPlanningModelPolicy(options), networkRetries: 1, structureRetries: 2, maxCompletionTokens: 4096 });
+        if (serialIssues.issues.length) {
+          const lessons = serialIssues.issues.map((issue) => `整季连读 ${issue.kind}：${issue.explanation}`);
+          discardedDraftLessons = [...discardedDraftLessons, ...lessons].slice(-20);
+          rejectedElite = undefined;
+          saveCheckpoint();
+          throw new StoryGenerationFailure(`第 ${episodeNumber} 集连读未通过：${lessons.join("；")}`, "SERIAL_NARRATIVE_GATE", "narrative", "new_candidates");
+        }
+        options.log(`[${episodeNumber}/${options.episodes}] 已通过已发布 ${generated.length} 集与当前稿的连读检查。`);
         reportProgress(
           options,
           "reviewing",

@@ -42,6 +42,7 @@ import {
   normalizeSeriesPlan,
   normalizeStoryCritique,
   normalizeTargetWords,
+  selectNarrativeTargetWords,
   narrativePreflightIssues,
   narrativeCompletionTokenBudget,
   parseJson,
@@ -85,6 +86,20 @@ import {
   shouldFuseStoryFailure,
 } from "../src/custom-story";
 import { StoryGenerationFailure } from "../scripts/story-generation/generation-policy";
+
+test("learning words come from actual prose regardless of malformed model word lists", () => {
+  const paragraphs = ["Dash’s friend opened the door. The little mouse found a small box near the floor.", "The friend helped carry the box back home."];
+  const words = selectNarrativeTargetWords(paragraphs, 5, ["missing", "box", "box", "Dash"], ["Dash"]);
+  assert.equal(words.length, 5);
+  assert.equal(new Set(words).size, 5);
+  assert.equal(words[0], "box");
+  assert.ok(!words.includes("missing"));
+  assert.ok(!words.includes("dash"));
+  assert.ok(!words.includes("s"));
+  for (const word of words) assert.ok(new RegExp(`\\b${word}\\b`, "i").test(paragraphs.join(" ")));
+  assert.equal(selectNarrativeTargetWords(paragraphs, 4, [], ["Dash"]).length, 4);
+  assert.deepEqual(selectNarrativeTargetWords(["a the to"], 5), []);
+});
 
 test("automatic quality retries are counted independently for each episode", () => {
   assert.equal(automaticQualityRetryLimit, 3);
