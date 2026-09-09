@@ -227,6 +227,18 @@ export class EcdictDictionary {
     return found;
   }
 
+  familiarWordBank(rankCutoff: number, acceptedTags: readonly string[], limit = 1800): string[] {
+    const tagConditions = acceptedTags.map(() => "(' ' || COALESCE(tag, '') || ' ') LIKE ?");
+    const rows = this.db.prepare(`SELECT word FROM stardict WHERE
+      (frq > 0 AND frq <= ?) OR (bnc > 0 AND bnc <= ?)
+      ${tagConditions.length ? `OR ${tagConditions.join(" OR ")}` : ""}
+      ORDER BY CASE WHEN frq > 0 THEN frq WHEN bnc > 0 THEN bnc ELSE 999999 END, word`).all(
+      rankCutoff, rankCutoff, ...acceptedTags.map((tag) => `% ${tag} %`),
+    ) as Array<{ word: string }>;
+    return [...new Set(rows.map((row) => row.word.toLowerCase()))]
+      .filter((word) => /^[a-z]{2,16}$/.test(word)).slice(0, limit);
+  }
+
   close() {
     this.db.close();
   }

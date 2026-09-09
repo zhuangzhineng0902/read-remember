@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { z } from "zod";
+import { readingDifficulty, readingLanguageBrief } from "../scripts/story-generation/reading-difficulty";
 import {
   assessStoryQuality,
   buildDiscardedDraftLessons,
@@ -19,6 +20,10 @@ import {
   episodeDraftFailureSummary,
   episodeWritingContractCapacityIssues,
   examVocabularyTags,
+  lexicalAllowedWords,
+  lexicalRepairProtectedTerms,
+  measureNarrativeVocabulary,
+  canReuseLexicalElite,
   fragmentSentenceRatio,
   isBorderlineStoryCritique,
   isTransientModelCapacityError,
@@ -77,7 +82,9 @@ import {
   isRecoverableStoryQualityFailure,
   shouldResumeInterruptedStory,
   storyFailureFingerprint,
+  shouldFuseStoryFailure,
 } from "../src/custom-story";
+import { StoryGenerationFailure } from "../scripts/story-generation/generation-policy";
 
 test("automatic quality retries are counted independently for each episode", () => {
   assert.equal(automaticQualityRetryLimit, 3);
@@ -887,6 +894,67 @@ test("middle-school publication accepts both junior and senior school dictionary
   assert.deepEqual(examVocabularyTags("high"), ["zk", "gk"]);
 });
 
+test("beginner language policy overrides exam vocabulary and avoids technical plot overload", () => {
+  for (const exam of ["middle", "high", "toeic", "toefl", "ielts"] as const) {
+    assert.deepEqual(examVocabularyTags(exam, "starter"), ["zk"]);
+    assert.deepEqual(examVocabularyTags(exam, "stage1"), ["zk"]);
+  }
+  assert.equal(readingDifficulty("starter").averageSentenceWords, 8);
+  assert.equal(readingDifficulty("starter").maximumSentenceWords, 18);
+  assert.match(readingLanguageBrief("starter"), /避免依赖多个专业零件/);
+  assert.match(readingLanguageBrief("starter"), /目标词、场景术语/);
+  const plan = structuredClone(validPlan);
+  plan.storyBible.fixedTerms = [{ english: "xylophonic tailgate", concept: "fictional mechanism" }];
+  const allowed = lexicalAllowedWords(plan);
+  assert.ok(!allowed.includes("tailgate"));
+  assert.ok(!allowed.includes("xylophonic"));
+  assert.ok(allowed.length > 0);
+});
+
+test("the same sentence is evaluated against reader level rather than exam alone", () => {
+  const episode = checkpointEpisode("Sentence difficulty");
+  const sentence = "The little team went down to the old house and looked for a small box near the open door.";
+  episode.paragraphs = Array.from({ length: 4 }, () => [sentence, sentence, sentence].join(" "));
+  const starter = assessStoryQuality(episode, { examId: "high", readerStage: "starter" }, 1);
+  const advanced = assessStoryQuality(episode, { examId: "high", readerStage: "stage5" }, 1);
+  assert.ok(starter.blockingIssues.some((issue) => issue.startsWith("最长句过长")));
+  assert.ok(!advanced.blockingIssues.some((issue) => issue.startsWith("最长句过长")));
+});
+
+test("lexical editing protects published terms, not unpublished difficult teaching words", () => {
+  const plan = structuredClone(validPlan);
+  plan.storyBible.fixedTerms = ["floorboards", "whistle", "hubcap"].map((english) => ({ english, concept: english }));
+  const previous = checkpointEpisode("Previous");
+  previous.paragraphs = ["Mia found the whistle."];
+  const firstProtected = lexicalRepairProtectedTerms(plan, null);
+  for (const word of ["floorboards", "whistle", "hubcap"]) assert.ok(!firstProtected.includes(word));
+  assert.ok(firstProtected.includes(plan.cast[0].name));
+  const laterProtected = lexicalRepairProtectedTerms(plan, previous);
+  assert.ok(laterProtected.includes("whistle"));
+  assert.ok(!laterProtected.includes("floorboards"));
+  assert.ok(!laterProtected.includes("hubcap"));
+});
+
+test("candidate vocabulary and final publication share the same measurement and floor", () => {
+  const episode = checkpointEpisode("Vocabulary test");
+  episode.paragraphs = Array.from({ length: 4 }, () => "Mia saw the hubcap and the floorboards near the whistle.");
+  episode.targetWords = ["hubcap", "floorboards", "whistle", "saw"];
+  const lexical = { lookup: (word: string) => ["hubcap", "floorboards", "whistle"].includes(word) ? 9999 : 1, allowedWords: ["Mia"] };
+  const candidate = measureNarrativeVocabulary(episode.paragraphs, 400, lexical);
+  const final = assessStoryQuality(episode, { examId: "middle", readerStage: "stage1" }, 1, lexical);
+  assert.equal(candidate.lexicalCoverage, final.lexicalCoverage);
+  assert.deepEqual(candidate.unfamiliarWords, final.unfamiliarWords);
+  assert.equal(passesStoryQualityFloor({ ...candidate, blockingIssues: [] }, 0.95), false);
+  assert.equal(passesStoryQualityFloor({ ...final, blockingIssues: [] }, 0.95), false);
+});
+
+test("failed vocabulary elites cannot return even when their semantic score was high", () => {
+  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.846 }, 0.95), false);
+  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.846 }, 0.95, true), false);
+  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.96 }, 0.95, true), false);
+  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.96 }, 0.95), true);
+});
+
 test("draft sentence budgets detect paragraph expansion without rejecting small variation", () => {
   const contract = buildEpisodeWritingContract({ examId: "middle" }, validPlan, 2);
   const withinBudget = {
@@ -1262,8 +1330,8 @@ test("story quality measures actual frequency coverage", () => {
     1,
     { lookup: (word) => word === "xylophonic" ? 5000 : 1 },
   );
-  assert.equal(qualityWithNewWord.lexicalCoverage, 1);
-  assert.deepEqual(qualityWithNewWord.unfamiliarWords, []);
+  assert.equal(qualityWithNewWord.lexicalCoverage, 0.9);
+  assert.deepEqual(qualityWithNewWord.unfamiliarWords, ["xylophonic"]);
 
   const checkpointValue = {
     version: 1,
@@ -1612,6 +1680,21 @@ test("identical story failures share a fingerprint but changed checkpoints do no
   assert.equal(storyFailureFingerprint("same failure", null, 3), first);
   assert.notEqual(storyFailureFingerprint("different failure", null, 3), first);
   assert.notEqual(storyFailureFingerprint("same failure", null, 4), first);
+});
+
+test("a saved season plan must not fuse different fresh candidate failures", () => {
+  const checkpoint = parseStoryGenerationCheckpoint({ version: 2, plan: validPlan, episodes: [] });
+  assert.ok(checkpoint);
+  assert.equal(shouldFuseStoryFailure(new Error("same message"), checkpoint, 2), false);
+  const active = {
+    ...checkpoint,
+    activeEpisode: { index: 0, stage: "mechanical_repaired" as const,
+      episode: checkpointEpisode("saved draft"), fullRewriteCount: 1,
+      mechanicalRepairUsed: true, semanticRewriteUsed: false },
+  };
+  assert.equal(shouldFuseStoryFailure(new Error("same message"), active, 2), true);
+  assert.equal(shouldFuseStoryFailure(new Error("same message"), active, 1), false);
+  assert.equal(shouldFuseStoryFailure(new StoryGenerationFailure("same message", "CANDIDATE_LEXICAL_GATE", "lexical", "new_candidates"), active, 2), false);
 });
 
 test("model JSON parser skips regex examples before the real object", () => {

@@ -57,10 +57,19 @@ export function compressionDriftIssues(original: NarrativeText, compressed: Narr
   return issues;
 }
 
+export function lexicalEditWordBudget(originalWords: number, publishMinimum: number, publishMaximum: number) {
+  // Explaining one hard word may require several easy words. Keep the
+  // anti-summary deletion budget small, independently of bounded expansion.
+  return {
+    maximumRemoved: Math.max(0, Math.min(originalWords - publishMinimum, Math.max(6, Math.round(originalWords * 0.025)))),
+    maximumAdded: Math.max(0, Math.min(publishMaximum - originalWords, Math.max(6, Math.ceil(originalWords * 0.08)))),
+  };
+}
+
 export function lexicalEditDriftIssues(
   original: NarrativeText & { title: string },
   edited: NarrativeText & { title: string },
-  maximumWordDelta = 6,
+  maximumWordDelta: number | ReturnType<typeof lexicalEditWordBudget> = 6,
 ) {
   const issues: string[] = [];
   const originalWordCount = narrativeWordCount(original);
@@ -69,9 +78,11 @@ export function lexicalEditDriftIssues(
   if (edited.paragraphs.length !== original.paragraphs.length) {
     issues.push(`词汇简化改变了段数：${original.paragraphs.length} → ${edited.paragraphs.length}`);
   }
-  if (Math.abs(editedWordCount - originalWordCount) > maximumWordDelta) {
+  const removed = typeof maximumWordDelta === "number" ? maximumWordDelta : maximumWordDelta.maximumRemoved;
+  const added = typeof maximumWordDelta === "number" ? maximumWordDelta : maximumWordDelta.maximumAdded;
+  if (editedWordCount < originalWordCount - removed || editedWordCount > originalWordCount + added) {
     issues.push(
-      `词汇简化改变正文长度过多：${originalWordCount} → ${editedWordCount} 词，允许波动 ${maximumWordDelta} 词`,
+      `词汇简化改变正文长度过多：${originalWordCount} → ${editedWordCount} 词，最多删 ${removed} 词、增 ${added} 词`,
     );
   }
   for (let index = 0; index < Math.min(original.paragraphs.length, edited.paragraphs.length); index++) {

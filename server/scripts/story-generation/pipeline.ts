@@ -9,8 +9,9 @@ import {
   storyEpisodeAttemptBudget,
 } from "./attempt-policy";
 import { StoryGenerationFailure, storyGenerationPolicy } from "./generation-policy";
-import { compressionDriftIssues, lexicalEditDriftIssues, trimTinyNarrativeOverflow } from "./edit-guards";
+import { compressionDriftIssues, lexicalEditDriftIssues, lexicalEditWordBudget, trimTinyNarrativeOverflow } from "./edit-guards";
 import { isTransientModelCapacityError } from "./model-errors";
+import { readingDifficulty, readingLanguageBrief } from "./reading-difficulty";
 import {
   buildNarrativeCraftBrief,
   classicSources,
@@ -1409,7 +1410,8 @@ function gradedReadingBrief(options: Pick<StoryRunOptions, "examId" | "readerSta
   const profile = resolveReaderProfile(options);
   const audience = examGuide[options.examId].audience;
   return `分级阅读档位：${profile.label}，CEFR ${profile.cefr}，以约 ${profile.headwords} 个核心高频词为词汇控制参考。
-这个档位只控制英语难度，不代表读者年龄；题材、人物选择、幽默和推理复杂度仍须面向${audience}，Starter 也不能写成 3-6 岁幼儿故事。
+这个档位控制英语和表达难度，不代表读者年龄；题材、人物选择和幽默仍须面向${audience}，Starter 也不能写成 3-6 岁幼儿故事。推理应清楚可见，不用复杂术语增加理解负担。
+${readingLanguageBrief(profile.id)}
 采用成熟分级读物的方法，但不模仿任何具体书虫文本：约 95% 正文使用该档高频、具体、易成像的词；同一人物、地点和关键物件保持固定称呼；少用同义替换；难概念先用动作或情境铺垫；每集最多引入 ${profile.maxNewWords} 个值得学习的新词，并让词义可从上下文猜出。输出前逐词检查拼写和空格，禁止把 maybe stealing 写成 maybest ealing 一类粘连、断词或漏字母形式；角色口癖也必须由正确英文单词组成。`;
 }
 
@@ -1580,7 +1582,8 @@ export function buildEpisodeWritingContract(
   // hard preflight instead of wasting an entire critique round.
   const paragraphMin = Math.ceil(preferredMin / 4);
   const paragraphMax = Math.ceil(preferredMax / 4);
-  const initialSentenceMaximum = Math.max(10, examGuide[options.examId].maxSentenceWords - 2);
+  const initialSentenceMaximum = Math.min(examGuide[options.examId].maxSentenceWords - 2,
+    readingDifficulty(resolveReaderProfile({ ...options, readerStage: options.readerStage ?? "auto" }).id).averageSentenceWords + 2);
   const preferredTotal = Math.floor((preferredMin + preferredMax) / 2);
   const sentenceTotal = Math.max(12, Math.ceil(preferredTotal / Math.max(9, initialSentenceMaximum - 1)));
   const maximumWordsPerSentence = Math.max(
@@ -1692,7 +1695,7 @@ ${buildNarrativeCraftBrief(options, beat.number)}
 - 正文目标 ${range[0]}-${range[1]} 个英文词，允许的发布硬范围为 ${publishRange[0]}-${publishRange[1]} 词；写成恰好 4 个自然段。
 - title、paragraphs 和 qualityEvidence 中的原文证据只能使用英语，严禁出现任何中文汉字；中文只允许出现在 continuitySummary 和 storyState。
 - 面向${level.audience}，优先使用约 ${readerProfile.headwords} 词档的核心高频词；只设置 4-${readerProfile.maxNewWords} 个可从语境猜出的 targetWords。
-- 平均句长不超过约 ${level.maxSentenceWords} 词；关键动作使用短句。
+- 平均句长不超过约 ${Math.min(level.maxSentenceWords, readingDifficulty(readerProfile.id).averageSentenceWords)} 词；关键动作使用短句。
 - 对话简短自然，使用英语母语者在该场景中会说的表达；自然加入一个适龄常用表达（例如请求、犹豫、安慰或承认错误），通过上下文让意思清楚，禁止堆砌俚语或直译中文成语。
 - 不为追求“文学感”频繁替换同义词；相同事物尽量沿用相同称呼，让孩子凭上下文建立词义。
 
@@ -1844,7 +1847,11 @@ function reviewPrompt(
   episodeNumber: number,
   previousEpisode: GeneratedStoryEpisode | null,
 ) {
-  const level = examGuide[options.examId];
+  const level = {
+    ...examGuide[options.examId],
+    maxSentenceWords: Math.min(examGuide[options.examId].maxSentenceWords,
+      readingDifficulty(resolveReaderProfile(options).id).averageSentenceWords),
+  };
   const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
   const range = contract.wordRange;
   const publishRange = contract.publishWordRange;
@@ -2141,6 +2148,51 @@ export function normalizeLexicalToken(value: string) {
     .replace(/(?:'s|’s)$/, "");
 }
 
+export function measureNarrativeVocabulary(
+  paragraphs: string[], headwords: number,
+  lexical: { lookup: LexicalRankLookup; isFamiliar?: LexicalFamiliarityLookup; allowedWords?: string[] },
+) {
+  const words = paragraphs.join(" ").match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? [];
+  const allowed = new Set((lexical.allowedWords ?? []).map(normalizeLexicalToken));
+  const counts = new Map<string, number>();
+  for (const word of words) {
+    const normalized = normalizeLexicalToken(word);
+    const rank = lexical.lookup(normalized);
+    if (alwaysFamiliarLexicalWords.has(normalized) || allowed.has(normalized)
+      || lexical.isFamiliar?.(normalized) || (rank !== null && rank <= headwords * 3)) continue;
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+  return {
+    wordCount: words.length,
+    lexicalCoverage: words.length ? Number((1 - [...counts.values()].reduce((a, b) => a + b, 0) / words.length).toFixed(3)) : null,
+    unfamiliarWords: [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 12).map(([word]) => word),
+  };
+}
+
+function draftVocabulary(options: StoryRunOptions, plan: SeriesPlan, narrative: { paragraphs: string[] }) {
+  const dictionary = openEcdict(options.ecdictPath);
+  if (!dictionary) return { wordCount: narrativeWordCount(narrative), lexicalCoverage: null, unfamiliarWords: [] as string[] };
+  try {
+    const profile = resolveReaderProfile(options);
+    return measureNarrativeVocabulary(narrative.paragraphs, profile.headwords, {
+      lookup: (word) => dictionary.frequencyRank(word),
+      isFamiliar: (word) => dictionary.hasVocabularyTag(word, examVocabularyTags(options.examId, profile.id)),
+      allowedWords: lexicalAllowedWords(plan),
+    });
+  } finally { dictionary.close(); }
+}
+
+function vocabularyWritingGuide(options: StoryRunOptions) {
+  const dictionary = openEcdict(options.ecdictPath);
+  if (!dictionary) return "";
+  try {
+    const profile = resolveReaderProfile(options);
+    const bank = dictionary.familiarWordBank(profile.headwords * 3, examVocabularyTags(options.examId, profile.id));
+    return `\n当前程序已确认的熟词参考表（不是必须全部使用的词；优先使用这些词及其正确屈折形式）：${bank.join(", ")}\n`
+      + "用这个词表表达动作与物件，不要只是把难词换成另一个同样超纲的近义词。允许自然的简单短语解释；保留剧情，不要堆砌词表。";
+  } finally { dictionary.close(); }
+}
+
 function wordSimilarity(left: string, right: string) {
   const leftWords = new Set(narrativeWords(left));
   const rightWords = new Set(narrativeWords(right));
@@ -2210,9 +2262,11 @@ export function assessStoryQuality(
     if (words.length > publishRange[1]) block(issue);
     else issues.push(issue);
   }
-  if (averageSentenceWords > level.maxSentenceWords + 2) block(`平均句长过高：${averageSentenceWords.toFixed(1)}`);
-  if (longestSentenceWords > level.maxSentenceWords + 6) {
-    block(`最长句过长：${longestSentenceWords} > ${level.maxSentenceWords + 6}`);
+  const languageLimits = readingDifficulty(readerProfile.id);
+  if (averageSentenceWords > Math.min(level.maxSentenceWords, languageLimits.averageSentenceWords) + 2) block(`平均句长过高：${averageSentenceWords.toFixed(1)}`);
+  const sentenceMaximum = Math.min(level.maxSentenceWords + 6, languageLimits.maximumSentenceWords);
+  if (longestSentenceWords > sentenceMaximum) {
+    block(`最长句过长：${longestSentenceWords} > ${sentenceMaximum}`);
   }
   const fragmentRatio = fragmentSentenceRatio(text);
   if (fragmentRatio > 0.3) block(`碎片化短句过多：${(fragmentRatio * 100).toFixed(0)}% 的句子不超过 4 词`);
@@ -2342,36 +2396,11 @@ export function assessStoryQuality(
     }
   }
   if (lexical && words.length) {
-    // 每集明确选出的目标词就是允许孩子少量查阅的新词，不应反过来被
-    // 高频词门禁判为超纲；人物名和固定世界术语同样由调用方加入白名单。
-    const allowed = new Set(
-      [...(lexical.allowedWords ?? []), ...episode.targetWords].map(normalizeLexicalToken),
-    );
-    const rankCutoff = readerProfile.headwords * 3;
-    const unfamiliarCounts = new Map<string, number>();
-    let familiarCount = 0;
-    for (const word of words) {
-      const normalized = normalizeLexicalToken(word);
-      const rank = lexical.lookup(normalized);
-      if (
-        alwaysFamiliarLexicalWords.has(normalized)
-        ||
-        allowed.has(normalized)
-        || lexical.isFamiliar?.(normalized)
-        || (rank !== null && rank <= rankCutoff)
-      ) {
-        familiarCount++;
-      } else {
-        unfamiliarCounts.set(normalized, (unfamiliarCounts.get(normalized) ?? 0) + 1);
-      }
-    }
-    lexicalCoverage = familiarCount / words.length;
-    unfamiliarWords = [...unfamiliarCounts.entries()]
-      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-      .slice(0, 12)
-      .map(([word]) => word);
+    const measured = measureNarrativeVocabulary(episode.paragraphs, readerProfile.headwords, lexical);
+    lexicalCoverage = measured.lexicalCoverage;
+    unfamiliarWords = measured.unfamiliarWords;
     const minimum = options.minLexicalCoverage ?? 0.95;
-    if (lexicalCoverage < minimum) {
+    if (lexicalCoverage !== null && lexicalCoverage < minimum) {
       issues.push(
         `高频词覆盖率不足：${(lexicalCoverage * 100).toFixed(1)}% < ${(minimum * 100).toFixed(0)}%；优先简化 ${unfamiliarWords.slice(0, 8).join(", ")}`,
       );
@@ -2894,8 +2923,9 @@ async function generateEpisodeDraft(
 ) {
   const episodeNumber = index + 1;
   // One queue attempt owns exactly one fresh candidate batch and one fusion.
-  if (eliteRejected && narrativePreflightIssues(options, plan, episodeNumber, eliteRejected.narrative).length) {
-    options.log(`[${episodeNumber}/${options.episodes}] 历史精英稿未通过正文完整性检查，已隔离，不能继续作为编辑底稿。`);
+  if (eliteRejected && (narrativePreflightIssues(options, plan, episodeNumber, eliteRejected.narrative).length
+    || !canReuseLexicalElite(draftVocabulary(options, plan, eliteRejected.narrative), options.minLexicalCoverage))) {
+    options.log(`[${episodeNumber}/${options.episodes}] 历史精英稿未通过正文完整性或词汇门禁，已隔离，不能继续作为编辑底稿。`);
     eliteRejected = null;
     onLessons?.(discardedDraftLessons, null);
   }
@@ -2911,9 +2941,10 @@ async function generateEpisodeDraft(
       : storyEpisodeAttemptBudget.initialCandidates,
   );
   const promptLessons = selectDraftLessonsForPrompt(discardedDraftLessons);
-  const failureLessonBrief = promptLessons.length
+  const vocabularyGuide = vocabularyWritingGuide(options);
+  const failureLessonBrief = (promptLessons.length
     ? `\n\n以前被质量门禁作废的稿件留下了以下精简经验。它们不是故事事实，禁止在正文中提及“评审、分数、旧稿或失败”；动笔前逐条转换为预防动作：\n${promptLessons.map((lesson, lessonIndex) => `${lessonIndex + 1}. ${lesson}`).join("\n")}`
-    : "";
+    : "") + vocabularyGuide;
   reportProgress(
     options,
     "drafting",
@@ -2941,7 +2972,7 @@ async function generateEpisodeDraft(
     options.log(`[${episodeNumber}/${options.episodes}] 候选 ${candidateIndex + 1} 失败，保留其余稿件，仅补跑该候选一次。`);
     candidateResults[candidateIndex] = (await Promise.allSettled([generateCandidate(candidateIndex)]))[0];
   }
-  const freshDrafts = candidateResults.flatMap((result, candidateIndex) => {
+  let freshDrafts = candidateResults.flatMap((result, candidateIndex) => {
     if (result.status === "fulfilled") return [result.value];
     options.log(
       `第 ${episodeNumber} 集素材初稿 ${candidateIndex + 1} 在自动恢复后仍不可用，`
@@ -2950,6 +2981,29 @@ async function generateEpisodeDraft(
     return [];
   });
   diagnostics.rawWordCounts.push(...freshDrafts.map(narrativeWordCount));
+  const vocabularyChecks = freshDrafts.map((draft) => draftVocabulary(options, plan, draft));
+  const eligible = vocabularyChecks.map((quality) => passesStoryQualityFloor({ ...quality, blockingIssues: [] }, options.minLexicalCoverage));
+  for (const [candidateIndex, quality] of vocabularyChecks.entries()) {
+    if (eligible[candidateIndex]) continue;
+    const lesson = `候选词汇提前检查未通过：${((quality.lexicalCoverage ?? 0) * 100).toFixed(1)}%；先简化 ${quality.unfamiliarWords.join(", ")}，不要保护未发布的教学目标词。`;
+    options.log(`[${episodeNumber}/${options.episodes}] 候选 ${candidateIndex + 1} ${lesson}`);
+    discardedDraftLessons = [...discardedDraftLessons, lesson].slice(-20);
+  }
+  // One bounded rescue per batch, before any semantic review or metadata.
+  // If another candidate already passes, do not spend a model call on bad ones.
+  if (freshDrafts.length && !eligible.some(Boolean)) {
+    const best = vocabularyChecks.reduce((winner, value, index) =>
+      (value.lexicalCoverage ?? 1) > (vocabularyChecks[winner].lexicalCoverage ?? 1) ? index : winner, 0);
+    options.log(`[${episodeNumber}/${options.episodes}] 本批词汇均未过线，仅对覆盖率最高的候选执行一次前置换词，不生成元数据。`);
+    freshDrafts[best] = await simplifyNarrativeVocabulary(options, plan, episodeNumber, freshDrafts[best], vocabularyChecks[best].unfamiliarWords, previousEpisode);
+    eligible[best] = passesStoryQualityFloor({ ...draftVocabulary(options, plan, freshDrafts[best]), blockingIssues: [] }, options.minLexicalCoverage);
+  }
+  freshDrafts = freshDrafts.filter((_, candidateIndex) => eligible[candidateIndex]);
+  onLessons?.(discardedDraftLessons, eliteRejected);
+  if (vocabularyChecks.length && !freshDrafts.length && !eliteRejected) {
+    throw new StoryGenerationFailure(`第 ${episodeNumber} 集候选词汇门禁未通过；一次前置换词后仍未达标，已停止评审和元数据生成，保留难词经验供下一批使用`,
+      "CANDIDATE_LEXICAL_GATE", "lexical", "new_candidates");
+  }
   const drafts = eliteRejected
     ? [...freshDrafts, eliteRejected.narrative]
     : freshDrafts;
@@ -3359,10 +3413,16 @@ async function generateEpisodeDraft(
       "new_candidates",
     );
   }
+  const selectedVocabulary = draftVocabulary(options, plan, narrative);
+  if (!passesStoryQualityFloor({ ...selectedVocabulary, blockingIssues: [] }, options.minLexicalCoverage)) {
+    onLessons?.([...synthesisLessons, `严选后正文仍需简化：${selectedVocabulary.unfamiliarWords.join(", ")}`].slice(-20), null);
+    throw new StoryGenerationFailure(`第 ${episodeNumber} 集编辑后的正文词汇门禁未通过，未生成元数据；请简化 ${selectedVocabulary.unfamiliarWords.join(", ")}`,
+      "CANDIDATE_LEXICAL_GATE", "lexical", "new_candidates");
+  }
   reportProgress(
     options,
     "drafting",
-    `第 ${episodeNumber} 集已通过 7/7.5 严选，正在单独生成连续性状态和质量证据`,
+    `第 ${episodeNumber} 集已通过 7/7.5 严选和词汇门禁，正在单独生成连续性状态和质量证据`,
     episodeProgress(options, index, 0.52),
   );
   const metadata = await completeEpisodeMetadata(
@@ -3375,6 +3435,52 @@ async function generateEpisodeDraft(
   const episode = mergeEpisodeStructure(narrative, metadata);
   if (!episode) throw new Error(`第 ${episodeNumber} 集最佳正文与元数据合并失败`);
   return { episode, critique, discardedDraftLessons: synthesisLessons };
+}
+
+export function lexicalRepairProtectedTerms(plan: SeriesPlan, previousEpisode: GeneratedStoryEpisode | null) {
+  // Published terminology is a continuity constraint; unpublished teaching
+  // words are editable and will be selected again after the prose changes.
+  return [...plan.cast.map((character) => character.name),
+    ...plan.storyBible.fixedTerms.filter((term) => previousEpisode?.paragraphs.some(
+      (paragraph) => paragraph.toLowerCase().includes(term.english.toLowerCase()),
+    )).map((term) => term.english)];
+}
+
+async function simplifyNarrativeVocabulary(
+  options: StoryRunOptions, plan: SeriesPlan, episodeNumber: number,
+  originalNarrative: z.infer<typeof episodeNarrativeSchema>, unfamiliarWords: string[],
+  previousEpisode: GeneratedStoryEpisode | null,
+) {
+  const originalWordCount = narrativeWordCount(originalNarrative);
+  const publishRange = buildEpisodeWritingContract(options, plan, episodeNumber).publishWordRange;
+  const wordBudget = lexicalEditWordBudget(originalWordCount, publishRange[0], publishRange[1]);
+  const protectedTerms = lexicalRepairProtectedTerms(plan, previousEpisode);
+  const before = draftVocabulary(options, plan, originalNarrative);
+  const edited = await callEpisodeNarrative(
+    options,
+    "你只输出 title 和 paragraphs 的合法 JSON。你是分级英语局部换词编辑，不是摘要员。保留事件、句子和因果，只简化词汇。",
+    `${gradedReadingBrief(options)}${vocabularyWritingGuide(options)}\n唯一可编辑正文：${JSON.stringify(originalNarrative)}\n`
+      + `优先简化：${JSON.stringify(unfamiliarWords)}\n必须保留的人名和已发布术语：${JSON.stringify(protectedTerms)}\n`
+      + `当前程序实测覆盖率 ${((before.lexicalCoverage ?? 0) * 100).toFixed(1)}%，目标 ${(options.minLexicalCoverage * 100).toFixed(0)}%。不是只替换一个词：应检查所有非熟词，尤其重复出现的难词，优先从参考表选择意思正确的表达。`
+      + "尚未发布的固定物件称呼和教学目标词可以统一换成常见表达，但不能改变物件身份或剧情事实。后续会重新生成目标词、注释与原文证据，不要为保留旧学习词表而拒绝换词。"
+      + `四段、句子数量、动作、对话和结局保持，标题原样保留。正文 ${originalWordCount - wordBudget.maximumRemoved}-${originalWordCount + wordBudget.maximumAdded} 词，不删句、不添加事件。允许把难词展开为简单短语，但不要添加装饰、重复说明或新剧情。只返回 title 和 paragraphs。`,
+    options.structureRepairModel || options.reviewModel || options.model, 0.1,
+    { timeoutMs: options.timeoutMs, networkRetries: 1, structureRetries: 1,
+      maxCompletionTokens: narrativeCompletionTokenBudget(buildEpisodeWritingContract(options, plan, episodeNumber).publishWordRange[1]), disableThinking: true },
+  );
+  const after = draftVocabulary(options, plan, edited);
+  options.log(`[${episodeNumber}/${options.episodes}] 换词实测：${originalWordCount} → ${after.wordCount} 词；覆盖率 ${before.lexicalCoverage} → ${after.lexicalCoverage}；剩余难词：${after.unfamiliarWords.join(", ")}`);
+  const issues = [...narrativePreflightIssues(options, plan, episodeNumber, edited),
+    ...lexicalEditDriftIssues(originalNarrative, edited, wordBudget)];
+  if (issues.length) {
+    options.log(`[${episodeNumber}/${options.episodes}] 局部换词越界，保留原稿：${issues.join("；")}`);
+    return originalNarrative;
+  }
+  if (before.lexicalCoverage !== null && after.lexicalCoverage !== null && after.lexicalCoverage <= before.lexicalCoverage) {
+    options.log(`[${episodeNumber}/${options.episodes}] 局部换词未提高覆盖率，保留原稿。`);
+    return originalNarrative;
+  }
+  return edited;
 }
 
 async function repairEpisode(
@@ -3421,50 +3527,12 @@ async function repairEpisode(
       title: episode.title,
       paragraphs: episode.paragraphs,
     });
-    const originalWordCount = narrativeWordCount(originalNarrative);
-    const maximumWordDelta = Math.max(6, Math.round(originalWordCount * 0.025));
-    const protectedTerms = [
-      ...plan.cast.map((character) => character.name),
-      ...plan.storyBible.fixedTerms.map((term) => term.english),
-      ...episode.targetWords,
-    ];
     options.log(
       `[${episodeNumber}/${options.episodes}] 剧情已通过，当前只差词汇覆盖率；`
-      + `执行一次等长局部换词（${originalWordCount} 词，最多波动 ${maximumWordDelta} 词），禁止删减剧情。`,
+      + "执行一次保守局部换词，禁止删减剧情。",
     );
-    const editedNarrative = await callEpisodeNarrative(
-      options,
-      "你只输出 title 和 paragraphs 的合法 JSON。你是分级英语局部换词编辑，不是摘要员或故事改写者。只能用更常见的词替换指定难词，不得删除句子、缩短情节、改变事件或重排段落。",
-      `唯一可编辑正文：${JSON.stringify(originalNarrative)}\n`
-        + `优先替换的难词：${JSON.stringify(quality.unfamiliarWords)}\n`
-        + `禁止修改的人名、固定术语和教学目标词：${JSON.stringify(protectedTerms)}\n\n`
-        + `标题必须原样返回；四段、句子数量、对话、动作、因果、线索、伏笔和结尾悬念必须保持。`
-        + `原文 ${originalWordCount} 词，修改后必须在 ${originalWordCount - maximumWordDelta}-${originalWordCount + maximumWordDelta} 词；`
-        + "每个替换尽量只改一个词或一个短语，不要删句，不要合句，不要添加新事件。"
-        + "只返回 {\"title\":\"原标题\",\"paragraphs\":[\"paragraph 1\",\"paragraph 2\",\"paragraph 3\",\"paragraph 4\"]}。",
-      options.structureRepairModel || options.reviewModel || options.model,
-      0.1,
-      {
-        timeoutMs: options.timeoutMs,
-        networkRetries: 1,
-        structureRetries: 1,
-        maxCompletionTokens: narrativeCompletionTokenBudget(
-          buildEpisodeWritingContract(options, plan, episodeNumber).publishWordRange[1],
-        ),
-        disableThinking: true,
-      },
-    );
-    const editIssues = [
-      ...narrativePreflightIssues(options, plan, episodeNumber, editedNarrative),
-      ...lexicalEditDriftIssues(originalNarrative, editedNarrative, maximumWordDelta),
-    ];
-    if (editIssues.length) {
-      options.log(
-        `[${episodeNumber}/${options.episodes}] 等长局部换词越界，已丢弃并保留 ${originalWordCount} 词高质量原稿：`
-        + editIssues.join("；"),
-      );
-      return episode;
-    }
+    const editedNarrative = await simplifyNarrativeVocabulary(options, plan, episodeNumber, originalNarrative, quality.unfamiliarWords, previousEpisode);
+    if (editedNarrative === originalNarrative) return episode;
     const metadata = await completeEpisodeMetadata(
       options,
       plan,
@@ -3725,14 +3793,14 @@ async function materializeReviewedNarrative(
   return episode;
 }
 
-function lexicalAllowedWords(plan: SeriesPlan) {
+export function lexicalAllowedWords(plan: SeriesPlan) {
   return [
     ...plan.cast.flatMap((character) => character.name.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? []),
-    ...plan.storyBible.fixedTerms.flatMap((term) => term.english.match(/[A-Za-z]+(?:['-][A-Za-z]+)*/g) ?? []),
   ];
 }
 
-export function examVocabularyTags(examId: ExamId) {
+export function examVocabularyTags(examId: ExamId, stage?: ResolvedReaderStageId) {
+  if (stage === "starter" || stage === "stage1") return ["zk"];
   // ECDICT's zk list is narrower than the vocabulary used in natural junior-
   // high stories: ordinary words such as jar, sealed, slipped, whispered and
   // calm are tagged gk only. Treat both school lists as familiar for publishing
@@ -3750,7 +3818,7 @@ function meetsQualityTarget(quality: StoryQuality, targetCoverage: number) {
     && (quality.lexicalCoverage === null || quality.lexicalCoverage >= targetCoverage);
 }
 
-export function passesStoryQualityFloor(quality: StoryQuality, targetCoverage: number) {
+export function passesStoryQualityFloor(quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount" | "blockingIssues">, targetCoverage: number) {
   const publishableCoverage = Math.min(targetCoverage, 0.9);
   const uncoveredWordsAboveFloor = quality.lexicalCoverage === null
     ? 0
@@ -3760,6 +3828,13 @@ export function passesStoryQualityFloor(quality: StoryQuality, targetCoverage: n
     // rounded ratio. Permit one token of dictionary/rounding uncertainty so a
     // 268-word story at 89.7% cannot loop merely to cross a floating threshold.
     && uncoveredWordsAboveFloor <= 1.0001;
+}
+
+export function canReuseLexicalElite(
+  quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount">,
+  targetCoverage: number, repairExhausted = false,
+) {
+  return !repairExhausted && passesStoryQualityFloor({ ...quality, blockingIssues: [] }, targetCoverage);
 }
 
 export function prioritizeTargetWords(
@@ -3796,7 +3871,7 @@ function assessRuntimeStoryQuality(
   plan: SeriesPlan,
   previousEpisode: GeneratedStoryEpisode | null,
 ) {
-  let quality = assessStoryQuality(episode, options, episodeNumber, lexical, plan, previousEpisode);
+  const quality = assessStoryQuality(episode, options, episodeNumber, lexical, plan, previousEpisode);
   if (
     lexical
     && quality.lexicalCoverage !== null
@@ -3819,23 +3894,11 @@ function assessRuntimeStoryQuality(
       prioritized.length >= 4
       && prioritized.join("|") !== episode.targetWords.map(normalizeLexicalToken).join("|")
     ) {
-      const before = quality.lexicalCoverage;
-      const previousTargetWords = episode.targetWords;
       episode.targetWords = prioritized;
-      const adjusted = assessStoryQuality(episode, options, episodeNumber, lexical, plan, previousEpisode);
-      if (adjusted.lexicalCoverage !== null && adjusted.lexicalCoverage > before + 0.0005) {
-        quality = adjusted;
-        options.log(
-          `[${episodeNumber}/${options.episodes}] 已按正文原始难词频率自动选择 ${prioritized.length} 个目标词，`
-          + `高频词覆盖率从 ${(before * 100).toFixed(1)}% 调整为 ${(adjusted.lexicalCoverage * 100).toFixed(1)}%；`
-          + "目标词更新只在覆盖率严格上升时采用。",
-        );
-      } else {
-        episode.targetWords = previousTargetWords;
-      }
+      options.log(`[${episodeNumber}/${options.episodes}] 已选择 ${prioritized.length} 个正文生词用于学习；选择目标词不改变真实词汇覆盖率。`);
     }
   }
-  return quality;
+  return assessStoryQuality(episode, options, episodeNumber, lexical, plan, previousEpisode);
 }
 
 const metadataQualityIssuePatterns = [
@@ -4138,7 +4201,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
     const lexical = dictionary
       ? {
           lookup: (word: string) => dictionary.frequencyRank(word),
-          isFamiliar: (word: string) => dictionary.hasVocabularyTag(word, examVocabularyTags(options.examId)),
+          isFamiliar: (word: string) => dictionary.hasVocabularyTag(word, examVocabularyTags(options.examId, resolveReaderProfile(options).id)),
           allowedWords: lexicalAllowedWords(plan),
         }
       : undefined;
@@ -4242,8 +4305,13 @@ export async function runStoryGeneration(options: StoryRunOptions) {
               paragraphs: savedActive.episode.paragraphs,
             });
             const rejectedReview = savedActive.semanticReview ?? savedActive.critique;
+            if (savedActive.lexicalRepairExhausted && rejectedElite?.index === index) {
+              rejectedElite = undefined;
+              options.log(`[${episodeNumber}/${options.episodes}] 已隔离词汇修复耗尽的旧稿，本轮不再将其恢复为精英候选。`);
+            }
             if (
               rejectedNarrative.success
+              && canReuseLexicalElite(exhaustedQuality, options.minLexicalCoverage, savedActive.lexicalRepairExhausted)
               && rejectedReview
               && (!rejectedElite || rejectedElite.index !== index
                 || isCritiqueBetter(rejectedReview, rejectedElite.critique))

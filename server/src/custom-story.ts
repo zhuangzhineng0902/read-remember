@@ -123,6 +123,17 @@ export function storyFailureFingerprint(
   })).digest("hex");
 }
 
+export function shouldFuseStoryFailure(
+  error: unknown, checkpoint: StoryGenerationCheckpoint | null, repeatedCount: number,
+) {
+  // A saved season plan is not a saved failed draft. Fresh candidate batches
+  // may share the same error text while containing entirely different prose.
+  return Boolean(checkpoint?.activeEpisode)
+    && !(error instanceof StoryGenerationFailure && error.retryScope === "new_candidates")
+    && !isTransientModelCapacityError(error)
+    && repeatedCount >= 2;
+}
+
 export function shouldResumeInterruptedStory(
   retryEpisode: number,
   retryCount: number,
@@ -366,9 +377,7 @@ export class CustomStoryService implements CustomStoryProvider {
       // fresh model outputs. Only fuse repeated failures when the exact same
       // persisted artifact is being retried; otherwise the normal bounded
       // automatic retry budget should apply.
-      const repeatedCheckpointFailure = Boolean(savedCheckpoint)
-        && !infrastructureFailure
-        && repeatedFailureCount >= 2;
+      const repeatedCheckpointFailure = shouldFuseStoryFailure(error, savedCheckpoint, repeatedFailureCount);
       if (repeatedCheckpointFailure) {
         this.appendStoryLog(
           request.id,
