@@ -12,7 +12,8 @@ import { StoryGenerationFailure, storyGenerationPolicy } from "./generation-poli
 import { compressionDriftIssues, lexicalEditDriftIssues, lexicalEditWordBudget, trimTinyNarrativeOverflow } from "./edit-guards";
 import { isTransientModelCapacityError } from "./model-errors";
 import { spineFeasibilitySchema, spineIsFeasible, feasibilityReviewInstructions,
-  lexicalFailureBatchSchema, recurringPlanWords } from "./plan-feasibility";
+  lexicalFailureBatchSchema, recurringPlanWords, planningFailureBrief, planningHistorySchema,
+  rememberPlanReview, type PlanningHistory } from "./plan-feasibility";
 import { seasonSpineSchema, handoffTextSchema, entryBridgeSchema, publishedNarrativeHash,
   serialReadingContext, serialSeamContext, groundedSerialAuditSchema, type PublishedNarrative } from "./serial-narrative";
 import { readingDifficulty, readingLanguageBrief } from "./reading-difficulty";
@@ -724,6 +725,8 @@ export type StoryEpisodeImported = {
 };
 
 export type StoryRunOptions = {
+  planningHistory?: PlanningHistory;
+  onPlanningHistory?: (history: PlanningHistory) => void;
   planningContext?: string;
   onLexicalBatchFailure?: (episode: number, words: string[]) => void;
   /** Per-run, read-only published prose supplied to serial checks. Never user instructions. */
@@ -2558,18 +2561,20 @@ async function approveNarrativeSpine(options: StoryRunOptions, initial: z.infer<
   for (let attempt = 0; attempt < 2; attempt++) {
     const review = await callStructured(options, spineFeasibilitySchema,
       feasibilityReviewInstructions,
-      `${gradedReadingBrief(options)}\n每集篇幅：${JSON.stringify(storyWordLimits(options, 1))}\n完整故事：${JSON.stringify(spine)}\n已发布正文及修改边界：${options.planningContext ?? "尚无已发布正文"}`,
+      `审查对象是中文主线，不是英文成文。目标档位：${resolveReaderProfile(options).label} / ${resolveReaderProfile(options).cefr}；仅判断概念能否用简单英语表达。\n完整故事：${JSON.stringify(spine)}\n已发布正文及修改边界：${options.planningContext ?? "尚无已发布正文"}`,
       options.reviewModel || options.model, options.reviewTemperature,
       { ...semanticPlanningModelPolicy(options), networkRetries: 1, structureRetries: 2, maxCompletionTokens: 2048 });
+    options.planningHistory = rememberPlanReview(options.planningHistory ?? [], spine, review);
+    options.onPlanningHistory?.(options.planningHistory);
     if (spineIsFeasible(review)) {
       options.log("整季主线已通过独立因果与分级表达可行性检查，允许进入分集策划。");
       return spine;
     }
-    options.log(`整季主线未通过可行性检查：${review.issues.join("；")}；${review.simplification}`);
+    options.log(`整季主线存在阻断问题：${review.blockingIssues.join("；")}；待验证的修改建议：${review.simplification}`);
     if (attempt === 1) throw new StoryGenerationFailure("整季主线经一次简化仍不具备因果或语言可行性，未生成分集正文", "PLAN_FEASIBILITY_GATE", "narrative", "new_candidates");
     spine = await callStructured(options, seasonSpineSchema,
       "你是分级故事策划编辑。修改完整主线的设计，不是压缩摘要。只返回 JSON。",
-      `${gradedReadingBrief(options)}${vocabularyWritingGuide(options)}\n原主线：${JSON.stringify(spine)}\n独立检查：${JSON.stringify(review)}\n修改边界：${options.planningContext ?? "尚无已发布正文"}\n只返回 wholeStory、hiddenCause、resolutionMechanism。把难以解释的零件与材料机制换成可观察的简单行动；清楚说明为什么发生、怎样验证、为何解决。保留角色选择、代价和合作，禁止靠略去解释过关。`,
+      `${gradedReadingBrief(options)}${vocabularyWritingGuide(options)}\n原主线：${JSON.stringify(spine)}\n独立检查：${JSON.stringify(review)}\n修改边界：${options.planningContext ?? "尚无已发布正文"}\n只返回 wholeStory、hiddenCause、resolutionMechanism。只解决 blockingIssues，suggestions 不要求全部执行。simplification 只是待验证假设，发现建议引入错误因果就不用它，选择更小且成立的修改。保留合理拟人、情感动机和已有正确剧情，不强改成物理解谜。清楚说明为什么发生、为何解决，禁止靠删掉因果过关。`,
       options.reviewModel || options.model, options.reviewTemperature,
       { ...semanticPlanningModelPolicy(options), networkRetries: 1, structureRetries: 2, maxCompletionTokens: 3072 });
   }
@@ -2578,14 +2583,18 @@ async function approveNarrativeSpine(options: StoryRunOptions, initial: z.infer<
 
 async function verifySplitPlanFeasibility(options: StoryRunOptions, plan: SeriesPlan) {
   const review = await callStructured(options, spineFeasibilitySchema, feasibilityReviewInstructions,
-    `${gradedReadingBrief(options)}\n请检查拆集后的实际任务是否仍符合主线，是否偷偷增加了难以解释的术语、场景或不成立的解法。\n季纲：${JSON.stringify(plan)}\n已发布事实边界：${options.planningContext ?? "尚无"}`,
+    `中文季纲，非英文正文。目标档位 ${resolveReaderProfile(options).label} / ${resolveReaderProfile(options).cefr}。请检查拆集是否仍符合主线，是否增加了不可替代的复杂机制或不成立的解法；不要检查中文句长或假想英文难词。\n季纲：${JSON.stringify(plan)}\n已发布事实边界：${options.planningContext ?? "尚无"}`,
     options.reviewModel || options.model, options.reviewTemperature,
     { ...semanticPlanningModelPolicy(options), networkRetries: 1, structureRetries: 2, maxCompletionTokens: 2048 });
-  if (!spineIsFeasible(review)) throw new StoryGenerationFailure(`分集季纲可行性未通过：${review.issues.join("；")}；${review.simplification}`, "PLAN_FEASIBILITY_GATE", "narrative", "new_candidates");
+  if (plan.narrativeSpine) {
+    options.planningHistory = rememberPlanReview(options.planningHistory ?? [], plan.narrativeSpine, review);
+    options.onPlanningHistory?.(options.planningHistory);
+  }
+  if (!spineIsFeasible(review)) throw new StoryGenerationFailure(`分集季纲存在阻断问题：${review.blockingIssues.join("；")}；${review.simplification}`, "PLAN_FEASIBILITY_GATE", "narrative", "new_candidates");
 }
 
 async function generatePlan(options: StoryRunOptions, engagementBrief: string) {
-  const basePrompt = `${buildSeriesPlanPrompt(options)}\n\n真实使用反馈（仅供策划）：${engagementBrief}\n${options.planningContext ?? ""}`;
+  const basePrompt = `${buildSeriesPlanPrompt(options)}\n\n真实使用反馈（仅供策划）：${engagementBrief}\n${options.planningContext ?? ""}\n${planningFailureBrief(options.planningHistory ?? [])}`;
   reportProgress(
     options,
     "planning",
@@ -4124,7 +4133,7 @@ function importStoryEpisode(
 }
 
 export async function runStoryGeneration(options: StoryRunOptions) {
-  options = { ...options, publishedStoryContext: [] };
+  options = { ...options, publishedStoryContext: [], planningHistory: planningHistorySchema.parse(options.planningHistory ?? []) };
   if (options.dryRun) {
     options.log(buildSeriesPlanPrompt(options));
     return { generated: 0, imported: 0, articleIds: [] as string[], seriesTitle: "", qualities: [] as StoryQuality[] };
@@ -4885,7 +4894,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
         reportProgress(options, "reviewing", `第 ${episodeNumber} 集正在与已发布章节连读，检查核心悬念和因果收束`, episodeProgress(options, index, 0.97));
         const serialIssues = await callStructured(options,
           groundedSerialAuditSchema([...options.publishedStoryContext!, episode]),
-          "你是独立连载故事编辑。只报告让读者无法理解主线的实质因果问题，不做文风打分。只返回 JSON。",
+          "你是独立连载故事编辑。只报告让读者无法理解主线的实质因果问题，不做文风打分。只返回包含 handoffs 和 issues 数组的 JSON 对象。fromEpisode、episodeNumber、paragraphNumber 必须为整数，handled 必须为布尔值。接缝仅取输入明确列出的相邻章节，不得从季纲推测尚未提供的章节。",
           `${serialReadingContext(options.publishedStoryContext!, episodeNumber === options.episodes)}\n${serialSeamContext([...options.publishedStoryContext!, episode])}\n整季主线：${JSON.stringify(plan.narrativeSpine ?? null)}\n当前稿：${JSON.stringify({ title: episode.title, paragraphs: episode.paragraphs })}\n返回 {handoffs:[],issues:[]}。handoffs 对每个相邻接缝必须返回 {fromEpisode,handled,explanation}；第一集为空数组。核对眼前危险/待办在指定下一集如何处理或明确暂缓，不能用终集替代中间集。只有类似物件或主题不算承接，没有明确证据则 handled=false，禁止自行补过程。其他实质问题放 issues，最多4项 {kind,episodeNumber,paragraphNumber,explanation}；位置从1开始。kind 仅为 dropped_promise、unearned_rule、missing_cause、unproven_resolution。不要抄原文，由程序核对引用位置。不要求背景复述或非终集揭谜；已发布文字不改，只指出当前集应处理的缺口。`,
           options.reviewModel || options.model, options.reviewTemperature,
           { ...semanticPlanningModelPolicy(options), networkRetries: 1, structureRetries: 2, maxCompletionTokens: 4096 });

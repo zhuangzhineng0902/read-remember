@@ -32,6 +32,30 @@ test("serial audit cannot silently skip chapter seams or ignore a failed handoff
   assert.equal(result.issues[0].kind, "dropped_promise");
 });
 
+test("serial audit recovers lossless scalar formats without weakening evidence checks", () => {
+  const schema = groundedSerialAuditSchema([first, second]);
+  const handoff = { fromEpisode: "1", handled: "false", explanation: "下一集未说明上一集危险如何处理。" };
+  const issue = { kind: "missing_cause", episodeNumber: "2", paragraphNumber: "1", explanation: "场景变化没有提供可理解的连接。" };
+  const result = schema.parse({ handoffs: [handoff], issues: [issue] });
+  assert.equal(result.handoffs[0].fromEpisode, 1);
+  assert.equal(result.handoffs[0].handled, false);
+  assert.equal(result.issues.length, 2);
+  for (const invalid of ["", "1x", "1.5", null, true, "9007199254740992", "0"]) {
+    assert.equal(schema.safeParse({ handoffs: [{ ...handoff, fromEpisode: invalid }], issues: [] }).success, false);
+  }
+  assert.equal(schema.safeParse({ handoffs: [{ ...handoff, handled: "maybe" }], issues: [] }).success, false);
+  assert.equal(schema.safeParse({ handoffs: [handoff], issues: [{ ...issue, paragraphNumber: "9" }] }).success, false);
+  assert.equal(schema.safeParse({ issues: [] }).success, false);
+});
+
+test("first episode has no invented handoff and receives actionable correction", () => {
+  const schema = groundedSerialAuditSchema([first]);
+  assert.equal(schema.safeParse({ handoffs: [], issues: [] }).success, true);
+  const result = schema.safeParse({ handoffs: [{ fromEpisode: "1", handled: true, explanation: "错误地给单集文章添加承接检查。" }], issues: [] });
+  assert.equal(result.success, false);
+  if (!result.success) assert.match(result.error.message, /handoffs 必须为 \[\]/);
+});
+
 test("whole-season reading includes earlier chapters and distinguishes core promises from scenery", () => {
   const prompt = serialReadingContext([first, second], true);
   assert.ok(prompt.includes(first.paragraphs[1]));

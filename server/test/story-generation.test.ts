@@ -101,6 +101,11 @@ test("learning words come from actual prose regardless of malformed model word l
   assert.deepEqual(selectNarrativeTargetWords(["a the to"], 5), []);
 });
 
+test("fresh planning failures can use the bounded retry budget before a full season checkpoint exists", () => {
+  assert.equal(isRecoverableStoryQualityFailure(new StoryGenerationFailure("主线存在阻断", "PLAN_FEASIBILITY_GATE", "narrative", "new_candidates"), false), true);
+  assert.equal(isRecoverableStoryQualityFailure(new StoryGenerationFailure("需人工处理", "MANUAL", "narrative", "manual"), false), false);
+});
+
 test("automatic quality retries are counted independently for each episode", () => {
   assert.equal(automaticQualityRetryLimit, 3);
   assert.deepEqual(episodeAutomaticRetryState(2, 2, 2), {

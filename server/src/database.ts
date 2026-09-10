@@ -147,6 +147,12 @@ export function createDatabase(filename: string): AppDatabase {
       completed_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS custom_story_planning_history (
+      request_id TEXT PRIMARY KEY REFERENCES custom_story_requests(id) ON DELETE CASCADE,
+      history_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS custom_story_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       request_id TEXT NOT NULL REFERENCES custom_story_requests(id) ON DELETE CASCADE,
