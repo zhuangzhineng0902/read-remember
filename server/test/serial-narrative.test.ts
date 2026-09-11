@@ -1,6 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { entryBridgeSchema, groundedSerialAuditSchema, publishedNarrativeHash, seasonSpineSchema, serialReadingContext } from "../scripts/story-generation/serial-narrative";
+import { entryBridgeSchema, groundedSerialAuditSchema, publishedNarrativeHash, seasonSpineSchema, serialReadingContext, reconcileClueLedger, episodeEndingInstruction, reviewEvidenceRules } from "../scripts/story-generation/serial-narrative";
+
+test("ledger reconciliation preserves resolved clues, identities and episode schedules", () => {
+  const old = [
+    { id: "C1", introducedIn: 1, usedIn: 1, payoffIn: 1, payoff: "published result" },
+    { id: "C2", introducedIn: 1, usedIn: 2, payoffIn: 2, payoff: "old planned result" },
+  ];
+  const revised = old.map((clue) => ({ ...clue, payoff: "prose-grounded result" }));
+  const result = reconcileClueLedger(old, revised, 2);
+  assert.deepEqual(result[0], old[0]);
+  assert.equal(result[1].payoff, "prose-grounded result");
+  assert.equal(old[1].payoff, "old planned result");
+  assert.throws(() => reconcileClueLedger(old, revised.slice(1), 2));
+  assert.throws(() => reconcileClueLedger(old, [revised[0], revised[0]], 2));
+  assert.throws(() => reconcileClueLedger(old, [revised[0], { ...revised[1], payoffIn: 3 }], 2));
+});
+
+test("ending and review policies distinguish finale from ongoing episodes without story-specific examples", () => {
+  assert.match(episodeEndingInstruction(true), /不新增/);
+  assert.match(episodeEndingInstruction(false), /续读期待/);
+  assert.match(reviewEvidenceRules, /真实存在的段落/);
+  assert.match(reviewEvidenceRules, /不得把指定角色动作/);
+  assert.match(reviewEvidenceRules, /终集评价因果解决与情感回报/);
+});
 
 const first = { title: "The Hole", paragraphs: ["Dash heard a noise.", "The boards opened. A dark hole lay under Dash."] };
 const second = { title: "The Box", paragraphs: ["Dash looked at the box by the wall."] };

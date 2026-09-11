@@ -199,7 +199,8 @@ test("favorite story prompt keeps the appeal while requiring new expression", ()
   assert.match(prompt, /250 个核心高频词/);
   assert.match(prompt, /Starter 也不能写成 3-6 岁幼儿故事/);
   assert.match(prompt, /consequence 只写选择立刻造成的一次可见代价/);
-  assert.match(prompt, /cliffhanger 必须比 openingHook 和 goal 多出一项/);
+  assert.match(prompt, /非终集 cliffhanger 须体现本集带来的新信息/);
+  assert.match(prompt, /终集该字段记录完整收束画面/);
   assert.match(prompt, /整季最多 3 位主要角色、最多 3 条线索/);
 });
 
@@ -1448,6 +1449,32 @@ test("story quality blocks mixed Chinese and questions without source evidence",
   assert.match(quality.blockingIssues.join(" "), /夹杂中文/);
   assert.match(quality.blockingIssues.join(" "), /第 2 题的原文证据不存在/);
   assert.equal(passesStoryQualityFloor(quality, 0.95), false);
+});
+
+test("sensory keywords do not veto real original quotes but fabricated quotes remain blocked", () => {
+  const episode = checkpointEpisode("Rain at the Door");
+  episode.paragraphs[0] += " Rain still ran down his hood.";
+  episode.qualityEvidence.sensoryQuote = "Rain still ran down his hood.";
+  const options = { examId: "middle" as const, readerStage: "stage1" as const, minLexicalCoverage: 0.95 };
+  const quality = assessStoryQuality(episode, options, 1);
+  assert.equal(quality.blockingIssues.some((issue) => issue.startsWith("五感描写证据")), false);
+  assert.ok(quality.issues.some((issue) => issue.includes("由独立语义评审")));
+  episode.qualityEvidence.sensoryQuote = "A bright lamp lit an imaginary room.";
+  assert.ok(assessStoryQuality(episode, options, 1).blockingIssues.some((issue) => issue.startsWith("五感描写证据")));
+});
+
+test("checkpoint keeps separate local repair counters without resetting full rewrite usage", () => {
+  const { questions: _questions, ...episode } = checkpointEpisode("Saved local repair");
+  const base = { version: 2, plan: validPlan, episodes: [], activeEpisode: {
+    index: 0, stage: "semantic_reviewed", episode, fullRewriteCount: 4,
+    mechanicalRepairUsed: true, semanticRewriteUsed: true,
+    localRepairAttempts: { metadata: 1, lexical: 1 },
+  } };
+  const restored = parseStoryGenerationCheckpoint(base);
+  assert.deepEqual(restored?.activeEpisode?.localRepairAttempts, { metadata: 1, lexical: 1 });
+  assert.equal(restored?.activeEpisode?.fullRewriteCount, 4);
+  const { localRepairAttempts: _old, ...legacy } = base.activeEpisode;
+  assert.ok(parseStoryGenerationCheckpoint({ ...base, activeEpisode: legacy }));
 });
 
 test("story content can pass through quality checks before questions are generated", () => {

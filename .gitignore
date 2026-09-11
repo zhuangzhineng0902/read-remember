@@ -33,3 +33,5 @@ server/config/story-generation.json
 **/coverage/
 
 expo-go-qr.png
+
+docs
