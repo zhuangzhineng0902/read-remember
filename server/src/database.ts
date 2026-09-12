@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -17,6 +18,38 @@ const { DatabaseSync } = createRequire(import.meta.url)(
 ) as typeof import("node:sqlite");
 
 export type AppDatabase = DatabaseSyncType;
+
+export function migrateCustomStorySeriesVersions(db: AppDatabase) {
+  const mismatches = db.prepare(
+    `SELECT a.id, a.series_key AS requestId, a.series_title AS seriesTitle
+     FROM articles a
+     JOIN custom_story_requests r ON r.id = a.series_key
+     WHERE COALESCE(a.series_title, '') <> COALESCE(r.series_title, '')`,
+  ).all() as Array<{ id: string; requestId: string; seriesTitle: string }>;
+  const moveArticle = db.prepare("UPDATE articles SET series_key = ? WHERE id = ?");
+  const requests = db.prepare("SELECT id FROM custom_story_requests").all() as Array<{ id: string }>;
+  const currentArticleIds = db.prepare(
+    "SELECT id FROM articles WHERE series_key = ? ORDER BY episode_number, id",
+  );
+  const saveArticleIds = db.prepare(
+    "UPDATE custom_story_requests SET article_ids_json = ? WHERE id = ?",
+  );
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const article of mismatches) {
+      const titleHash = createHash("sha256").update(article.seriesTitle || "untitled").digest("hex").slice(0, 12);
+      moveArticle.run(`${article.requestId}:legacy:${titleHash}`, article.id);
+    }
+    for (const request of requests) {
+      const ids = (currentArticleIds.all(request.id) as Array<{ id: string }>).map(({ id }) => id);
+      saveArticleIds.run(JSON.stringify(ids), request.id);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
 
 export function createDatabase(filename: string): AppDatabase {
   if (filename !== ":memory:") {
@@ -478,11 +511,15 @@ export function createDatabase(filename: string): AppDatabase {
     "repeated_failure_count",
     "repeated_failure_count INTEGER NOT NULL DEFAULT 0",
   );
+  migrateCustomStorySeriesVersions(db);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_articles_interest
     ON articles(content_kind, interest_id, exam_id);
     CREATE INDEX IF NOT EXISTS idx_articles_series_key
     ON articles(series_key, episode_number);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_story_version_episode
+    ON articles(series_key, episode_number)
+    WHERE series_key IS NOT NULL AND episode_number IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_custom_story_requests_user
     ON custom_story_requests(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_custom_story_logs_request_time

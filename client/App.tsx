@@ -1893,17 +1893,22 @@ function CreateStoryScreen({
           {story.status === "failed" && story.resumeAvailable && (
             <Text style={styles.storyResumeHint}>↻ {story.progressMessage}</Text>
           )}
+          {story.status === "failed" && story.requiresRevision && (
+            <Text style={styles.storyResumeHint}>需要修改后继续：{story.revisionMessage}</Text>
+          )}
           {story.status === "failed" && (
             <View style={styles.storyFailureRow}>
               <Text style={[styles.storyError, styles.flexOne]}>{story.errorMessage || "生成失败，请稍后重新提交。"}</Text>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => void onRetry(story)}
-                style={({ pressed }) => [styles.storyRetryButton, pressed && styles.pressed]}
-              >
-                <RotateCcw size={14} color={colors.primary} />
-                <Text style={styles.storyRetryText}>重新生成</Text>
-              </Pressable>
+              {!story.requiresRevision && (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => void onRetry(story)}
+                  style={({ pressed }) => [styles.storyRetryButton, pressed && styles.pressed]}
+                >
+                  <RotateCcw size={14} color={colors.primary} />
+                  <Text style={styles.storyRetryText}>重新生成</Text>
+                </Pressable>
+              )}
             </View>
           )}
           {story.articles.length > 0 && (

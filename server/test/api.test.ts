@@ -7,6 +7,7 @@ import { createDatabase } from "../src/database";
 import { dispatchDailyPushes } from "../src/daily-push";
 import { lookupPronunciation } from "../src/pronunciation";
 import { EcdictDictionary } from "../src/ecdict";
+import { parseStoryGenerationCheckpoint } from "../scripts/generate-story-series";
 
 const { DatabaseSync } = createRequire(import.meta.url)(
   "node:sqlite",
@@ -106,6 +107,16 @@ const server = createServer(
         enqueuedCustomStories.push(requestId);
       },
       resume() {},
+      retryBlockReason(checkpointJson) {
+        if (!checkpointJson) return null;
+        try {
+          return parseStoryGenerationCheckpoint(JSON.parse(checkpointJson))
+            ? null
+            : "故事检查点损坏，已禁止从第一集静默重建";
+        } catch {
+          return "故事检查点损坏，已禁止从第一集静默重建";
+        }
+      },
     },
   ),
 );
@@ -403,6 +414,8 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(story.automaticRetryEpisode, 0);
   assert.equal(story.automaticRetryCount, 0);
   assert.equal(story.resumeAvailable, false);
+  assert.equal(story.requiresRevision, false);
+  assert.equal(story.revisionMessage, null);
   assert.equal(story.episodeCount, 3);
   assert.deepEqual(story.keywords, ["星图", "机关", "猫"]);
   assert.deepEqual(enqueuedCustomStories, [story.id]);
@@ -447,13 +460,11 @@ test("registered users can queue and inspect a private custom story", async () =
   const resumed = await request(`/api/v1/custom-stories/${story.id}/retry`, {
     method: "POST",
   });
-  assert.equal(resumed.status, 202);
-  const resumedStory = (await resumed.json()).data;
-  assert.equal(resumedStory.resumeAvailable, true);
-  assert.equal(resumedStory.completedEpisodeCount, 1);
-  assert.equal(resumedStory.progressMessage, "等待从第 2 集继续创作");
-  assert.equal(resumedStory.progressPercent, 45);
-  assert.deepEqual(enqueuedCustomStories, [story.id, story.id, story.id]);
+  assert.equal(resumed.status, 409);
+  const resumeError = await resumed.json();
+  assert.equal(resumeError.error.code, "CUSTOM_STORY_REQUIRES_REVISION");
+  assert.match(resumeError.error.message, /检查点损坏/);
+  assert.deepEqual(enqueuedCustomStories, [story.id, story.id]);
 });
 
 test("interest preferences drive the interest feed and mixed daily reading", async () => {

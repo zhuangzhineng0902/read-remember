@@ -895,6 +895,8 @@ export type StoryRunOptions = {
   readerStage: ReaderStageId;
   episodes: number;
   importNamespace: string;
+  /** Stable story version identity. Unlike the display title, it must not change on retry. */
+  seriesVersionId?: string;
   planCandidates: number;
   episodeCandidates: number;
   minLexicalCoverage: number;
@@ -1010,6 +1012,24 @@ const legacyStoryGenerationCheckpointSchema = z.object({
   episodes: z.array(completedEpisodeCheckpointSchema).max(30),
 });
 
+const starterRepairStateSchema = z.object({
+  episode: z.number().int().min(1).max(30),
+  languageEdit: z.object({
+    sourceTextHash: z.string().regex(/^[a-f0-9]{64}$/),
+    resultTextHash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).optional(),
+  lexicalEdit: z.object({
+    sourceTextHash: z.string().regex(/^[a-f0-9]{64}$/),
+    resultTextHash: z.string().regex(/^[a-f0-9]{64}$/),
+    beforeCoverage: z.number().min(0).max(1),
+    afterCoverage: z.number().min(0).max(1),
+  }).optional(),
+  actionSimplification: z.object({
+    sourcePlanHash: z.string().regex(/^[a-f0-9]{64}$/),
+    resultPlanHash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).optional(),
+});
+
 const currentStoryGenerationCheckpointSchema = z.object({
   version: z.literal(2),
   plan: planSchema,
@@ -1019,11 +1039,13 @@ const currentStoryGenerationCheckpointSchema = z.object({
   replannedEpisodes: z.array(z.number().int().min(1).max(30)).max(30).optional(),
   lexicalFailureBatches: z.array(lexicalFailureBatchSchema).max(12).optional(),
   lexicalPlanRevisions: z.array(z.number().int().min(1).max(30)).max(30).optional(),
+  starterRepairStates: z.array(starterRepairStateSchema).max(30).optional(),
   discardedDraftLessons: z.array(z.string().trim().min(4).max(500)).max(20).optional(),
   rejectedElite: z.object({
     index: z.number().int().min(0).max(29),
     narrative: episodeNarrativeSchema,
     critique: storyCritiqueSchema,
+    repairReason: z.enum(["starter_language_load", "starter_lexical_load"]).optional(),
   }).optional(),
   stagedEpisode: stagedEpisodeCheckpointSchema.optional(),
   activeEpisode: z.object({
@@ -1051,12 +1073,22 @@ export type StoryGenerationCheckpoint = z.infer<typeof currentStoryGenerationChe
 export type ActiveEpisodeCheckpoint = NonNullable<StoryGenerationCheckpoint["activeEpisode"]>;
 export type StagedEpisodeCheckpoint = NonNullable<StoryGenerationCheckpoint["stagedEpisode"]>;
 type RejectedElite = NonNullable<StoryGenerationCheckpoint["rejectedElite"]>;
+type StarterRepairAttempt =
+  | { kind: "language"; sourceTextHash: string; resultTextHash: string }
+  | { kind: "lexical"; sourceTextHash: string; resultTextHash: string; beforeCoverage: number; afterCoverage: number };
+type DraftRejectedElite = Pick<RejectedElite, "narrative" | "critique" | "repairReason"> & {
+  repairAttempt?: StarterRepairAttempt;
+};
 
 export function episodeNarrativeHash(narrative: Pick<GeneratedStoryContent, "title" | "paragraphs">) {
   return createHash("sha256").update(JSON.stringify({
     title: narrative.title,
     paragraphs: narrative.paragraphs,
   })).digest("hex");
+}
+
+export function episodePlanHash(episode: SeriesPlan["episodes"][number]) {
+  return createHash("sha256").update(JSON.stringify(episode)).digest("hex");
 }
 
 export function buildDiscardedDraftLessons(
@@ -1119,6 +1151,30 @@ export function parseStoryGenerationCheckpoint(value: unknown): StoryGenerationC
   return legacy.success
     ? { version: 2 as const, plan: legacy.data.plan, episodes: legacy.data.episodes }
     : null;
+}
+
+export function storyCheckpointRetryBlockReason(checkpoint: StoryGenerationCheckpoint) {
+  const elite = checkpoint.rejectedElite;
+  if (!elite) return null;
+  const state = checkpoint.starterRepairStates?.find((item) => item.episode === elite.index + 1);
+  if (!state?.actionSimplification) return null;
+  const lexicalReason = elite.repairReason === "starter_lexical_load"
+    || (elite.repairReason === "starter_language_load" && isStrictStoryCritique(elite.critique));
+  if (lexicalReason) {
+    const lexical = state.lexicalEdit;
+    const lexicalResult = lexical
+      ? Math.abs(lexical.afterCoverage - lexical.beforeCoverage) >= 0.0005
+        ? `从 ${(lexical.beforeCoverage * 100).toFixed(1)}% 提升到 ${(lexical.afterCoverage * 100).toFixed(1)}%`
+        : `为 ${(lexical.afterCoverage * 100).toFixed(1)}%`
+      : "仍未达到发布底线";
+    return `第 ${elite.index + 1} 集语义已通过（均分 ${critiqueAverage(elite.critique).toFixed(2)}），`
+      + `定向换词后覆盖率${lexicalResult}，`
+      + "专项行动简化后的自动重试也已完成。正文已保存，需要调整词汇表或任务设计后继续。";
+  }
+  if (elite.repairReason === "starter_language_load") {
+    return `第 ${elite.index + 1} 集已完成语言编辑及专项行动简化后的自动重试；正文已保存，需要调整本集表达设计后继续。`;
+  }
+  return null;
 }
 
 export type LexicalRankLookup = (word: string) => number | null;
@@ -2030,7 +2086,7 @@ ${buildNarrativeCraftBrief(options, episodeNumber)}
 四个视角分别按 0-10 分审查：
 1. plot：逐段追踪目标、阻碍、选择、后果，检查每次移动、发现和计划改变是否有原因；线索是否先埋后用、后续解释是否回收前文，而不是事件清单或突然跳转。检查身份、称呼和因果时，必须使用相同语义维度及正文证据；相关性和时间顺序本身不证明因果，不得引入正文未建立的前提。评审合同的 narrativeFunctions 未真正完成时不得超过 7 分。
 2. childAppeal：前两句钩子、自然笑点、具体冒险、伙伴互动和至少两种服务剧情的五感描写是否吸引读者。非终集检查续读期待，终集检查解决结果和情感回报。若角色只是观察、等待、移动和听解释，没有承担代价或改变结果，不得超过 7 分。
-3. gradedLanguage：正文是否纯英文且自然地道；句子、词汇、指代是否适龄；是否有中式英语、不必要难词、碎片句、抽象解释和同义词漂移。对初中读者，若依赖多个未解释的虚构专名、抽象规则或读者无法从动作推知的世界设定，即使单词短也要扣分。
+3. gradedLanguage：正文是否纯英文且自然地道；句子、词汇、指代是否适龄；是否有中式英语、不必要难词、碎片句、抽象解释和同义词漂移。有明确主语和谓语、语义完整的短句不是碎片句，不得仅因句子短或使用 would、not 等简单结构扣分。对初中读者，若依赖多个未解释的虚构专名、抽象规则或读者无法从动作推知的世界设定，即使单词短也要扣分。
 4. continuity：是否遵守故事圣经、线索账本和上一集人物/物件/已知事实状态；开头用一至两句必要的状态承接是连续故事的必需项，不得因此扣分；requiredClueProgression 要求 use/payoff 时，引用旧证据并给出新的原因、后果或解释属于正确回收，不得判为重复。只有把旧事实重新当成首次发现、主要目标、主要冲突，或重新表演已完成动作时才算重复。禁止补写正文没有的地图、对话、动机或动作。
 
 连续性证据格式（程序会逐字校验）：continuity.issues 的每一项必须以 【前文证据：逐字短引文】 或 【当前证据：逐字短引文】 开头。涉及“上一集、前文、已发布”的判断只能使用前文证据；引文必须连续出现在对应英文正文中，不能转述、拼接或引用季纲。没有可引用正文的判断必须删除，不得扣分。向新角色首次展示或验证旧证据不能写成重复问题。
@@ -2068,7 +2124,7 @@ ${buildNarrativeCraftBrief(options, episodeNumber)}
 每份候选都按以下四个维度 0-10 分评审：
 1. plot：目标、阻碍、选择、后果的因果是否完整，评审合同的 narrativeFunctions 是否真正完成。
 2. childAppeal：开头钩子、伙伴互动、幽默、五感和冒险是否吸引读者；非终集检查续读期待，终集检查完整收束与情感回报。
-3. gradedLanguage：是否纯英文、自然地道、词汇句长适龄，避免碎片句、中式英语和生僻同义词。
+3. gradedLanguage：是否纯英文、自然地道、词汇句长适龄，避免碎片句、中式英语和生僻同义词。有明确主语和谓语、语义完整的短句不是碎片句，不得仅因句子短或使用 would、not 等简单结构扣分。
 4. continuity：是否遵守故事圣经、线索账本和上一集状态，是否避免重复或凭空补信息。
 
 连续性证据格式（程序会逐字校验）：每条 continuity.issues 必须以 【前文证据：逐字短引文】 或 【当前证据：逐字短引文】 开头；凡声称上一集、前文或已发布正文存在某事实，只能引用前文。引文必须连续存在于对应英文正文；不能引用季纲、摘要或改写建议。没有有效引文就删除该问题并重算连续性分数。向新角色首次展示或验证读者已知证据属于新后果，不是重复发现。
@@ -2310,6 +2366,43 @@ export function isBorderlineStoryCritique(
     storyGenerationPolicy.review.maximumDimensionDropFromFirst,
     storyGenerationPolicy.review.maximumAverageDropFromFirst,
   ).length === 0;
+}
+
+export function needsStarterLanguageEdit(
+  readerStage: ResolvedReaderStageId,
+  critique: StoryCritique,
+) {
+  if (readerStage !== "starter") return false;
+  const narrativeDimensionsPass = critique.plot.score >= storyGenerationPolicy.review.minimumDimension
+    && critique.childAppeal.score >= storyGenerationPolicy.review.minimumDimension
+    && critique.continuity.score >= storyGenerationPolicy.review.minimumDimension;
+  const languageIsTheBottleneck = critique.gradedLanguage.score
+    <= Math.min(critique.plot.score, critique.childAppeal.score, critique.continuity.score);
+  return narrativeDimensionsPass
+    && languageIsTheBottleneck
+    && !isStrictStoryCritique(critique);
+}
+
+export function canAdoptQualifiedLexicalRepair(
+  quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount">,
+  targetCoverage: number,
+  critique: StoryCritique,
+  firstEpisodeBaseline?: StoryCritique | null,
+) {
+  return lexicalFloorPassed(quality, targetCoverage)
+    && isStrictStoryCritique(critique, firstEpisodeBaseline);
+}
+
+export function shouldPreserveStarterQualifiedLexicalFailure(
+  readerStage: ResolvedReaderStageId,
+  quality: StoryQuality,
+  targetCoverage: number,
+  critique: StoryCritique,
+  firstEpisodeBaseline?: StoryCritique | null,
+) {
+  return readerStage === "starter"
+    && chooseRepairKind(quality, targetCoverage) === "lexical"
+    && isStrictStoryCritique(critique, firstEpisodeBaseline);
 }
 
 export function selectBestStoryCritique(critiques: StoryCritique[]) {
@@ -3297,10 +3390,10 @@ async function generateEpisodeDraft(
   firstEpisodeBaseline: StoryCritique | null = null,
   discardedDraftLessons: string[] = [],
   strictRound = 1,
-  eliteRejected: Pick<RejectedElite, "narrative" | "critique"> | null = null,
+  eliteRejected: DraftRejectedElite | null = null,
   onLessons?: (
     lessons: string[],
-    elite: Pick<RejectedElite, "narrative" | "critique"> | null,
+    elite: DraftRejectedElite | null,
   ) => void,
   diagnostics: EpisodeDraftDiagnostics = {
     rawWordCounts: [],
@@ -3495,6 +3588,7 @@ async function generateEpisodeDraft(
 
   let narrative: z.infer<typeof episodeNarrativeSchema> | null = null;
   let critique: StoryCritique | null = null;
+  let selectedByTargetedEdit = false;
   let synthesisLessons = discardedDraftLessons;
   let bestRejected = eliteRejected;
   let editorialBaseNarrative = drafts[backboneCandidateIndex];
@@ -3677,6 +3771,115 @@ async function generateEpisodeDraft(
     }
   }
   if (eliteRejected) recordDraftReview(diagnostics, eliteRejected.critique);
+  const runStarterLanguageEdit = async (
+    baseNarrative: z.infer<typeof episodeNarrativeSchema>,
+    baseReview: StoryCritique,
+  ) => {
+    const contract = buildEpisodeWritingContract(options, plan, episodeNumber);
+    const beforeVocabulary = draftVocabulary(options, plan, baseNarrative);
+    reportProgress(
+      options,
+      "editing",
+      `第 ${episodeNumber} 集剧情骨架已成立，正在锁定事件顺序执行唯一一次 Starter 语言编辑`,
+      episodeProgress(options, index, 0.46),
+    );
+    const languageEdited = await callEpisodeNarrative(
+      options,
+      "你只输出 title 和 paragraphs 的合法 JSON。你是 Starter 分级英语语言编辑，只修自然英语与可读性；剧情、事件顺序和段落职责已锁定。",
+      `${gradedReadingBrief(options)}${vocabularyWritingGuide(options)}\n`
+        + `唯一可编辑底稿：${JSON.stringify(baseNarrative)}\n`
+        + `语言评审问题：${JSON.stringify(baseReview.gradedLanguage.issues)}\n`
+        + `程序识别的非熟词：${JSON.stringify(beforeVocabulary.unfamiliarWords)}\n`
+        + `本集必须保留的叙事功能：${JSON.stringify(reviewEpisodeWritingContract(contract))}\n`
+        + "只做一次逐句语言编辑：保持标题、四段、每段事件、人物行动、决定、后果、线索事实和段落顺序；不得增加、删除、合并或移动事件。"
+        + "全篇保持过去时；修正中式英语、搭配、指代和不自然解释。身体标记只能被看到、描述或指出，不能写成 read、read word by word 或 call out。"
+        + "优先使用 Starter 常见、具体、意思准确的词，一句表达一个主要意思；有明确主语和谓语的自然短句可以保留。"
+        + `正文必须保持在 ${contract.publishWordRange[0]}-${contract.publishWordRange[1]} 词。只返回原样标题和四个 paragraphs。`,
+      options.structureRepairModel || options.reviewModel || options.model,
+      0.1,
+      {
+        timeoutMs: options.rewriteTimeoutMs,
+        networkRetries: 1,
+        structureRetries: 1,
+        maxCompletionTokens: narrativeCompletionTokenBudget(contract.publishWordRange[1]),
+        disableThinking: true,
+      },
+    );
+    const languageEditGuardIssues = [
+      ...narrativePreflightIssues(options, plan, episodeNumber, languageEdited),
+      ...lexicalEditDriftIssues(
+        baseNarrative,
+        languageEdited,
+        lexicalEditWordBudget(
+          narrativeWordCount(baseNarrative),
+          contract.publishWordRange[0],
+          contract.publishWordRange[1],
+        ),
+      ),
+    ];
+    const editedReview = languageEditGuardIssues.length
+      ? null
+      : await reviewEpisodeSemantics(options, plan, languageEdited, episodeNumber, previousEpisode);
+    if (editedReview) recordDraftReview(diagnostics, editedReview);
+    const editedVocabulary = editedReview
+      ? draftVocabulary(options, plan, languageEdited)
+      : beforeVocabulary;
+    const editedLexicalPass = editedReview
+      ? lexicalFloorPassed(editedVocabulary, options.minLexicalCoverage)
+      : false;
+    if (editedReview
+      && editedLexicalPass
+      && isStrictStoryCritique(editedReview, firstEpisodeBaseline)) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] Starter 单次语言编辑通过终审：分级语言 `
+        + `${baseReview.gradedLanguage.score.toFixed(1)} → ${editedReview.gradedLanguage.score.toFixed(1)}，`
+        + `词汇覆盖率 ${((beforeVocabulary.lexicalCoverage ?? 0) * 100).toFixed(1)}% → ${((editedVocabulary.lexicalCoverage ?? 0) * 100).toFixed(1)}%；未执行融合。`,
+      );
+      selectedByTargetedEdit = true;
+      return { narrative: languageEdited, critique: editedReview };
+    } else {
+      const editedPreservesNarrative = Boolean(editedReview
+        && editedReview.plot.score >= 7
+        && editedReview.childAppeal.score >= 7
+        && editedReview.continuity.score >= 7
+        && editedReview.gradedLanguage.score > baseReview.gradedLanguage.score);
+      const retainedNarrative = editedPreservesNarrative ? languageEdited : baseNarrative;
+      const retainedReview = editedPreservesNarrative ? editedReview! : baseReview;
+      const failureDetails = languageEditGuardIssues.length
+        ? languageEditGuardIssues
+        : [
+            ...(editedReview ? semanticQualityIssues(editedReview, firstEpisodeBaseline) : []),
+            ...(!editedLexicalPass
+              ? [`词汇覆盖率 ${((editedVocabulary.lexicalCoverage ?? 0) * 100).toFixed(1)}% 未过线`]
+              : []),
+          ];
+      synthesisLessons = [
+        ...synthesisLessons,
+        `Starter 单次语言编辑后仍超出表达容量：${failureDetails.join("；")}`,
+      ].slice(-20);
+      onLessons?.(synthesisLessons, {
+        narrative: retainedNarrative,
+        critique: retainedReview,
+        repairReason: "starter_language_load",
+        repairAttempt: {
+          kind: "language",
+          sourceTextHash: episodeNarrativeHash(baseNarrative),
+          resultTextHash: episodeNarrativeHash(languageEdited),
+        },
+      });
+      throw new StoryGenerationFailure(
+        `第 ${episodeNumber} 集剧情已成立，但唯一一次 Starter 语言编辑仍未通过：${failureDetails.join("；")}；下一次续跑将先简化未发布的本集行动负担，不再围绕同一底稿融合`,
+        "STARTER_LANGUAGE_LOAD_GATE",
+        editedLexicalPass ? "language" : "lexical",
+        "new_candidates",
+      );
+    }
+  };
+  if (!narrative && needsStarterLanguageEdit(resolveReaderProfile(options).id, editorialBaseReview)) {
+    const edited = await runStarterLanguageEdit(editorialBaseNarrative, editorialBaseReview);
+    narrative = edited.narrative;
+    critique = edited.critique;
+  }
   if (!narrative && isBorderlineStoryCritique(editorialBaseReview)) {
     narrative = editorialBaseNarrative;
     critique = editorialBaseReview;
@@ -3766,6 +3969,15 @@ async function generateEpisodeDraft(
       );
       break;
     }
+    if (needsStarterLanguageEdit(resolveReaderProfile(options).id, reviewed)) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] 融合稿仅剩 Starter 语言瓶颈；锁定该融合稿执行语言编辑，不重新生成候选。`,
+      );
+      const edited = await runStarterLanguageEdit(synthesized, reviewed);
+      narrative = edited.narrative;
+      critique = edited.critique;
+      break;
+    }
     synthesisLessons = lessonsFromCritique(reviewed, synthesisLessons);
     if (!bestRejected || isCritiqueBetter(reviewed, bestRejected.critique)) {
       bestRejected = { narrative: synthesized, critique: reviewed };
@@ -3820,15 +4032,80 @@ async function generateEpisodeDraft(
       "new_candidates",
     );
   }
-  const selectedVocabulary = draftVocabulary(options, plan, narrative);
+  let selectedVocabulary = draftVocabulary(options, plan, narrative);
   if (!passesStoryQualityFloor({ ...selectedVocabulary, blockingIssues: [] }, options.minLexicalCoverage)) {
-    onLessons?.([...synthesisLessons, `严选后正文仍需简化：${selectedVocabulary.unfamiliarWords.join(", ")}`].slice(-20), null);
-    throw new StoryGenerationFailure(`第 ${episodeNumber} 集编辑后的正文词汇门禁未通过，未生成元数据；请简化 ${selectedVocabulary.unfamiliarWords.join(", ")}`,
-      "CANDIDATE_LEXICAL_GATE", "lexical", "new_candidates");
+    options.log(
+      `[${episodeNumber}/${options.episodes}] 正文已通过语义终审，但词汇门禁未通过；`
+      + "保留当前合格剧情，仅执行一次定向换词，不重新生成候选。",
+    );
+    const lexicalEdited = await simplifyNarrativeVocabulary(
+      options,
+      plan,
+      episodeNumber,
+      narrative,
+      selectedVocabulary.unfamiliarWords,
+      previousEpisode,
+    );
+    const lexicalEditedVocabulary = draftVocabulary(options, plan, lexicalEdited);
+    let lexicalEditedReview: StoryCritique | null = null;
+    if (lexicalFloorPassed(lexicalEditedVocabulary, options.minLexicalCoverage)) {
+      lexicalEditedReview = lexicalEdited === narrative
+        ? critique
+        : await reviewEpisodeSemantics(options, plan, lexicalEdited, episodeNumber, previousEpisode);
+      recordDraftReview(diagnostics, lexicalEditedReview);
+      if (canAdoptQualifiedLexicalRepair(
+        lexicalEditedVocabulary,
+        options.minLexicalCoverage,
+        lexicalEditedReview,
+        firstEpisodeBaseline,
+      )) {
+        narrative = lexicalEdited;
+        critique = lexicalEditedReview;
+        selectedVocabulary = lexicalEditedVocabulary;
+        selectedByTargetedEdit = true;
+        options.log(
+          `[${episodeNumber}/${options.episodes}] 语义合格稿定向换词后仍通过语义终审，`
+          + `词汇覆盖率提升至 ${((selectedVocabulary.lexicalCoverage ?? 0) * 100).toFixed(1)}%；继续生成元数据。`,
+        );
+      }
+    }
+    if (!passesStoryQualityFloor({ ...selectedVocabulary, blockingIssues: [] }, options.minLexicalCoverage)) {
+      const repairFailure = !lexicalFloorPassed(lexicalEditedVocabulary, options.minLexicalCoverage)
+        ? `词汇覆盖率仍未过线：${lexicalEditedVocabulary.unfamiliarWords.join(", ")}`
+        : `换词稿破坏原语义终审结果：${semanticQualityIssues(lexicalEditedReview!, firstEpisodeBaseline).join("；")}`;
+      const lessons = [
+        ...synthesisLessons,
+        `语义合格稿定向换词未能安全采用：${repairFailure}`,
+      ].slice(-20);
+      onLessons?.(lessons, {
+        narrative,
+        critique,
+        ...(resolveReaderProfile(options).id === "starter"
+          ? {
+              repairReason: "starter_lexical_load" as const,
+              repairAttempt: {
+                kind: "lexical" as const,
+                sourceTextHash: episodeNarrativeHash(narrative),
+                resultTextHash: episodeNarrativeHash(lexicalEdited),
+                beforeCoverage: selectedVocabulary.lexicalCoverage ?? 0,
+                afterCoverage: lexicalEditedVocabulary.lexicalCoverage ?? 0,
+              },
+            }
+          : {}),
+      });
+      throw new StoryGenerationFailure(
+        `第 ${episodeNumber} 集已通过语义终审，但唯一一次定向换词未能安全采用；保留该语义合格稿，未重新抽取候选：${repairFailure}`,
+        "QUALIFIED_DRAFT_LEXICAL_REPAIR_GATE",
+        "lexical",
+        "new_candidates",
+      );
+    }
   }
   options.log(
     `[${episodeNumber}/${options.episodes}] 严选完成：独立复核 ${independentlyReviewedCandidates.size} 份，`
-    + `采用 1 份正文；${narrative === editorialBaseNarrative ? "未做多稿融合" : "采用有界融合稿"}。`,
+    + `采用 1 份正文；${selectedByTargetedEdit
+      ? "采用锁稿定向编辑"
+      : narrative === editorialBaseNarrative ? "未做多稿融合" : "采用有界融合稿"}。`,
   );
   return { narrative, critique, discardedDraftLessons: synthesisLessons };
 }
@@ -4408,7 +4685,9 @@ function importStoryEpisode(
     licenseNote: metadata.licenseNote,
     rightsConfirmed: true,
     articles: [{
-      externalId: `${options.importNamespace ? `${slug(options.importNamespace)}-` : ""}${options.interest}-${metadata.seriesSlug}-${index + 1}`,
+      externalId: options.seriesVersionId
+        ? `custom-${options.seriesVersionId}-episode-${index + 1}`
+        : `${options.importNamespace ? `${slug(options.importNamespace)}-` : ""}${options.interest}-${metadata.seriesSlug}-${index + 1}`,
       year: new Date().getFullYear(),
       title: episode.title,
       eyebrow: metadata.eyebrow,
@@ -4417,6 +4696,7 @@ function importStoryEpisode(
       contentKind: "interest" as const,
       interestId: options.interest as InterestId,
       seriesTitle: plan.seriesTitle,
+      seriesKey: options.seriesVersionId ?? null,
       episodeNumber: index + 1,
       paragraphs: episode.paragraphs,
       questions: episode.questions.map(({ prompt, options, answer, explanation }) => ({
@@ -4526,6 +4806,9 @@ export async function runStoryGeneration(options: StoryRunOptions) {
   const replannedEpisodes = new Set(restored?.replannedEpisodes ?? []);
   let lexicalFailureBatches = restored?.lexicalFailureBatches ?? [];
   const lexicalPlanRevisions = new Set(restored?.lexicalPlanRevisions ?? []);
+  const starterRepairStates = new Map(
+    (restored?.starterRepairStates ?? []).map((state) => [state.episode, state]),
+  );
   let reviewCalibrationVersion = restored?.reviewCalibrationVersion ?? "";
   const checkpointEpisodes = () => generated.map((savedEpisode, savedIndex) => ({
     episode: savedEpisode,
@@ -4544,6 +4827,7 @@ export async function runStoryGeneration(options: StoryRunOptions) {
       replannedEpisodes: [...replannedEpisodes],
       lexicalFailureBatches,
       lexicalPlanRevisions: [...lexicalPlanRevisions],
+      starterRepairStates: [...starterRepairStates.values()],
       ...(reviewCalibrationVersion ? { reviewCalibrationVersion } : {}),
       ...(discardedDraftLessons.length ? { discardedDraftLessons } : {}),
       ...(rejectedElite ? { rejectedElite } : {}),
@@ -4846,23 +5130,68 @@ export async function runStoryGeneration(options: StoryRunOptions) {
           });
           savedActive = activeEpisode;
         }
+        const legacyLexicalReason = rejectedElite?.repairReason === "starter_language_load"
+          && isStrictStoryCritique(rejectedElite.critique, index > 0 ? semanticReviews[0] : null);
+        const starterRepairReason = legacyLexicalReason
+          ? "starter_lexical_load"
+          : rejectedElite?.repairReason;
+        const starterLoad = starterRepairReason === "starter_language_load"
+          || starterRepairReason === "starter_lexical_load";
+        const starterRepairState = starterRepairStates.get(episodeNumber);
+        if (starterLoad && starterRepairState?.actionSimplification) {
+          const lexical = starterRepairState.lexicalEdit;
+          const score = critiqueAverage(rejectedElite!.critique).toFixed(2);
+          const lexicalResult = lexical
+            ? Math.abs(lexical.afterCoverage - lexical.beforeCoverage) >= 0.0005
+              ? `从 ${(lexical.beforeCoverage * 100).toFixed(1)}% 提升到 ${(lexical.afterCoverage * 100).toFixed(1)}%`
+              : `为 ${(lexical.afterCoverage * 100).toFixed(1)}%`
+            : "仍未达到发布底线";
+          throw new StoryGenerationFailure(
+            starterRepairReason === "starter_lexical_load"
+              ? `第 ${episodeNumber} 集语义已通过（均分 ${score}），定向换词后覆盖率${lexicalResult}；专项行动简化后的自动重试也已完成。正文已保存，需要调整词汇表或任务设计后继续。`
+              : `第 ${episodeNumber} 集已完成锁定剧情的 Starter 语言编辑，并在专项行动简化后自动重试；自然英语仍未通过。正文已保存，需要调整本集表达设计后继续。`,
+            starterRepairReason === "starter_lexical_load"
+              ? "STARTER_LEXICAL_CAPACITY_EXHAUSTED"
+              : "STARTER_LANGUAGE_CAPACITY_EXHAUSTED",
+            starterRepairReason === "starter_lexical_load" ? "lexical" : "language",
+            "manual",
+          );
+        }
         if (!savedActive && !savedStaged && rejectedElite?.index === index
-          && (rejectedElite.critique.plot.score < 7 || rejectedElite.critique.continuity.score < 7)
-          && !replannedEpisodes.has(episodeNumber)) {
-          reportProgress(options, "planning", `第 ${episodeNumber} 集因果或连续性反复未达标，正在校正本集季纲（最多一次）`, episodeProgress(options, index, 0));
+          && (starterLoad || rejectedElite.critique.plot.score < 7 || rejectedElite.critique.continuity.score < 7)
+          && (starterLoad || !replannedEpisodes.has(episodeNumber))) {
+          reportProgress(
+            options,
+            "planning",
+            starterLoad
+              ? `第 ${episodeNumber} 集 Starter 表达负担过重，正在简化未发布的本集具体行动（最多一次）`
+              : `第 ${episodeNumber} 集因果或连续性反复未达标，正在校正本集季纲（最多一次）`,
+            episodeProgress(options, index, 0),
+          );
           const oldBeat = plan.episodes[index];
+          const sourcePlanHash = episodePlanHash(oldBeat);
           const repaired = await callStructured(options, continuityRepairPatchSchema,
             "你是短篇分级故事总编，只修复尚未发布的一集季纲。不得改变已发布正文、核心人物、已有线索及其真相。",
-            `读者：${gradedReadingBrief(options)}\n篇幅：${JSON.stringify(storyWordLimits(options, episodeNumber))}\n已发布章节（唯一事实依据）：${JSON.stringify(generated.map((item) => ({ title: item.title, paragraphs: item.paragraphs })))}\n原系列策划：${JSON.stringify(plan)}\n本集低分评审：${JSON.stringify(rejectedElite.critique)}\n请修复第 ${episodeNumber} 集：压缩为一个中心场景、一个目标、一项有代价的选择、一次可见的合作结果。明确真实因果，不能让旁观者从几个无关物件凭空推知完整真相。需要的人物可以通过观察、直接展示、说话等已建立机制获取信息。所有关键物件的位置以正文为准。把互相依赖的线索合并到同一行动里回收，不安排独立支线和复杂政策/身份解释。必须完成原核心救助或解谜目标，不能靠略去答案过关。终集收束主谜题和人物关系，不强制新增风险。完整根对象模板：${continuityRepairRootTemplate}。必须返回 episode 与 clueLedger；episode 只能含模板中的 11 个具体行动字段，clueLedger 逐项复制原线索的四个允许字段。不得返回 title、episodeMission、newInformation、irreversibleChange、number、mustNotRepeat、entryBridge、introducedIn、usedIn、payoffIn，这些章节分工、交接与排期字段由程序保留并合并。`,
+            `读者：${gradedReadingBrief(options)}\n篇幅：${JSON.stringify(storyWordLimits(options, episodeNumber))}\n已发布章节（唯一事实依据）：${JSON.stringify(generated.map((item) => ({ title: item.title, paragraphs: item.paragraphs })))}\n原系列策划：${JSON.stringify(plan)}\n本集低分评审：${JSON.stringify(rejectedElite.critique)}\n${starterLoad ? "一份剧情成立的正文已完成定向编辑，但 Starter 表达或词汇负担仍过重。必须减少同时需要解释的概念和动作：删除或合并非核心动作，只保留一次证据验证、一次说服或选择、一次直接后果；不得仅换同义词，也不得增加候选或融合要求。" : ""}\n请修复第 ${episodeNumber} 集：压缩为一个中心场景、一个目标、一项有代价的选择、一次可见的合作结果。明确真实因果，不能让旁观者从几个无关物件凭空推知完整真相。需要的人物可以通过观察、直接展示、说话等已建立机制获取信息。所有关键物件的位置以正文为准。把互相依赖的线索合并到同一行动里回收，不安排独立支线和复杂政策/身份解释。必须完成原核心救助或解谜目标，不能靠略去答案过关。终集收束主谜题和人物关系，不强制新增风险。完整根对象模板：${continuityRepairRootTemplate}。必须返回 episode 与 clueLedger；episode 只能含模板中的 11 个具体行动字段，clueLedger 逐项复制原线索的四个允许字段。不得返回 title、episodeMission、newInformation、irreversibleChange、number、mustNotRepeat、entryBridge、introducedIn、usedIn、payoffIn，这些章节分工、交接与排期字段由程序保留并合并。`,
             options.reviewModel || options.model, 0.25,
             { timeoutMs: options.timeoutMs, networkRetries: 1, structureRetries: 2, maxCompletionTokens: 3072, disableThinking: true });
           plan.episodes[index] = { ...oldBeat, ...repaired.episode };
           validateSeriesPlan(plan, options.episodes);
           replannedEpisodes.add(episodeNumber);
+          if (starterLoad) {
+            starterRepairStates.set(episodeNumber, {
+              ...starterRepairState,
+              episode: episodeNumber,
+              actionSimplification: {
+                sourcePlanHash,
+                resultPlanHash: episodePlanHash(plan.episodes[index]),
+              },
+            });
+          }
           rejectedElite = undefined;
           discardedDraftLessons = [];
           saveCheckpoint();
-          options.log(`[${episodeNumber}/${options.episodes}] 已基于已发布正文完成本集唯一一次季纲校正，已保存检查点；保留所有已发布章节和线索账本。`);
+          options.log(`[${episodeNumber}/${options.episodes}] 已基于已发布正文完成${starterLoad ? "专项行动简化" : "本集季纲校正"}并保存检查点；保留所有已发布章节和线索账本，立即自动重试本集。`);
         }
         if (savedActive) {
           const exhaustedQuality = assessRuntimeStoryQuality(
@@ -5013,7 +5342,34 @@ export async function runStoryGeneration(options: StoryRunOptions) {
             rejectedElite?.index === index ? rejectedElite : null,
             (lessons, elite) => {
               discardedDraftLessons = lessons;
-              rejectedElite = elite ? { index, ...elite } : undefined;
+              if (elite?.repairAttempt) {
+                const previous = starterRepairStates.get(episodeNumber);
+                starterRepairStates.set(episodeNumber, elite.repairAttempt.kind === "language"
+                  ? {
+                      ...previous,
+                      episode: episodeNumber,
+                      languageEdit: {
+                        sourceTextHash: elite.repairAttempt.sourceTextHash,
+                        resultTextHash: elite.repairAttempt.resultTextHash,
+                      },
+                    }
+                  : {
+                      ...previous,
+                      episode: episodeNumber,
+                      lexicalEdit: {
+                        sourceTextHash: elite.repairAttempt.sourceTextHash,
+                        resultTextHash: elite.repairAttempt.resultTextHash,
+                        beforeCoverage: elite.repairAttempt.beforeCoverage,
+                        afterCoverage: elite.repairAttempt.afterCoverage,
+                      },
+                    });
+              }
+              rejectedElite = elite ? {
+                index,
+                narrative: elite.narrative,
+                critique: elite.critique,
+                ...(elite.repairReason ? { repairReason: elite.repairReason } : {}),
+              } : undefined;
               saveCheckpoint();
             },
           );
@@ -5481,7 +5837,47 @@ export async function runStoryGeneration(options: StoryRunOptions) {
         }
 
         if (!passesStoryQualityFloor(quality, options.minLexicalCoverage)) {
-          const metadataOnly = chooseRepairKind(quality, options.minLexicalCoverage) === "metadata";
+          const finalRepairKind = chooseRepairKind(quality, options.minLexicalCoverage);
+          if (shouldPreserveStarterQualifiedLexicalFailure(
+            resolveReaderProfile(options).id,
+            quality,
+            options.minLexicalCoverage,
+            semanticReview,
+            firstEpisodeBaseline,
+          )) {
+            const currentRepairState = starterRepairStates.get(episodeNumber);
+            starterRepairStates.set(episodeNumber, {
+              ...currentRepairState,
+              episode: episodeNumber,
+              lexicalEdit: currentRepairState?.lexicalEdit ?? {
+                sourceTextHash: episodeNarrativeHash(episode),
+                resultTextHash: episodeNarrativeHash(episode),
+                beforeCoverage: quality.lexicalCoverage ?? 0,
+                afterCoverage: quality.lexicalCoverage ?? 0,
+              },
+            });
+            discardedDraftLessons = [
+              ...discardedDraftLessons,
+              `语义合格稿的下游词汇修复额度已耗尽：${quality.unfamiliarWords.join(", ")}`,
+            ].slice(-20);
+            rejectedElite = {
+              index,
+              narrative: episodeNarrativeSchema.parse({ title: episode.title, paragraphs: episode.paragraphs }),
+              critique: semanticReview,
+              repairReason: "starter_lexical_load",
+            };
+            saveCheckpoint();
+            const simplifiedAlready = Boolean(currentRepairState?.actionSimplification);
+            throw new StoryGenerationFailure(
+              simplifiedAlready
+                ? `第 ${episodeNumber} 集语义已通过（均分 ${critiqueAverage(semanticReview).toFixed(2)}），定向换词后覆盖率为 ${((quality.lexicalCoverage ?? 0) * 100).toFixed(1)}%，仍低于发布底线；专项行动简化后的自动重试已完成。正文已保存，需要调整词汇表或任务设计后继续。`
+                : `第 ${episodeNumber} 集语义已通过（均分 ${critiqueAverage(semanticReview).toFixed(2)}），但下游词汇修复额度耗尽；已保留合格正文并转入未发布行动减载，不重新生成候选`,
+              simplifiedAlready ? "STARTER_LEXICAL_CAPACITY_EXHAUSTED" : "QUALIFIED_DRAFT_LEXICAL_CAPACITY_GATE",
+              "lexical",
+              simplifiedAlready ? "manual" : "new_candidates",
+            );
+          }
+          const metadataOnly = finalRepairKind === "metadata";
           throw new StoryGenerationFailure(
             `第 ${episodeNumber} 集最终结构与词汇修稿后仍未达标：${quality.issues.join("；")}`,
             metadataOnly ? "METADATA_EVIDENCE_GATE" : "FINAL_QUALITY_GATE",

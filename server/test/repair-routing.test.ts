@@ -19,6 +19,8 @@ test("local repairs do not depend on exhausted full rewrite budget and remain bo
   assert.equal(canAttemptRepair("lexical", restored, 0), false);
   assert.ok(canAttemptRepair("metadata", restored, 4));
   restored.metadata++;
+  assert.ok(canAttemptRepair("metadata", restored, 0));
+  restored.metadata++;
   assert.equal(canAttemptRepair("metadata", restored, 0), false);
 });
 test("repair routing uses exactly the publication lexical floor and tolerance", () => {

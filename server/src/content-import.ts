@@ -32,6 +32,7 @@ export const importedArticleSchema = z
     contentKind: z.enum(["exam", "interest"]).default("exam"),
     interestId: interestIdSchema.nullable().optional(),
     seriesTitle: z.string().trim().min(2).max(160).nullable().optional(),
+    seriesKey: z.string().trim().min(1).max(200).nullable().optional(),
     episodeNumber: z.number().int().min(1).max(999).nullable().optional(),
     paragraphs: z.array(z.string().trim().min(10).max(20000)).min(1).max(30),
     questions: z.array(questionSchema).min(1).max(50),
@@ -90,12 +91,18 @@ export function importArticles(db: AppDatabase, payload: ImportPayload) {
     WHERE a.exam_id = ? AND s.content_hash = ?
     LIMIT 1
   `);
+  const existingSeriesEpisode = db.prepare(`
+    SELECT id AS articleId
+    FROM articles
+    WHERE series_key = ? AND episode_number = ?
+    LIMIT 1
+  `);
   const insertArticle = db.prepare(`
     INSERT INTO articles(
       id, exam_id, year, title, eyebrow, read_minutes, difficulty,
-      content_kind, interest_id, series_title, episode_number,
+      content_kind, interest_id, series_title, series_key, episode_number,
       paragraphs_json, questions_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       exam_id = excluded.exam_id,
       year = excluded.year,
@@ -106,6 +113,7 @@ export function importArticles(db: AppDatabase, payload: ImportPayload) {
       content_kind = excluded.content_kind,
       interest_id = excluded.interest_id,
       series_title = excluded.series_title,
+      series_key = COALESCE(excluded.series_key, articles.series_key),
       episode_number = excluded.episode_number,
       paragraphs_json = excluded.paragraphs_json,
       questions_json = excluded.questions_json
@@ -132,15 +140,20 @@ export function importArticles(db: AppDatabase, payload: ImportPayload) {
         payload.sourceUrl ?? null,
         article.externalId,
       ) as { articleId: string } | undefined;
-      const duplicate = existingContent.get(payload.examId, hash) as
-        | { articleId: string }
-        | undefined;
-      if (duplicate && duplicate.articleId !== prior?.articleId) {
+      const seriesPrior = article.seriesKey && article.episodeNumber
+        ? existingSeriesEpisode.get(article.seriesKey, article.episodeNumber) as
+          { articleId: string } | undefined
+        : undefined;
+      const duplicate = article.seriesKey
+        ? undefined
+        : existingContent.get(payload.examId, hash) as { articleId: string } | undefined;
+      const matched = seriesPrior ?? prior;
+      if (duplicate && duplicate.articleId !== matched?.articleId) {
         imported.push(duplicate.articleId);
         continue;
       }
       const id =
-        prior?.articleId ?? `${payload.examId}-sync-${hash.slice(0, 18)}`;
+        matched?.articleId ?? `${payload.examId}-sync-${hash.slice(0, 18)}`;
       insertArticle.run(
         id,
         payload.examId,
@@ -152,6 +165,7 @@ export function importArticles(db: AppDatabase, payload: ImportPayload) {
         article.contentKind,
         article.contentKind === "interest" ? article.interestId ?? null : null,
         article.seriesTitle ?? null,
+        article.seriesKey ?? null,
         article.episodeNumber ?? null,
         JSON.stringify(article.paragraphs),
         JSON.stringify(article.questions),

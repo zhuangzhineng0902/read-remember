@@ -904,6 +904,10 @@ export function createApp(
     completedAt: string | null;
   };
   const serializeCustomStory = (row: CustomStoryRow) => {
+    const checkpointJson = (db.prepare(
+      "SELECT checkpoint_json AS checkpointJson FROM custom_story_requests WHERE id = ?",
+    ).get(row.id) as { checkpointJson: string }).checkpointJson;
+    const revisionMessage = customStories?.retryBlockReason?.(checkpointJson) ?? null;
     const articles = db
       .prepare(
         `SELECT ${articleSelect},
@@ -934,7 +938,9 @@ export function createApp(
       completedEpisodeCount: row.completedEpisodeCount,
       automaticRetryEpisode: row.automaticRetryEpisode,
       automaticRetryCount: row.automaticRetryCount,
-      resumeAvailable: Boolean(row.resumeAvailable),
+      resumeAvailable: Boolean(row.resumeAvailable) && !revisionMessage,
+      requiresRevision: Boolean(revisionMessage),
+      revisionMessage,
       createdAt: sqliteTimestampToIso(row.createdAt),
       updatedAt: sqliteTimestampToIso(row.updatedAt),
       completedAt: row.completedAt ? sqliteTimestampToIso(row.completedAt) : null,
@@ -982,6 +988,13 @@ export function createApp(
     if (!row) throw new ApiError(404, "CUSTOM_STORY_NOT_FOUND", "定制故事不存在");
     if (row.status !== "failed") {
       throw new ApiError(409, "CUSTOM_STORY_NOT_FAILED", "只有失败的故事可以重新生成");
+    }
+    const checkpointRow = db.prepare(
+      "SELECT checkpoint_json AS checkpointJson FROM custom_story_requests WHERE id = ?",
+    ).get(row.id) as { checkpointJson: string };
+    const retryBlockReason = customStories.retryBlockReason?.(checkpointRow.checkpointJson);
+    if (retryBlockReason) {
+      throw new ApiError(409, "CUSTOM_STORY_REQUIRES_REVISION", retryBlockReason);
     }
     const resumeMessage = row.resumeAvailable
       ? row.completedEpisodeCount

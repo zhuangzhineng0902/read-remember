@@ -7,6 +7,7 @@ import {
   runStoryGeneration,
   StoryGenerationFailure,
   storyGenerationPolicy,
+  storyCheckpointRetryBlockReason,
   type ReaderStageId,
   type StoryGenerationCheckpoint,
   type StoryGenerationProgress,
@@ -38,7 +39,15 @@ export type CustomStoryProvider = {
   readonly enabled: boolean;
   enqueue(requestId: string): void;
   resume(): void;
+  retryBlockReason?(checkpointJson: string): string | null;
 };
+
+export class CorruptStoryCheckpointError extends Error {
+  constructor(detail: string) {
+    super(`故事检查点损坏，已禁止从第一集静默重建：${detail}`);
+    this.name = "CorruptStoryCheckpointError";
+  }
+}
 
 const toneGuides: Record<string, string> = {
   adventure: "冒险、紧张但不恐怖、每章都有行动目标",
@@ -190,9 +199,20 @@ export class CustomStoryService implements CustomStoryProvider {
         checkpointEpisodeCount: number;
         automaticRetryEpisode: number;
         automaticRetryCount: number;
-      }>;
+    }>;
     for (const row of rows) {
-      const checkpoint = this.parseCheckpoint(row.checkpointJson);
+      let checkpoint: StoryGenerationCheckpoint | null;
+      try {
+        checkpoint = this.parseCheckpoint(row.checkpointJson);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "故事检查点损坏";
+        this.db.prepare(
+          `UPDATE custom_story_requests SET status = 'failed', progress_stage = 'failed',
+           error_message = ?, progress_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        ).run(message.slice(0, 1000), "检查点无法解析，需要修复数据后继续", row.id);
+        this.appendStoryLog(row.id, "error", message);
+        continue;
+      }
       if (
         row.status === "generating"
         && !shouldResumeInterruptedStory(
@@ -256,7 +276,19 @@ export class CustomStoryService implements CustomStoryProvider {
   private async generate(requestId: string): Promise<void> {
     const request = this.request(requestId);
     if (!request || request.status !== "queued") return;
-    const checkpoint = this.parseCheckpoint(request.checkpointJson);
+    let checkpoint: StoryGenerationCheckpoint | null;
+    try {
+      checkpoint = this.parseCheckpoint(request.checkpointJson);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "故事检查点损坏";
+      this.db.prepare(
+        `UPDATE custom_story_requests SET status = 'failed', progress_stage = 'failed',
+         error_message = ?, progress_message = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'queued'`,
+      ).run(message.slice(0, 1000), "检查点无法解析，需要修复数据后继续", request.id);
+      this.appendStoryLog(request.id, "error", message);
+      return;
+    }
     const claim = this.db.prepare(
       `UPDATE custom_story_requests SET status = 'generating',
        error_message = '', progress_stage = ?, progress_message = ?,
@@ -298,6 +330,7 @@ export class CustomStoryService implements CustomStoryProvider {
         readerStage: request.readerStage,
         episodes: request.episodeCount,
         importNamespace: `custom-${request.id}`,
+        seriesVersionId: request.id,
         dryRun: false,
         force: false,
         checkpoint,
@@ -440,7 +473,9 @@ export class CustomStoryService implements CustomStoryProvider {
         return;
       }
       const resumeMessage = savedCheckpoint
-        ? pendingEpisode(savedCheckpoint)
+        ? error instanceof StoryGenerationFailure && error.retryScope === "manual"
+          ? errorMessage
+          : pendingEpisode(savedCheckpoint)
           ? `已保存第 ${pendingEpisode(savedCheckpoint)!.index + 1} 集的${checkpointStageLabels[pendingEpisode(savedCheckpoint)!.stage] ?? "阶段成果"}，重试后将从这里继续`
           : (saved?.checkpointEpisodeCount ?? 0) > 0
           ? `已保存前 ${saved?.checkpointEpisodeCount} 集，重试后将从第 ${(saved?.checkpointEpisodeCount ?? 0) + 1} 集继续`
@@ -555,9 +590,23 @@ export class CustomStoryService implements CustomStoryProvider {
   private parseCheckpoint(value: string) {
     if (!value) return null;
     try {
-      return parseStoryGenerationCheckpoint(JSON.parse(value));
-    } catch {
-      return null;
+      const parsed = parseStoryGenerationCheckpoint(JSON.parse(value));
+      if (!parsed) throw new CorruptStoryCheckpointError("JSON 可解析，但字段或层级不符合检查点 Schema");
+      return parsed;
+    } catch (error) {
+      if (error instanceof CorruptStoryCheckpointError) throw error;
+      throw new CorruptStoryCheckpointError(
+        error instanceof Error ? error.message : "不是合法 JSON",
+      );
+    }
+  }
+
+  retryBlockReason(checkpointJson: string) {
+    try {
+      const checkpoint = this.parseCheckpoint(checkpointJson);
+      return checkpoint ? storyCheckpointRetryBlockReason(checkpoint) : null;
+    } catch (error) {
+      return error instanceof Error ? error.message : "故事检查点损坏，需要修复后继续";
     }
   }
 }

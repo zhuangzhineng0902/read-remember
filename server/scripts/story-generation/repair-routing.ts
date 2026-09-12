@@ -18,7 +18,7 @@ export const storyIssueSchema = z.object({
 export type StoryIssue = z.infer<typeof storyIssueSchema>;
 
 export const localRepairAttemptsSchema = z.object({
-  metadata: z.number().int().min(0).max(1),
+  metadata: z.number().int().min(0).max(2),
   lexical: z.number().int().min(0).max(1),
 });
 export type LocalRepairAttempts = z.infer<typeof localRepairAttemptsSchema>;
@@ -60,5 +60,6 @@ export function chooseRepairKind(quality: RepairQuality, target: number): Repair
 
 export function canAttemptRepair(kind: RepairKind, attempts: LocalRepairAttempts, fullRewriteCount: number) {
   if (kind === "none") return false;
-  return kind === "narrative" ? fullRewriteCount < 4 : attempts[kind] < 1;
+  if (kind === "narrative") return fullRewriteCount < 4;
+  return attempts[kind] < (kind === "metadata" ? 2 : 1);
 }

@@ -246,6 +246,8 @@ export type CustomStory = CustomStoryInput & {
   automaticRetryEpisode: number;
   automaticRetryCount: number;
   resumeAvailable: boolean;
+  requiresRevision: boolean;
+  revisionMessage: string | null;
   seriesTitle: string;
   errorMessage: string;
   createdAt: string;

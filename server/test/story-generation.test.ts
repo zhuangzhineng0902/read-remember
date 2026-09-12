@@ -14,6 +14,7 @@ import {
   buildSeriesPlanPrompt,
   candidateReviewMode,
   candidateVocabularyIsReviewable,
+  canAdoptQualifiedLexicalRepair,
   callStructured,
   compressionDriftIssues,
   creativeDraftModelPolicy,
@@ -52,6 +53,7 @@ import {
   normalizeSeriesPlan,
   normalizeStoryCritique,
   normalizeTargetWords,
+  needsStarterLanguageEdit,
   selectNarrativeTargetWords,
   narrativePreflightIssues,
   narrativeCompletionTokenBudget,
@@ -71,6 +73,7 @@ import {
   selectBestStoryCritique,
   selectDraftLessonsForPrompt,
   shouldAdoptMechanicalRepair,
+  shouldPreserveStarterQualifiedLexicalFailure,
   semanticPlanningModelPolicy,
   semanticRewriteModelPolicy,
   seriesPlanClueCapacityAdjustments,
@@ -79,6 +82,7 @@ import {
   repairObjectFields,
   structureModelForAttempt,
   storyGenerationCheckpointSchema,
+  storyCheckpointRetryBlockReason,
   storyPlanCapacity,
   storyEpisodeAttemptBudget,
   structuredJsonValues,
@@ -1065,6 +1069,203 @@ const strongCritique: StoryCritique = {
   continuity: { score: 9, issues: [] },
   rewritePriorities: ["保持当前清晰推进"],
 };
+
+test("Starter language editing locks only plot-valid drafts with a language bottleneck", () => {
+  const languageBottleneck: StoryCritique = {
+    plot: { score: 8, issues: [] },
+    childAppeal: { score: 8, issues: [] },
+    gradedLanguage: { score: 6, issues: ["时态和搭配不自然"] },
+    continuity: { score: 8, issues: [] },
+    rewritePriorities: ["只修语言"],
+  };
+  assert.equal(needsStarterLanguageEdit("starter", languageBottleneck), true);
+  assert.equal(needsStarterLanguageEdit("stage1", languageBottleneck), false);
+  assert.equal(needsStarterLanguageEdit("starter", {
+    ...languageBottleneck,
+    plot: { score: 6, issues: ["剧情缺少因果"] },
+  }), false);
+  assert.equal(needsStarterLanguageEdit("starter", strongCritique), false);
+});
+
+test("a qualified draft adopts lexical repair only when vocabulary and semantics both remain valid", () => {
+  const repairedVocabulary = { lexicalCoverage: 0.91, wordCount: 240 };
+  assert.equal(canAdoptQualifiedLexicalRepair(repairedVocabulary, 0.95, strongCritique), true);
+  assert.equal(canAdoptQualifiedLexicalRepair(
+    { lexicalCoverage: 0.86, wordCount: 240 },
+    0.95,
+    strongCritique,
+  ), false);
+  assert.equal(canAdoptQualifiedLexicalRepair(repairedVocabulary, 0.95, {
+    ...strongCritique,
+    continuity: { score: 6, issues: ["换词改变了线索含义"] },
+  }), false);
+});
+
+test("a downstream Starter lexical failure preserves a semantically qualified draft for plan reduction", () => {
+  const lexicalFailure = {
+    score: 86,
+    wordCount: 270,
+    averageSentenceWords: 9,
+    lexicalCoverage: 0.889,
+    unfamiliarWords: ["telescope", "fence"],
+    issues: ["高频词覆盖率不足"],
+    blockingIssues: ["高频词覆盖率不足"],
+    blockingIssueDetails: [{
+      code: "LEXICAL_COVERAGE_LOW",
+      domain: "lexical" as const,
+      message: "高频词覆盖率不足",
+    }],
+  };
+  assert.equal(shouldPreserveStarterQualifiedLexicalFailure(
+    "starter", lexicalFailure, 0.95, strongCritique,
+  ), true);
+  assert.equal(shouldPreserveStarterQualifiedLexicalFailure(
+    "stage1", lexicalFailure, 0.95, strongCritique,
+  ), false);
+  assert.equal(shouldPreserveStarterQualifiedLexicalFailure(
+    "starter", lexicalFailure, 0.95, {
+      ...strongCritique,
+      plot: { score: 6, issues: ["剧情未通过"] },
+    },
+  ), false);
+});
+
+test("checkpoint preserves the Starter language-load repair reason", () => {
+  const episode = checkpointEpisode("Locked Starter Draft");
+  const checkpoint = parseStoryGenerationCheckpoint({
+    version: 2,
+    plan: validPlan,
+    episodes: [],
+    rejectedElite: {
+      index: 0,
+      narrative: { title: episode.title, paragraphs: episode.paragraphs },
+      critique: {
+        ...strongCritique,
+        gradedLanguage: { score: 6, issues: ["搭配不自然"] },
+      },
+      repairReason: "starter_language_load",
+    },
+  });
+  assert.equal(checkpoint?.rejectedElite?.repairReason, "starter_language_load");
+  assert.equal(checkpoint?.rejectedElite?.narrative.title, "Locked Starter Draft");
+});
+
+test("Starter language-load recovery simplifies only editable episode actions", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "read-remember-starter-load-"));
+  const databasePath = path.join(directory, "story.sqlite");
+  const requests: string[] = [];
+  let saved: StoryRunOptions["checkpoint"];
+  createDatabase(databasePath).close();
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const parsed = JSON.parse(body) as { messages: Array<{ role: string; content: string }> };
+      const system = parsed.messages.find((message) => message.role === "system")?.content ?? "";
+      requests.push(system);
+      modelJson(response, {
+        episode: {
+          openingHook: "钟声突然从北门响起。",
+          goal: "伙伴只检查北门的钟。",
+          obstacle: "北门的钟门被旧锁牢牢锁住了。",
+          choice: "他们决定一起用三件工具开门。",
+          consequence: "门打开并露出一片铜屑。",
+          newQuestion: "谁动过里面的齿轮？",
+          problem: "错误钟声会误导船只。",
+          clue: "门内只有一片铜屑。",
+          teamworkTurn: "三人同时使用各自的工具。",
+          emotionalBeat: "Mia 主动请伙伴核对发现。",
+          cliffhanger: "齿轮盒里又响了一声。",
+        },
+        clueLedger: validPlan.clueLedger.map(({ id, clue, misdirection, payoff }) => ({ id, clue, misdirection, payoff })),
+      });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const locked = checkpointEpisode("Locked Starter Draft");
+  const checkpoint = {
+    version: 2 as const,
+    plan: validPlan,
+    episodes: [],
+    storyContractVersion: "feasible-serial-contract-v13",
+    rejectedElite: {
+      index: 0,
+      narrative: { title: locked.title, paragraphs: locked.paragraphs },
+      critique: {
+        ...strongCritique,
+        gradedLanguage: { score: 6, issues: ["时态和搭配不自然"] },
+      },
+      repairReason: "starter_language_load" as const,
+    },
+  };
+  try {
+    const options = resumableRunOptions(
+      databasePath,
+      `http://127.0.0.1:${address.port}`,
+      checkpoint,
+      [],
+    );
+    options.readerStage = "starter";
+    options.onCheckpoint = (next) => {
+      saved = next;
+      if (next.replannedEpisodes?.includes(1)) throw new Error("injected stop after Starter load repair");
+    };
+    await assert.rejects(runStoryGeneration(options), /injected stop after Starter load repair/);
+    assert.equal(requests.length, 1);
+    assert.match(requests[0], /短篇分级故事总编/);
+    if (!saved || saved.version !== 2) throw new Error("expected repaired checkpoint");
+    assert.equal(saved.plan.episodes[0].goal, "伙伴只检查北门的钟。");
+    assert.equal(saved.plan.episodes[0].episodeMission, validPlan.episodes[0].episodeMission);
+    assert.deepEqual(saved.plan.episodes[0].newInformation, validPlan.episodes[0].newInformation);
+    assert.equal(saved.plan.episodes[0].irreversibleChange, validPlan.episodes[0].irreversibleChange);
+    assert.equal(saved.plan.clueLedger[0].introducedIn, validPlan.clueLedger[0].introducedIn);
+    assert.equal(saved.plan.clueLedger[0].usedIn, validPlan.clueLedger[0].usedIn);
+    assert.equal(saved.plan.clueLedger[0].payoffIn, validPlan.clueLedger[0].payoffIn);
+    assert.equal(saved.rejectedElite, undefined);
+    assert.equal(saved.starterRepairStates?.[0]?.episode, 1);
+    assert.match(saved.starterRepairStates?.[0]?.actionSimplification?.sourcePlanHash ?? "", /^[a-f0-9]{64}$/);
+    assert.match(saved.starterRepairStates?.[0]?.actionSimplification?.resultPlanHash ?? "", /^[a-f0-9]{64}$/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("lexical repair and action simplification produce an accurate manual retry blocker", () => {
+  const episode = checkpointEpisode("Saved Semantic Draft");
+  const checkpoint = parseStoryGenerationCheckpoint({
+    version: 2,
+    plan: validPlan,
+    episodes: [],
+    rejectedElite: {
+      index: 1,
+      narrative: { title: episode.title, paragraphs: episode.paragraphs },
+      critique: strongCritique,
+      repairReason: "starter_lexical_load",
+    },
+    starterRepairStates: [{
+      episode: 2,
+      lexicalEdit: {
+        sourceTextHash: "a".repeat(64),
+        resultTextHash: "b".repeat(64),
+        beforeCoverage: 0.866,
+        afterCoverage: 0.879,
+      },
+      actionSimplification: {
+        sourcePlanHash: "c".repeat(64),
+        resultPlanHash: "d".repeat(64),
+      },
+    }],
+  });
+  assert.ok(checkpoint);
+  const reason = storyCheckpointRetryBlockReason(checkpoint);
+  assert.match(reason ?? "", /语义已通过/);
+  assert.match(reason ?? "", /87\.9%/);
+  assert.match(reason ?? "", /需要调整词汇表或任务设计后继续/);
+});
 
 test("candidate critique batches preserve a single top-level review for targeted recovery", () => {
   const singleReview = {
