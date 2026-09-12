@@ -54,7 +54,14 @@ const checkpointStageLabels: Record<string, string> = {
   mechanical_repaired: "结构与词汇修稿",
   semantic_reviewed: "语义评审",
   semantic_rewritten: "剧情修稿",
+  metadata_pending: "正文已保存，待补元数据",
+  questions_pending: "正文已定稿，待生成题目",
+  ready_to_publish: "全部门禁已通过，待发布",
 };
+
+function pendingEpisode(checkpoint: StoryGenerationCheckpoint | null) {
+  return checkpoint?.activeEpisode ?? checkpoint?.stagedEpisode;
+}
 
 // Each episode gets three automatic continuations in addition to its initial
 // run. The persisted episode number prevents one difficult chapter from using
@@ -107,7 +114,10 @@ export function storyFailureFingerprint(
   checkpoint: StoryGenerationCheckpoint | null,
   failedEpisode: number,
 ) {
-  const active = checkpoint?.activeEpisode;
+  const active = pendingEpisode(checkpoint);
+  const narrative = active
+    ? active.stage === "metadata_pending" ? active.narrative : active.episode
+    : null;
   return createHash("sha256").update(JSON.stringify({
     failedEpisode,
     message: message.replace(/\s+/g, " ").trim(),
@@ -119,8 +129,8 @@ export function storyFailureFingerprint(
       mechanicalRepairUsed: active.mechanicalRepairUsed,
       semanticRewriteUsed: active.semanticRewriteUsed,
       lexicalRepairExhausted: active.lexicalRepairExhausted ?? false,
-      title: active.episode.title,
-      paragraphs: active.episode.paragraphs,
+      title: narrative?.title,
+      paragraphs: narrative?.paragraphs,
     } : null,
   })).digest("hex");
 }
@@ -130,7 +140,7 @@ export function shouldFuseStoryFailure(
 ) {
   // A saved season plan is not a saved failed draft. Fresh candidate batches
   // may share the same error text while containing entirely different prose.
-  return Boolean(checkpoint?.activeEpisode)
+  return Boolean(pendingEpisode(checkpoint))
     && !(error instanceof StoryGenerationFailure && error.retryScope === "new_candidates")
     && !isTransientModelCapacityError(error)
     && repeatedCount >= 2;
@@ -190,7 +200,7 @@ export class CustomStoryService implements CustomStoryProvider {
           row.automaticRetryCount,
           row.checkpointEpisodeCount,
           row.episodeCount,
-          Boolean(checkpoint?.activeEpisode),
+          Boolean(pendingEpisode(checkpoint)),
         )
       ) {
         const episodeNumber = Math.min(row.episodeCount, Math.max(1, row.checkpointEpisodeCount + 1));
@@ -255,8 +265,8 @@ export class CustomStoryService implements CustomStoryProvider {
     ).run(
       checkpoint ? "drafting" : "planning",
       checkpoint
-        ? checkpoint.activeEpisode
-          ? `正在从第 ${checkpoint.activeEpisode.index + 1} 集的${checkpointStageLabels[checkpoint.activeEpisode.stage] ?? "已保存阶段"}继续创作`
+        ? pendingEpisode(checkpoint)
+          ? `正在从第 ${pendingEpisode(checkpoint)!.index + 1} 集的${checkpointStageLabels[pendingEpisode(checkpoint)!.stage] ?? "已保存阶段"}继续创作`
           : request.checkpointEpisodeCount
           ? `正在从第 ${request.checkpointEpisodeCount + 1} 集继续创作`
           : "正在从已保存的故事方案继续创作"
@@ -366,7 +376,7 @@ export class CustomStoryService implements CustomStoryProvider {
       const failedEpisode = savedCheckpoint
         ? Math.min(
             request.episodeCount,
-            (savedCheckpoint.activeEpisode?.index ?? savedCheckpoint.episodes.length) + 1,
+            (pendingEpisode(savedCheckpoint)?.index ?? savedCheckpoint.episodes.length) + 1,
           )
         : Math.min(request.episodeCount, Math.max(1, (saved?.checkpointEpisodeCount ?? 0) + 1));
       const retryState = episodeAutomaticRetryState(
@@ -430,8 +440,8 @@ export class CustomStoryService implements CustomStoryProvider {
         return;
       }
       const resumeMessage = savedCheckpoint
-        ? savedCheckpoint.activeEpisode
-          ? `已保存第 ${savedCheckpoint.activeEpisode.index + 1} 集的${checkpointStageLabels[savedCheckpoint.activeEpisode.stage] ?? "阶段成果"}，重试后将从这里继续`
+        ? pendingEpisode(savedCheckpoint)
+          ? `已保存第 ${pendingEpisode(savedCheckpoint)!.index + 1} 集的${checkpointStageLabels[pendingEpisode(savedCheckpoint)!.stage] ?? "阶段成果"}，重试后将从这里继续`
           : (saved?.checkpointEpisodeCount ?? 0) > 0
           ? `已保存前 ${saved?.checkpointEpisodeCount} 集，重试后将从第 ${(saved?.checkpointEpisodeCount ?? 0) + 1} 集继续`
           : "故事方案已保存，重试后将从第一集继续"

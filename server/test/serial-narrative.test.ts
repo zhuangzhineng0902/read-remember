@@ -1,31 +1,48 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { entryBridgeSchema, groundedSerialAuditSchema, publishedNarrativeHash, seasonSpineSchema, serialReadingContext, reconcileClueLedger, episodeEndingInstruction, reviewEvidenceRules } from "../scripts/story-generation/serial-narrative";
+import { entryBridgeSchema, groundedEntryBridge, groundedSerialAuditSchema, publishedNarrativeHash, seasonSpineSchema, serialReadingContext, reconcileClueLedger, episodeEndingInstruction, reviewEvidenceRules } from "../scripts/story-generation/serial-narrative";
 
 test("ledger reconciliation preserves resolved clues, identities and episode schedules", () => {
   const old = [
-    { id: "C1", introducedIn: 1, usedIn: 1, payoffIn: 1, payoff: "published result" },
-    { id: "C2", introducedIn: 1, usedIn: 2, payoffIn: 2, payoff: "old planned result" },
+    { id: "C1", clue: "old clue one", misdirection: "old wrong idea", introducedIn: 1, usedIn: 1, payoffIn: 1, payoff: "published result" },
+    { id: "C2", clue: "old clue two", misdirection: "another wrong idea", introducedIn: 1, usedIn: 2, payoffIn: 2, payoff: "old planned result" },
   ];
-  const revised = old.map((clue) => ({ ...clue, payoff: "prose-grounded result" }));
+  const revised = old.map(({ id, clue, misdirection }) => ({ id, clue, misdirection, payoff: "prose-grounded result" }));
   const result = reconcileClueLedger(old, revised, 2);
   assert.deepEqual(result[0], old[0]);
   assert.equal(result[1].payoff, "prose-grounded result");
+  assert.equal(result[1].introducedIn, 1);
+  assert.equal(result[1].usedIn, 2);
+  assert.equal(result[1].payoffIn, 2);
   assert.equal(old[1].payoff, "old planned result");
   assert.throws(() => reconcileClueLedger(old, revised.slice(1), 2));
   assert.throws(() => reconcileClueLedger(old, [revised[0], revised[0]], 2));
-  assert.throws(() => reconcileClueLedger(old, [revised[0], { ...revised[1], payoffIn: 3 }], 2));
 });
 
 test("ending and review policies distinguish finale from ongoing episodes without story-specific examples", () => {
   assert.match(episodeEndingInstruction(true), /不新增/);
   assert.match(episodeEndingInstruction(false), /续读期待/);
   assert.match(reviewEvidenceRules, /真实存在的段落/);
-  assert.match(reviewEvidenceRules, /不得把指定角色动作/);
+  assert.match(reviewEvidenceRules, /不得要求指定角色/);
   assert.match(reviewEvidenceRules, /终集评价因果解决与情感回报/);
+  assert.match(reviewEvidenceRules, /当前候选中完成的本集目标/);
+  assert.match(reviewEvidenceRules, /首次被另一角色亲眼验证/);
+  assert.match(reviewEvidenceRules, /不得要求指定角色、路线、道具、台词、动作顺序/);
 });
 
 const first = { title: "The Hole", paragraphs: ["Dash heard a noise.", "The boards opened. A dark hole lay under Dash."] };
+
+test("grounded handoffs cannot promote future plans into published facts", () => {
+  const bridge = groundedEntryBridge(
+    [first],
+    "Dash asks a friend to inspect the tunnel",
+  );
+  assert.equal(bridge.contractVersion, "prose-ledger-v2");
+  assert.match(bridge.immediateSituation, /The boards opened/);
+  assert.doesNotMatch(bridge.immediateSituation, /friend|tunnel/);
+  assert.match(bridge.nextAction, /^尚未发生/);
+  assert.equal(bridge.sourceHash, publishedNarrativeHash([first]));
+});
 const second = { title: "The Box", paragraphs: ["Dash looked at the box by the wall."] };
 
 test("handoff identity is bound to actual published prose, not just episode titles", () => {

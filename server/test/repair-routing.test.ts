@@ -26,3 +26,32 @@ test("repair routing uses exactly the publication lexical floor and tolerance", 
   assert.equal(lexicalFloorPassed({ ...mixed, lexicalCoverage: 0.897 }, 0.95), true);
   assert.equal(chooseRepairKind({ ...mixed, lexicalCoverage: null }, 0.95), "metadata");
 });
+
+test("structured issue domains drive repair routing independently of localized messages", () => {
+  const metadata = {
+    ...mixed,
+    lexicalCoverage: 0.94,
+    blockingIssues: ["this message can be translated or rewritten"],
+    blockingIssueDetails: [{
+      code: "EVIDENCE_NOT_IN_SOURCE",
+      domain: "metadata" as const,
+      field: "qualityEvidence.sensoryQuote",
+      message: "arbitrary wording",
+      evidence: "missing span",
+    }],
+  };
+  assert.equal(chooseRepairKind(metadata, 0.95), "metadata");
+  assert.equal(chooseRepairKind({
+    ...metadata,
+    lexicalCoverage: 0.88,
+    blockingIssueDetails: [
+      ...metadata.blockingIssueDetails,
+      { code: "LEXICAL_FLOOR", domain: "lexical" as const, message: "vocabulary threshold" },
+    ],
+  }, 0.95), "lexical");
+  assert.equal(chooseRepairKind({
+    ...metadata,
+    lexicalCoverage: 0.94,
+    blockingIssueDetails: [{ code: "BODY_TOO_LONG", domain: "narrative" as const, message: "五感描写证据" }],
+  }, 0.95), "narrative");
+});

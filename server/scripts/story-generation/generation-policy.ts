@@ -24,7 +24,7 @@ export const storyGenerationPolicy = Object.freeze({
   },
 } as const);
 
-export type StoryFailureDomain = "narrative" | "metadata" | "lexical" | "infrastructure";
+export type StoryFailureDomain = "narrative" | "metadata" | "lexical" | "questions" | "infrastructure";
 export type StoryRetryScope = "same_text" | "top_candidate" | "new_candidates" | "manual";
 
 export class StoryGenerationFailure extends Error {

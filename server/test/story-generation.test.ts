@@ -12,12 +12,17 @@ import {
   buildNarrativeCraftBrief,
   buildEpisodeWritingContract,
   buildSeriesPlanPrompt,
+  candidateReviewMode,
+  candidateVocabularyIsReviewable,
   callStructured,
   compressionDriftIssues,
   creativeDraftModelPolicy,
   draftSevereSentenceBudgetIssues,
   draftSentenceBudgetIssues,
   episodeDraftFailureSummary,
+  episodeNarrativeHash,
+  episodePlanPatchSchema,
+  continuityEpisodePatchSchema,
   episodeWritingContractCapacityIssues,
   examVocabularyTags,
   lexicalAllowedWords,
@@ -32,6 +37,11 @@ import {
   isSemanticRepairProgress,
   loadStoryEngagementBrief,
   lexicalEditDriftIssues,
+  clueLedgerPatchSchema,
+  continuityRepairPatchSchema,
+  continuityRepairRootTemplate,
+  continuityEvidenceProblems,
+  groundStoryCritiqueEvidence,
   mergeEpisodeStructure,
   normalizeCandidateCritiqueBatch,
   normalizeContinuitySummary,
@@ -49,11 +59,14 @@ import {
   parseStoryGenerationCheckpoint,
   prioritizeTargetWords,
   readStreamingModelContent,
+  relevantEvidenceCandidates,
   recoverStructuredComposite,
   passesStoryQualityFloor,
   repeatedNarrativeIssues,
   resolveReaderProfile,
+  reviewEpisodeWritingContract,
   runStoryGeneration,
+  runOptionalStage,
   selectBackboneStoryCritique,
   selectBestStoryCritique,
   selectDraftLessonsForPrompt,
@@ -86,6 +99,7 @@ import {
   shouldFuseStoryFailure,
 } from "../src/custom-story";
 import { StoryGenerationFailure } from "../scripts/story-generation/generation-policy";
+import { normalizeProviderJsonSchema, responseFormatForSchema, zodFailureLabel } from "../scripts/story-generation/model-client";
 
 test("learning words come from actual prose regardless of malformed model word lists", () => {
   const paragraphs = ["Dash’s friend opened the door. The little mouse found a small box near the floor.", "The friend helped carry the box back home."];
@@ -133,6 +147,38 @@ test("one visible episode attempt cannot hide extra candidate or synthesis round
     supplementalCandidates: 2,
     minimumCandidatePool: 3,
   });
+});
+
+test("candidate review mode short-circuits empty pools and treats one draft as a single review", () => {
+  assert.equal(candidateReviewMode(0), "skip");
+  assert.equal(candidateReviewMode(1), "single");
+  assert.equal(candidateReviewMode(2), "batch");
+});
+
+test("optional stages preserve the last qualified artifact when optimization fails", async () => {
+  const fallback = { title: "Qualified", adopted: false };
+  let failure: unknown;
+  const result = await runOptionalStage(fallback, async () => {
+    throw new Error("injected optional timeout");
+  }, (error) => { failure = error; });
+  assert.equal(result, fallback);
+  assert.match(String(failure), /injected optional timeout/);
+  assert.deepEqual(await runOptionalStage(fallback, async () => ({ title: "Better", adopted: true }), () => {}), {
+    title: "Better",
+    adopted: true,
+  });
+});
+
+test("initial evidence selection keeps bounded source candidates and prioritizes the intended original span", () => {
+  const candidates = Array.from({ length: 100 }, (_, id) => ({
+    id,
+    paragraph: 1,
+    quote: id === 77 ? "The brass key clicked inside the lock." : `Unrelated source sentence number ${id}.`,
+  }));
+  const selected = relevantEvidenceCandidates(candidates, "The brass key clicked inside the lock.", 12);
+  assert.equal(selected.length, 12);
+  assert.equal(selected[0].quote, "The brass key clicked inside the lock.");
+  assert.deepEqual(selected.map((candidate) => candidate.id), Array.from({ length: 12 }, (_, id) => id));
 });
 
 test("an interrupted task cannot restart a fresh episode after its retry budget is exhausted", () => {
@@ -337,6 +383,116 @@ const validPlan: SeriesPlan = {
     cliffhanger: "锁住的齿轮盒里传出第二次滴答声。",
   })),
 };
+
+test("continuity repair schemas accept only editable text and leave scheduling to the program", () => {
+  const episodePatch = episodePlanPatchSchema.parse({
+    ...validPlan.episodes[0],
+    number: 99,
+    mustNotRepeat: ["model must not replace this"],
+    entryBridge: { immediateSituation: "wrong", unresolvedPromise: "wrong", nextAction: "wrong", whyNow: "wrong" },
+  });
+  assert.equal("number" in episodePatch, false);
+  assert.equal("mustNotRepeat" in episodePatch, false);
+  assert.equal("entryBridge" in episodePatch, false);
+
+  const cluePatch = clueLedgerPatchSchema.parse({ ...validPlan.clueLedger[0], introducedIn: 9, usedIn: 9, payoffIn: 9 });
+  assert.deepEqual(Object.keys(cluePatch).sort(), ["clue", "id", "misdirection", "payoff"]);
+
+  const continuityPatch = continuityEpisodePatchSchema.parse(validPlan.episodes[1]);
+  assert.deepEqual(Object.keys(continuityPatch).sort(), [
+    "choice", "cliffhanger", "clue", "consequence", "emotionalBeat", "goal",
+    "newQuestion", "obstacle", "openingHook", "problem", "teamworkTurn",
+  ]);
+
+  const nakedPatch = continuityRepairPatchSchema.parse({
+    ...validPlan.episodes[1], number: 88, mustNotRepeat: ["wrong"], entryBridge: validPlan.episodes[1].entryBridge,
+  });
+  assert.equal("title" in nakedPatch.episode, false);
+  assert.deepEqual(nakedPatch.clueLedger, []);
+
+  const splitPatch = continuityRepairPatchSchema.parse([
+    validPlan.episodes[1],
+    validPlan.clueLedger.map(({ id, clue, misdirection, payoff }) => ({ id, clue, misdirection, payoff })),
+  ]);
+  assert.equal(splitPatch.episode.goal, validPlan.episodes[1].goal);
+  assert.equal(splitPatch.clueLedger.length, validPlan.clueLedger.length);
+  const rootTemplate = JSON.parse(continuityRepairRootTemplate);
+  assert.deepEqual(Object.keys(rootTemplate).sort(), ["clueLedger", "episode"]);
+  assert.deepEqual(Object.keys(rootTemplate.episode).sort(), Object.keys(continuityPatch).sort());
+
+  const responseFormat = responseFormatForSchema(continuityRepairPatchSchema);
+  assert.equal(responseFormat.type, "json_schema");
+  assert.equal(responseFormat.json_schema.strict, true);
+  const responseSchema = responseFormat.json_schema.schema as {
+    required?: string[];
+    properties?: Record<string, unknown>;
+  };
+  assert.deepEqual(responseSchema.required?.sort(), ["clueLedger", "episode"]);
+  assert.deepEqual(Object.keys(responseSchema.properties ?? {}).sort(), ["clueLedger", "episode"]);
+
+  const transformedFormat = responseFormatForSchema(
+    z.object({ score: z.number(), issues: z.array(z.string()) }).transform((value) => value.score),
+  );
+  assert.deepEqual(
+    Object.keys((transformedFormat.json_schema.schema as { properties?: object }).properties ?? {}).sort(),
+    ["issues", "score"],
+  );
+  assert.deepEqual(normalizeProviderJsonSchema({ type: "object", additionalProperties: {} }), {
+    type: "object", additionalProperties: true,
+  });
+  const openFormat = responseFormatForSchema(z.record(z.string(), z.unknown()));
+  assert.equal(openFormat.json_schema.strict, false);
+});
+
+test("structured output diagnostics separate schema shape from business constraints", () => {
+  const shape = z.object({ episode: z.object({ goal: z.string() }) }).safeParse({});
+  assert.equal(shape.success, false);
+  if (!shape.success) assert.equal(zodFailureLabel(shape.error), "Schema 结构校验失败");
+  const business = z.string().superRefine((_value, context) => {
+    context.addIssue({ code: "custom", message: "章节安排不可修改" });
+  }).safeParse("valid json scalar");
+  assert.equal(business.success, false);
+  if (!business.success) assert.equal(zodFailureLabel(business.error), "业务约束校验失败");
+});
+
+test("review contracts describe narrative functions without prescribing routes or actors", () => {
+  const reviewContract = reviewEpisodeWritingContract(buildEpisodeWritingContract({ examId: "middle" }, validPlan, 2));
+  const serialized = JSON.stringify(reviewContract);
+  assert.match(serialized, /叙事功能|中心问题|新问题/);
+  assert.doesNotMatch(serialized, /Mia|Ben|三座时钟|分享各自/);
+  assert.equal("paragraphCards" in reviewContract, false);
+  assert.equal("requiredEvents" in reviewContract, false);
+});
+
+test("continuity review claims require exact evidence from the declared prose source", () => {
+  const previous = ["Ming said the grey shape was not a mother wolf. It was something else."];
+  const current = ["Uncle Chen looked through the telescope and put down the rope."];
+  assert.deepEqual(continuityEvidenceProblems([
+    "【当前证据：looked through the telescope】Uncle Chen changes his decision after seeing it.",
+  ], previous, current), []);
+  assert.equal(continuityEvidenceProblems([
+    "【当前证据：looked through the telescope】上一集已经确认它是一头熊。",
+  ], previous, current).length, 1);
+  assert.equal(continuityEvidenceProblems([
+    "【前文证据：already confirmed it was a bear】上一集已经确认它是一头熊。",
+  ], previous, current).length, 1);
+
+  const grounded = groundStoryCritiqueEvidence({
+    plot: { score: 8, issues: [] }, childAppeal: { score: 8, issues: [] },
+    gradedLanguage: { score: 8, issues: [] },
+    continuity: { score: 5, issues: ["【前文证据：already confirmed it was a bear】上一集已经确认它是一头熊。"] },
+    rewritePriorities: ["按虚构的熊结论重写"],
+  }, previous, current);
+  assert.equal(grounded.continuity.score, 8);
+  assert.deepEqual(grounded.continuity.issues, []);
+  assert.doesNotMatch(grounded.rewritePriorities.join(" "), /虚构的熊/);
+});
+
+test("near-floor vocabulary drafts remain reviewable but do not pass publication", () => {
+  assert.equal(candidateVocabularyIsReviewable({ lexicalCoverage: 0.85, wordCount: 240 }, 0.95), true);
+  assert.equal(candidateVocabularyIsReviewable({ lexicalCoverage: 0.849, wordCount: 240 }, 0.95), false);
+  assert.equal(passesStoryQualityFloor({ lexicalCoverage: 0.85, wordCount: 240, blockingIssues: [] }, 0.95), false);
+});
 
 function checkpointEpisode(title: string): GeneratedStoryEpisode {
   return {
@@ -864,7 +1020,8 @@ test("short-reading completion budgets stay bounded while leaving room to close 
   assert.ok(narrativeCompletionTokenBudget(208) >= 700);
   assert.ok(narrativeCompletionTokenBudget(310) > 310 * 2);
   assert.ok(narrativeCompletionTokenBudget(800) > 800 * 2);
-  assert.ok(narrativeCompletionTokenBudget(2000) <= 4096);
+  assert.ok(narrativeCompletionTokenBudget(208) >= 8192);
+  assert.ok(narrativeCompletionTokenBudget(2000) <= 16384);
 });
 
 test("a JSON-valid truncated chapter is rejected before scoring", () => {
@@ -1437,6 +1594,73 @@ test("an in-progress episode checkpoint resumes from its exact generation stage"
   assert.equal(checkpoint?.reviewCalibrationVersion, "independent-four-dimension-v2-calibrated-7-7.5");
 });
 
+test("staged checkpoints preserve a selected narrative through metadata, questions, and publish boundaries", () => {
+  const completed = checkpointEpisode("Saved by stage");
+  const { questions: _questions, ...content } = completed;
+  const narrative = { title: content.title, paragraphs: content.paragraphs };
+  const quality = assessStoryQuality(
+    content,
+    { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 },
+    1,
+  );
+  const counters = {
+    fullRewriteCount: 1,
+    mechanicalRepairUsed: false,
+    semanticRewriteUsed: true,
+    localRepairAttempts: { metadata: 0, lexical: 0 },
+  };
+  const metadataPending = parseStoryGenerationCheckpoint({
+    version: 2,
+    plan: validPlan,
+    episodes: [],
+    stagedEpisode: {
+      index: 0,
+      stage: "metadata_pending",
+      narrative,
+      critique: strongCritique,
+      semanticReview: strongCritique,
+      textHash: episodeNarrativeHash(narrative),
+      source: "selected",
+      ...counters,
+    },
+  });
+  assert.equal(metadataPending?.stagedEpisode?.stage, "metadata_pending");
+  assert.equal(metadataPending?.stagedEpisode?.textHash, episodeNarrativeHash(narrative));
+
+  const questionsPending = parseStoryGenerationCheckpoint({
+    version: 2,
+    plan: validPlan,
+    episodes: [],
+    stagedEpisode: {
+      index: 0,
+      stage: "questions_pending",
+      episode: content,
+      quality,
+      critique: strongCritique,
+      semanticReview: strongCritique,
+      textHash: episodeNarrativeHash(content),
+      ...counters,
+    },
+  });
+  assert.equal(questionsPending?.stagedEpisode?.stage, "questions_pending");
+
+  const ready = parseStoryGenerationCheckpoint({
+    version: 2,
+    plan: validPlan,
+    episodes: [],
+    stagedEpisode: {
+      index: 0,
+      stage: "ready_to_publish",
+      episode: completed,
+      quality,
+      semanticReview: strongCritique,
+      textHash: episodeNarrativeHash(completed),
+      ...counters,
+    },
+  });
+  assert.equal(ready?.stagedEpisode?.stage, "ready_to_publish");
+});
+
 test("story quality blocks mixed Chinese and questions without source evidence", () => {
   const episode = checkpointEpisode("The Broken Map");
   episode.paragraphs[0] += " 小心!";
@@ -1657,6 +1881,12 @@ test("reasoning-only length responses recover through MiniMax M3 direct output i
     );
     assert.deepEqual(result, { ok: true });
     assert.equal(requestBodies.length, 2);
+    assert.equal((requestBodies[0].response_format as { type?: string }).type, "json_schema");
+    assert.deepEqual(
+      Object.keys(((requestBodies[0].response_format as { json_schema?: { schema?: { properties?: object } } })
+        .json_schema?.schema?.properties) ?? {}),
+      ["ok"],
+    );
     assert.equal(requestBodies[1].model, "MiniMax-M3");
     assert.deepEqual(requestBodies[1].thinking, { type: "disabled" });
     assert.match(logs.join(" "), /自动切换.*MiniMax-M3.*直接输出模式/);

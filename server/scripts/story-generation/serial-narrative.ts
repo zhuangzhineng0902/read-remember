@@ -17,10 +17,28 @@ export const handoffTextSchema = z.object({
 });
 
 export const entryBridgeSchema = handoffTextSchema.extend({
-  contractVersion: z.literal("prose-ledger-v1").optional(),
+  contractVersion: z.enum(["prose-ledger-v1", "prose-ledger-v2"]).optional(),
   sourceHash: z.string().length(64),
   sourceEnding: z.string().min(1).max(3000),
 });
+
+export function groundedEntryBridge(
+  episodes: readonly PublishedNarrative[],
+  nextGoal: string,
+) {
+  const sourceEnding = episodes.at(-1)?.paragraphs.at(-1);
+  if (!sourceEnding) throw new Error("章节交接缺少上一集正文结尾");
+  const bounded = (value: string) => value.length <= 600 ? value : `${value.slice(0, 599)}…`;
+  return entryBridgeSchema.parse({
+    immediateSituation: bounded(`已发布正文结尾（唯一事实）：${sourceEnding}`),
+    unresolvedPromise: bounded(`待承接的已发布结尾（不得外推）：${sourceEnding}`),
+    nextAction: bounded(`尚未发生的本集目标，可用因果等价的动作完成：${nextGoal}`),
+    whyNow: bounded(`行动起点只依据上述已发布结尾；本集计划、季纲和建议均不是已发生事实。`),
+    contractVersion: "prose-ledger-v2",
+    sourceHash: publishedNarrativeHash(episodes),
+    sourceEnding,
+  });
+}
 
 export function episodeEndingInstruction(finalEpisode: boolean) {
   return finalEpisode
@@ -28,18 +46,23 @@ export function episodeEndingInstruction(finalEpisode: boolean) {
     : "这是非终集：解决当前小目标，以本集行动产生的新信息或未解决问题形成自然的续读期待。";
 }
 
-export const reviewEvidenceRules = "评分依据优先级：已发布正文和当前正文高于季纲、摘要及写作建议。合同要求按叙事功能判断，不得把指定角色动作或旧方案细节当成唯一解法。每条扣分须定位到当前候选真实存在的段落及文字；缺失项须说明上下文缺口，不能虚构引用或段号。不得把偏好性扩写、已满足要求或正面评价列为扣分理由。终集评价因果解决与情感回报，不以新风险或下一集钩子评分。";
+export const reviewEvidenceRules = "评分依据优先级：已发布正文和当前正文高于季纲、摘要及写作建议。entryBridge 的 immediateSituation/sourceEnding 才是上一集已发生事实；nextAction/whyNow 是相对上一集尚未发生、但允许且通常应在当前候选中完成的本集目标，绝不能据此断言上一集已经完成，也不得因当前稿完成它而要求推迟到下一集。合同只按目标、阻碍、选择、后果、线索推进等叙事功能判断；不得要求指定角色、路线、道具、台词、动作顺序或旧方案细节，只要因果等价即可。requiredClueActions 只规定 plant/use/payoff 的功能，不规定具体展示步骤；读者已知证据首次被另一角色亲眼验证、因此改变决定，已经构成新的关系后果，不得判为重复发现，也不得强制添加方向、深度、距离等合同没有要求的新证据。每条扣分须定位到当前候选真实存在的段落及文字，并在输出前核对正文是否已经以同义表达满足要求；不得一边引用满足要求的句子一边声称该要求缺失。缺失项须说明上下文缺口，不能虚构引用或段号。不得把偏好性扩写、已满足要求或正面评价列为扣分理由。终集评价因果解决与情感回报，不以新风险或下一集钩子评分。";
 
-export function reconcileClueLedger<T extends { id: string; introducedIn: number; usedIn: number; payoffIn: number }>(old: T[], revised: T[], episodeNumber: number): T[] {
+export function reconcileClueLedger<T extends {
+  id: string;
+  clue: string;
+  misdirection: string;
+  payoff: string;
+  introducedIn: number;
+  usedIn: number;
+  payoffIn: number;
+}>(old: T[], revised: Array<Pick<T, "id" | "clue" | "misdirection" | "payoff">>, episodeNumber: number): T[] {
   if (revised.length !== old.length || old.some((clue) => revised.filter((item) => item.id === clue.id).length !== 1)) {
     throw new Error("线索校正必须保留全部原线索 ID，不得增加、删除或重复");
   }
   return old.map((clue) => {
     const next = revised.find((item) => item.id === clue.id)!;
-    for (const key of ["introducedIn", "usedIn", "payoffIn"] as const) {
-      if (next[key] !== clue[key]) throw new Error("线索校正不能改变既定章节安排，只能依据正文调整证据描述和验证方式");
-    }
-    return clue.payoffIn < episodeNumber ? clue : next;
+    return clue.payoffIn < episodeNumber ? clue : { ...clue, ...next };
   });
 }
 

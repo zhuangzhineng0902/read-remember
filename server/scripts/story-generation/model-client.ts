@@ -46,6 +46,46 @@ export type ModelCallPolicy = {
   recoverPartial?: (value: unknown, issues: string) => Promise<unknown | null>;
 };
 
+export function normalizeProviderJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeProviderJsonSchema);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+    key,
+    key === "additionalProperties"
+      && item && typeof item === "object" && !Array.isArray(item)
+      && Object.keys(item as Record<string, unknown>).length === 0
+      ? true
+      : normalizeProviderJsonSchema(item),
+  ]));
+}
+
+export function responseFormatForSchema(schema: z.ZodType) {
+  let converted: Record<string, unknown>;
+  try {
+    converted = z.toJSONSchema(schema) as Record<string, unknown>;
+  } catch (error) {
+    if (!/Transforms cannot be represented/i.test(modelRequestError(error))) throw error;
+    converted = z.toJSONSchema(schema, { io: "input" }) as Record<string, unknown>;
+  }
+  const { $schema: _dialect, ...rawJsonSchema } = converted;
+  const jsonSchema = normalizeProviderJsonSchema(rawJsonSchema) as Record<string, unknown>;
+  const hasOpenProperties = JSON.stringify(jsonSchema).includes('"additionalProperties":true');
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "story_generation_response",
+      strict: !hasOpenProperties,
+      schema: jsonSchema,
+    },
+  } as const;
+}
+
+export function zodFailureLabel(error: z.ZodError) {
+  return error.issues.some((issue) => issue.code === "custom")
+    ? "业务约束校验失败"
+    : "Schema 结构校验失败";
+}
+
 function schemaIssueCount<T>(result: z.ZodSafeParseResult<T>) {
   return result.success ? 0 : result.error.issues.length;
 }
@@ -333,13 +373,16 @@ async function callModelText(
   networkRetries = options.networkRetries,
   maxCompletionTokens: number = modelTokenBudgets.episode,
   disableThinking = false,
+  responseSchema?: z.ZodType,
 ) {
   let lastError: unknown;
   let capacityRetries = 0;
+  const schemaResponseFormat = responseSchema ? responseFormatForSchema(responseSchema) : null;
   for (let attempt = 1; attempt <= networkRetries; attempt++) {
     const dispatcher = modelDispatcher(timeoutMs);
     try {
-      const response = await fetch(endpoint(options), {
+      let useSchemaFormat = Boolean(responseSchema);
+      const request = () => fetch(endpoint(options), {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -348,7 +391,9 @@ async function callModelText(
         body: JSON.stringify({
           model,
           temperature,
-          response_format: { type: "json_object" },
+          response_format: useSchemaFormat && schemaResponseFormat
+            ? schemaResponseFormat
+            : { type: "json_object" },
           stream: true,
           stream_options: { include_usage: true },
           reasoning_split: true,
@@ -362,6 +407,17 @@ async function callModelText(
         signal: AbortSignal.timeout(timeoutMs),
         dispatcher,
       });
+      let response = await request();
+      if (!response.ok && useSchemaFormat && [400, 422].includes(response.status)) {
+        const responseText = (await response.text()).slice(0, 1000);
+        if (/(?:json_schema|response_format|schema|additionalProperties|mismatch type bool|invalid params)/i.test(responseText)) {
+          options.log(`模型端拒绝 JSON Schema 响应格式（${response.status}），本次请求回退到 json_object；本地 Zod 校验仍保持。`);
+          useSchemaFormat = false;
+          response = await request();
+        } else {
+          throw new ModelHttpError(`模型接口返回 ${response.status}: ${responseText}`, false);
+        }
+      }
       if (!response.ok) {
         const responseText = (await response.text()).slice(0, 1000);
         throw new ModelHttpError(
@@ -443,6 +499,7 @@ export async function callStructured<T>(
           recoveringEmptyContent ? 1 : policy.networkRetries ?? options.networkRetries,
           requestMaxTokens,
           policy.disableThinking || attempt > 1 || recoveringEmptyContent,
+          schema,
         );
         break;
       } catch (error) {
@@ -477,7 +534,7 @@ export async function callStructured<T>(
       lastError = jsonParseFailure(content);
       if (attempt < structureRetries) {
         options.log(
-          `模型结构输出 ${attempt}/${structureRetries} 无法解析，下一次切换到 `
+          `JSON 解析失败 ${attempt}/${structureRetries}，下一次切换到 `
           + `${structureModelForAttempt(options, model, attempt + 1)} 重新输出严格 JSON…`,
         );
       }
@@ -504,6 +561,7 @@ export async function callStructured<T>(
     });
     if (closest.result.success) return closest.result.data;
     lastError = closest.result.error;
+    const failureLabel = zodFailureLabel(closest.result.error);
     const issues = closest.result.error.issues
       .slice(0, 12)
       .map((issue) => `${issue.path.join(".") || "root"}: ${issue.message}`)
@@ -536,7 +594,7 @@ export async function callStructured<T>(
     const previousValue = JSON.stringify(closest.value).slice(0, 16_000);
     if (attempt < structureRetries) {
       options.log(
-        `模型结构输出 ${attempt}/${structureRetries} 不完整，下一次切换到 `
+        `${failureLabel} ${attempt}/${structureRetries}，下一次切换到 `
         + `${structureModelForAttempt(options, model, attempt + 1)} 并携带字段错误自动修正：${issues}`,
       );
     }
@@ -547,7 +605,7 @@ export async function callStructured<T>(
   }
   if (lastError) {
     throw new Error(
-      `模型连续 ${structureRetries} 次未通过所需对象结构或内容约束（候选形状：${lastShape}）：${lastError.message}`,
+      `${lastError instanceof z.ZodError ? zodFailureLabel(lastError) : "JSON 解析失败"}：模型连续 ${structureRetries} 次未通过（候选形状：${lastShape}）：${lastError.message}`,
     );
   }
   throw new Error("模型没有返回符合结构的 JSON");
