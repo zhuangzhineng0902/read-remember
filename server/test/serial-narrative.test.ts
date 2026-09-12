@@ -65,6 +65,24 @@ test("serial audit requires real prose evidence rather than planning assertions"
   assert.equal(schema.safeParse({ issues: [{ kind: "unearned_rule", evidenceQuote: "The moon gave Dash magic powers.", explanation: "不能用未出现的原文作为指控依据。" }] }).success, false);
 });
 
+test("a grounded insufficient-sensory verdict blocks a color-only scene", () => {
+  const colorOnly = {
+    title: "The Red Box",
+    paragraphs: ["A red box sat beside the wall while Dash waited for the door to open."],
+  };
+  const result = groundedSerialAuditSchema([colorOnly]).parse({
+    handoffs: [],
+    issues: [{
+      kind: "insufficient_sensory",
+      episodeNumber: 1,
+      paragraphNumber: 1,
+      explanation: "The color label alone does not provide two sensory details that support the action.",
+    }],
+  });
+  assert.equal(result.issues.length, 1);
+  assert.equal(result.issues[0].kind, "insufficient_sensory");
+});
+
 test("serial audit cannot silently skip chapter seams or ignore a failed handoff", () => {
   const schema = groundedSerialAuditSchema([first, second]);
   assert.equal(schema.safeParse({ handoffs: [], issues: [] }).success, false);

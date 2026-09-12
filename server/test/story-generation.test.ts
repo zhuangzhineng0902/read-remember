@@ -85,6 +85,7 @@ import {
   trimTinyNarrativeOverflow,
   validateSeriesPlan,
   type GeneratedStoryEpisode,
+  type GeneratedStoryContent,
   type SeriesPlan,
   type StoryCritique,
   type StoryRunOptions,
@@ -544,6 +545,396 @@ function checkpointEpisode(title: string): GeneratedStoryEpisode {
     ],
   };
 }
+
+function resumableEpisodeContent(title = "The Harbor Bell"): GeneratedStoryContent {
+  return {
+    title,
+    paragraphs: [
+      "Mia and Ben waited beside the old clock tower before the harbor opened. A clear bell rang inside, although the wooden door stayed shut. \"That bell should not ring yet,\" Mia said. Ben held the brass key. Pip watched the quiet windows.",
+      "Near the north door, Mia found a small piece of copper on the stone. Pip heard a soft click behind the wall and called both friends over. They shared each detail instead of guessing alone. Ben placed the brass key in the lock, but the door still refused to move.",
+      "Ben wanted to push the door, yet Mia asked him to check the floor first. Together they followed a thin mark from the copper piece to a loose board. Pip lifted the board with a simple hook. Under it, a slow wheel pulled the bell rope at the wrong time.",
+      "The friends stopped the wheel before it rang again. Mia wrote down what they had seen, and Ben left the machine untouched. A second clock across the harbor began to ring one minute late. They knew the two strange bells were connected, but they still needed to learn who changed them.",
+    ],
+    targetWords: ["tower", "copper", "wheel", "connected"],
+    continuitySummary: "三位伙伴发现钟塔内的慢轮错误拉动钟绳，远处第二座钟又慢了一分钟，两处异常已经确认有关。",
+    storyState: {
+      characterPositions: ["Mia、Ben 和 Pip 在北门钟塔内"],
+      knownFacts: ["慢轮会在错误时间拉动钟绳", "第二座钟慢了一分钟"],
+      unresolvedQuestions: ["是谁改动了两座钟"],
+      items: ["Ben 保管铜钥匙"],
+      relationshipChanges: ["三人开始先共享证据再行动"],
+    },
+    qualityEvidence: {
+      idiomaticPhrase: "called both friends over",
+      sensoryQuote: "Pip heard a soft click behind the wall and called both friends over.",
+      causalLinks: [
+        {
+          causeQuote: "A clear bell rang inside, although the wooden door stayed shut.",
+          effectQuote: "Near the north door, Mia found a small piece of copper on the stone.",
+        },
+        {
+          causeQuote: "Together they followed a thin mark from the copper piece to a loose board.",
+          effectQuote: "The friends stopped the wheel before it rang again.",
+        },
+      ],
+      clueEvidence: [
+        {
+          clueId: "C1",
+          action: "plant",
+          evidenceQuote: "Near the north door, Mia found a small piece of copper on the stone.",
+        },
+        {
+          clueId: "C2",
+          action: "plant",
+          evidenceQuote: "A second clock across the harbor began to ring one minute late.",
+        },
+      ],
+      progression: {
+        obstacleQuote: "Ben placed the brass key in the lock, but the door still refused to move.",
+        choiceQuote: "Ben wanted to push the door, yet Mia asked him to check the floor first.",
+        consequenceQuote: "The friends stopped the wheel before it rang again.",
+        newInformationQuote: "They knew the two strange bells were connected, but they still needed to learn who changed them.",
+      },
+    },
+  };
+}
+
+const resumableQuestions = [
+  {
+    prompt: "What did Mia find near the north door?",
+    options: ["A piece of copper", "A paper map", "A silver bell", "A broken boat"],
+    answer: 0,
+    explanation: "原文直接说明 Mia 在北门附近发现了一小片铜。",
+    skill: "detail" as const,
+    evidenceQuote: "Mia found a small piece of copper",
+  },
+  {
+    prompt: "Why did the friends check under the loose board?",
+    options: ["A mark led there", "They wanted to hide", "The key fell there", "Pip heard a boat"],
+    answer: 0,
+    explanation: "原文说明他们沿着铜片旁的痕迹走到松动的木板，因此检查木板下面。",
+    skill: "inference" as const,
+    evidenceQuote: "they followed a thin mark from the copper piece to a loose board",
+  },
+];
+
+function modelJson(response: import("node:http").ServerResponse, value: unknown, status = 200) {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(status === 200
+    ? JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) }, finish_reason: "stop" }] })
+    : JSON.stringify({ error: { message: String(value) } }));
+}
+
+function resumableRunOptions(
+  databasePath: string,
+  baseUrl: string,
+  checkpoint: StoryRunOptions["checkpoint"],
+  logs: string[],
+): StoryRunOptions {
+  return {
+    databasePath,
+    ecdictPath: path.join(path.dirname(databasePath), "missing-ecdict.sqlite"),
+    baseUrl,
+    apiPath: "/chat/completions",
+    apiKey: "",
+    model: "MiniMax-M3",
+    reviewModel: "MiniMax-M3",
+    structureRepairModel: "MiniMax-M3",
+    interest: "custom-story",
+    customInterestName: "定制故事",
+    customInterestSubtitle: "用户自己的连续故事",
+    customInterestEmoji: "✨",
+    customInterestColor: "#55766D",
+    customInterestPrompt: "根据用户灵感创作原创连续故事。",
+    customActivityPrompt: "预测下一集。",
+    examId: "middle",
+    sourceMode: "favorite",
+    classicId: "",
+    sourceTitle: "钟塔冒险",
+    sourceNotes: "伙伴合作解开钟塔谜题",
+    readerStage: "stage1",
+    episodes: 2,
+    importNamespace: "resumable-test",
+    planCandidates: 3,
+    episodeCandidates: 3,
+    minLexicalCoverage: 0.95,
+    temperature: 0.65,
+    reviewTemperature: 0.15,
+    timeoutMs: 1_000,
+    rewriteTimeoutMs: 1_000,
+    networkRetries: 1,
+    structureRetries: 1,
+    dryRun: false,
+    force: false,
+    log: (message) => logs.push(message),
+    checkpoint,
+  };
+}
+
+test("metadata-pending recovery skips candidate generation and persists the completed metadata stage", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "read-remember-metadata-resume-"));
+  const databasePath = path.join(directory, "story.sqlite");
+  const narrative = resumableEpisodeContent();
+  const { targetWords: _targetWords, ...modelMetadata } = narrative;
+  const requests: string[] = [];
+  let saved: StoryRunOptions["checkpoint"];
+  createDatabase(databasePath).close();
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const parsed = JSON.parse(body) as { messages: Array<{ role: string; content: string }> };
+      const system = parsed.messages.find((message) => message.role === "system")?.content ?? "";
+      requests.push(system);
+      if (system.includes("故事数据整理编辑")) {
+        const { title: _title, paragraphs: _paragraphs, ...metadata } = modelMetadata;
+        modelJson(response, metadata);
+      } else if (system.includes("证据核对员")) {
+        modelJson(response, { replacements: Array.from({ length: 12 }, (_, index) => ({ index, candidateId: 0 })) });
+      } else {
+        modelJson(response, `unexpected model stage: ${system}`, 500);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const logs: string[] = [];
+  const checkpoint = {
+    version: 2 as const,
+    plan: validPlan,
+    episodes: [],
+    storyContractVersion: "feasible-serial-contract-v13",
+    stagedEpisode: {
+      index: 0,
+      stage: "metadata_pending" as const,
+      narrative: { title: narrative.title, paragraphs: narrative.paragraphs },
+      critique: strongCritique,
+      semanticReview: strongCritique,
+      textHash: episodeNarrativeHash(narrative),
+      source: "selected" as const,
+      fullRewriteCount: 0,
+      mechanicalRepairUsed: false,
+      semanticRewriteUsed: false,
+      lexicalRepairExhausted: false,
+      localRepairAttempts: { metadata: 0, lexical: 0 },
+    },
+  };
+  try {
+    const options = resumableRunOptions(databasePath, `http://127.0.0.1:${address.port}`, checkpoint, logs);
+    options.onCheckpoint = (next) => {
+      saved = next;
+      if (next.activeEpisode?.stage === "semantic_reviewed") throw new Error("injected stop after metadata");
+    };
+    await assert.rejects(runStoryGeneration(options), /injected stop after metadata/);
+    assert.equal(saved?.version, 2);
+    if (!saved || saved.version !== 2) throw new Error("expected a version 2 checkpoint");
+    assert.equal(saved.activeEpisode?.stage, "semantic_reviewed");
+    assert.equal(saved.activeEpisode?.episode.title, narrative.title);
+    assert.ok((saved.activeEpisode?.episode.targetWords.length ?? 0) >= 4);
+    assert.equal(requests.length, 2);
+    assert.ok(requests.some((system) => system.includes("故事数据整理编辑")));
+    assert.ok(requests.some((system) => system.includes("证据核对员")));
+    assert.doesNotMatch(logs.join(" "), /生成第 1\/2 集的 .*候选初稿/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("questions-pending recovery generates only questions, saves ready-to-publish, and imports once", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "read-remember-question-resume-"));
+  const databasePath = path.join(directory, "story.sqlite");
+  const episode = resumableEpisodeContent();
+  const quality = assessStoryQuality(episode, { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 }, 1, undefined, validPlan, null);
+  assert.deepEqual(quality.blockingIssues, []);
+  const systems: string[] = [];
+  createDatabase(databasePath).close();
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const parsed = JSON.parse(body) as { messages: Array<{ role: string; content: string }> };
+      const system = parsed.messages.find((message) => message.role === "system")?.content ?? "";
+      systems.push(system);
+      if (system.includes("英语分级阅读题目终审")) modelJson(response, { questions: resumableQuestions });
+      else if (system.includes("独立阅读理解命题审核员")) modelJson(response, {
+        reviews: resumableQuestions.map((_question, questionIndex) => ({ questionIndex, supported: true, uniqueAnswer: true, issues: [] })),
+      });
+      else modelJson(response, `unexpected model stage: ${system}`, 500);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const logs: string[] = [];
+  const savedStages: string[] = [];
+  const checkpoint = {
+    version: 2 as const,
+    plan: validPlan,
+    episodes: [],
+    storyContractVersion: "feasible-serial-contract-v13",
+    stagedEpisode: {
+      index: 0,
+      stage: "questions_pending" as const,
+      episode,
+      quality,
+      critique: strongCritique,
+      semanticReview: strongCritique,
+      textHash: episodeNarrativeHash(episode),
+      fullRewriteCount: 0,
+      mechanicalRepairUsed: false,
+      semanticRewriteUsed: false,
+      lexicalRepairExhausted: false,
+      localRepairAttempts: { metadata: 0, lexical: 0 },
+    },
+  };
+  try {
+    const options = resumableRunOptions(databasePath, `http://127.0.0.1:${address.port}`, checkpoint, logs);
+    options.onCheckpoint = (next) => {
+      if (next.stagedEpisode) savedStages.push(next.stagedEpisode.stage);
+    };
+    options.onEpisodeImported = () => { throw new Error("injected stop after first import"); };
+    await assert.rejects(runStoryGeneration(options), /injected stop after first import/);
+    assert.deepEqual(systems.map((system) => system.includes("命题审核员") ? "review" : "questions"), ["questions", "review"]);
+    assert.ok(savedStages.includes("ready_to_publish"));
+    const db = createDatabase(databasePath);
+    try {
+      const row = db.prepare("SELECT COUNT(*) AS count FROM articles WHERE series_title = ?").get(validPlan.seriesTitle) as { count: number };
+      assert.equal(row.count, 1);
+    } finally {
+      db.close();
+    }
+    assert.match(logs.join(" "), /恢复已定稿正文，只继续独立命题与验题/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("ready-to-publish recovery imports without any model request", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "read-remember-ready-resume-"));
+  const databasePath = path.join(directory, "story.sqlite");
+  const episode = { ...resumableEpisodeContent(), questions: resumableQuestions };
+  const quality = assessStoryQuality(episode, { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 }, 1, undefined, validPlan, null);
+  assert.deepEqual(quality.blockingIssues, []);
+  createDatabase(databasePath).close();
+  const logs: string[] = [];
+  const checkpoint = {
+    version: 2 as const,
+    plan: validPlan,
+    episodes: [],
+    storyContractVersion: "feasible-serial-contract-v13",
+    stagedEpisode: {
+      index: 0,
+      stage: "ready_to_publish" as const,
+      episode,
+      quality,
+      semanticReview: strongCritique,
+      textHash: episodeNarrativeHash(episode),
+      fullRewriteCount: 0,
+      mechanicalRepairUsed: false,
+      semanticRewriteUsed: false,
+      lexicalRepairExhausted: false,
+      localRepairAttempts: { metadata: 0, lexical: 0 },
+    },
+  };
+  try {
+    const options = resumableRunOptions(databasePath, "http://127.0.0.1:1", checkpoint, logs);
+    options.onEpisodeImported = () => { throw new Error("injected stop after ready import"); };
+    await assert.rejects(runStoryGeneration(options), /injected stop after ready import/);
+    assert.match(logs.join(" "), /恢复已通过全部门禁的成稿，只执行幂等发布/);
+    const db = createDatabase(databasePath);
+    try {
+      const row = db.prepare("SELECT COUNT(*) AS count FROM articles WHERE series_title = ?").get(validPlan.seriesTitle) as { count: number };
+      assert.equal(row.count, 1);
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("optional optimization failure keeps the qualified episode and continues through questions and import", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "read-remember-optional-fallback-"));
+  const databasePath = path.join(directory, "story.sqlite");
+  const episode = resumableEpisodeContent("The Qualified Harbor Bell");
+  const quality = assessStoryQuality(episode, { examId: "middle", readerStage: "stage1", minLexicalCoverage: 0.95 }, 1, undefined, validPlan, null);
+  assert.deepEqual(quality.blockingIssues, []);
+  const improvableReview: StoryCritique = {
+    plot: { score: 8, issues: [] },
+    childAppeal: { score: 8, issues: ["伙伴互动可以更直接"] },
+    gradedLanguage: { score: 7, issues: [] },
+    continuity: { score: 8, issues: [] },
+    rewritePriorities: ["让伙伴动作更直接"],
+  };
+  const systems: string[] = [];
+  createDatabase(databasePath).close();
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const parsed = JSON.parse(body) as { messages: Array<{ role: string; content: string }> };
+      const system = parsed.messages.find((message) => message.role === "system")?.content ?? "";
+      systems.push(system);
+      if (system.includes("剧情重构策划师")) modelJson(response, "injected optional timeout", 500);
+      else if (system.includes("独立连载故事编辑")) modelJson(response, { handoffs: [], issues: [] });
+      else if (system.includes("英语分级阅读题目终审")) modelJson(response, { questions: resumableQuestions });
+      else if (system.includes("独立阅读理解命题审核员")) modelJson(response, {
+        reviews: resumableQuestions.map((_question, questionIndex) => ({ questionIndex, supported: true, uniqueAnswer: true, issues: [] })),
+      });
+      else modelJson(response, `unexpected model stage: ${system}`, 500);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const logs: string[] = [];
+  const checkpoint = {
+    version: 2 as const,
+    plan: validPlan,
+    episodes: [],
+    storyContractVersion: "feasible-serial-contract-v13",
+    reviewCalibrationVersion: "independent-single-final-v4-calibrated-7-7.5",
+    activeEpisode: {
+      index: 0,
+      stage: "semantic_reviewed" as const,
+      episode,
+      quality,
+      critique: improvableReview,
+      semanticReview: improvableReview,
+      fullRewriteCount: 0,
+      mechanicalRepairUsed: false,
+      semanticRewriteUsed: false,
+      lexicalRepairExhausted: false,
+      localRepairAttempts: { metadata: 0, lexical: 0 },
+    },
+  };
+  try {
+    const options = resumableRunOptions(databasePath, `http://127.0.0.1:${address.port}`, checkpoint, logs);
+    options.onEpisodeImported = () => { throw new Error("injected stop after fallback import"); };
+    await assert.rejects(runStoryGeneration(options), /injected stop after fallback import/);
+    assert.ok(systems.some((system) => system.includes("剧情重构策划师")));
+    assert.ok(systems.some((system) => system.includes("独立连载故事编辑")));
+    assert.ok(systems.some((system) => system.includes("英语分级阅读题目终审")));
+    assert.match(logs.join(" "), /可选增益优化失败，已降级保留原有合格稿/);
+    const db = createDatabase(databasePath);
+    try {
+      const row = db.prepare("SELECT title, COUNT(*) AS count FROM articles WHERE series_title = ?").get(validPlan.seriesTitle) as { title: string; count: number };
+      assert.equal(row.count, 1);
+      assert.equal(row.title, episode.title);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("series plan validator enforces chronology and normalizes overloaded clue actions", () => {
   assert.equal(validateSeriesPlan(validPlan, 2).seriesTitle, validPlan.seriesTitle);
