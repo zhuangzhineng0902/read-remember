@@ -3,8 +3,8 @@ import test from "node:test";
 import { chooseRepairKind, canAttemptRepair, localRepairAttemptsSchema, lexicalFloorPassed } from "../scripts/story-generation/repair-routing";
 
 const mixed = { wordCount: 276, lexicalCoverage: 0.88, blockingIssues: ["五感描写证据未逐字出现在正文"] };
-test("mixed lexical and metadata defects fix prose first, then derived evidence", () => {
-  assert.equal(chooseRepairKind(mixed, 0.95), "lexical");
+test("lexical diagnostics never displace an actionable metadata repair", () => {
+  assert.equal(chooseRepairKind(mixed, 0.95), "metadata");
   assert.equal(chooseRepairKind({ ...mixed, lexicalCoverage: 0.94 }, 0.95), "metadata");
   assert.equal(chooseRepairKind({ ...mixed, lexicalCoverage: 0.94, blockingIssues: [] }, 0.95), "none");
   assert.equal(chooseRepairKind({ ...mixed, blockingIssues: ["正文过长"] }, 0.95), "narrative");
@@ -50,7 +50,7 @@ test("structured issue domains drive repair routing independently of localized m
       ...metadata.blockingIssueDetails,
       { code: "LEXICAL_FLOOR", domain: "lexical" as const, message: "vocabulary threshold" },
     ],
-  }, 0.95), "lexical");
+  }, 0.95), "metadata");
   assert.equal(chooseRepairKind({
     ...metadata,
     lexicalCoverage: 0.94,

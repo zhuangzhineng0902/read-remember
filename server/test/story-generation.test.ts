@@ -493,10 +493,10 @@ test("continuity review claims require exact evidence from the declared prose so
   assert.doesNotMatch(grounded.rewritePriorities.join(" "), /虚构的熊/);
 });
 
-test("near-floor vocabulary drafts remain reviewable but do not pass publication", () => {
+test("near-floor vocabulary remains a review diagnostic and does not block publication", () => {
   assert.equal(candidateVocabularyIsReviewable({ lexicalCoverage: 0.85, wordCount: 240 }, 0.95), true);
   assert.equal(candidateVocabularyIsReviewable({ lexicalCoverage: 0.849, wordCount: 240 }, 0.95), false);
-  assert.equal(passesStoryQualityFloor({ lexicalCoverage: 0.85, wordCount: 240, blockingIssues: [] }, 0.95), false);
+  assert.equal(passesStoryQualityFloor({ lexicalCoverage: 0.85, wordCount: 240, blockingIssues: [] }, 0.95), true);
 });
 
 function checkpointEpisode(title: string): GeneratedStoryEpisode {
@@ -1087,21 +1087,21 @@ test("Starter language editing locks only plot-valid drafts with a language bott
   assert.equal(needsStarterLanguageEdit("starter", strongCritique), false);
 });
 
-test("a qualified draft adopts lexical repair only when vocabulary and semantics both remain valid", () => {
+test("a qualified draft adopts one lexical edit when semantics remain valid", () => {
   const repairedVocabulary = { lexicalCoverage: 0.91, wordCount: 240 };
   assert.equal(canAdoptQualifiedLexicalRepair(repairedVocabulary, 0.95, strongCritique), true);
   assert.equal(canAdoptQualifiedLexicalRepair(
     { lexicalCoverage: 0.86, wordCount: 240 },
     0.95,
     strongCritique,
-  ), false);
+  ), true);
   assert.equal(canAdoptQualifiedLexicalRepair(repairedVocabulary, 0.95, {
     ...strongCritique,
     continuity: { score: 6, issues: ["换词改变了线索含义"] },
   }), false);
 });
 
-test("a downstream Starter lexical failure preserves a semantically qualified draft for plan reduction", () => {
+test("a downstream Starter lexical diagnostic does not trigger plan reduction", () => {
   const lexicalFailure = {
     score: 86,
     wordCount: 270,
@@ -1118,7 +1118,7 @@ test("a downstream Starter lexical failure preserves a semantically qualified dr
   };
   assert.equal(shouldPreserveStarterQualifiedLexicalFailure(
     "starter", lexicalFailure, 0.95, strongCritique,
-  ), true);
+  ), false);
   assert.equal(shouldPreserveStarterQualifiedLexicalFailure(
     "stage1", lexicalFailure, 0.95, strongCritique,
   ), false);
@@ -1234,7 +1234,7 @@ test("Starter language-load recovery simplifies only editable episode actions", 
   }
 });
 
-test("lexical repair and action simplification produce an accurate manual retry blocker", () => {
+test("legacy lexical repair state no longer blocks retry", () => {
   const episode = checkpointEpisode("Saved Semantic Draft");
   const checkpoint = parseStoryGenerationCheckpoint({
     version: 2,
@@ -1262,9 +1262,7 @@ test("lexical repair and action simplification produce an accurate manual retry 
   });
   assert.ok(checkpoint);
   const reason = storyCheckpointRetryBlockReason(checkpoint);
-  assert.match(reason ?? "", /语义已通过/);
-  assert.match(reason ?? "", /87\.9%/);
-  assert.match(reason ?? "", /需要调整词汇表或任务设计后继续/);
+  assert.equal(reason, null);
 });
 
 test("candidate critique batches preserve a single top-level review for targeted recovery", () => {
@@ -1681,14 +1679,15 @@ test("beginner language policy overrides exam vocabulary and avoids technical pl
   assert.ok(allowed.length > 0);
 });
 
-test("the same sentence is evaluated against reader level rather than exam alone", () => {
+test("reader-level sentence length is advisory until the outlier is severe", () => {
   const episode = checkpointEpisode("Sentence difficulty");
   const sentence = "The little team went down to the old house and looked for a small box near the open door.";
   episode.paragraphs = Array.from({ length: 4 }, () => [sentence, sentence, sentence].join(" "));
   const starter = assessStoryQuality(episode, { examId: "high", readerStage: "starter" }, 1);
   const advanced = assessStoryQuality(episode, { examId: "high", readerStage: "stage5" }, 1);
-  assert.ok(starter.blockingIssues.some((issue) => issue.startsWith("最长句过长")));
-  assert.ok(!advanced.blockingIssues.some((issue) => issue.startsWith("最长句过长")));
+  assert.ok(starter.issues.some((issue) => issue.startsWith("最长句超过")));
+  assert.ok(!starter.blockingIssues.some((issue) => issue.startsWith("最长句超过")));
+  assert.ok(!advanced.blockingIssues.some((issue) => issue.startsWith("最长句超过")));
 });
 
 test("lexical editing protects published terms, not unpublished difficult teaching words", () => {
@@ -1705,7 +1704,7 @@ test("lexical editing protects published terms, not unpublished difficult teachi
   assert.ok(!laterProtected.includes("hubcap"));
 });
 
-test("candidate vocabulary and final publication share the same measurement and floor", () => {
+test("candidate and final vocabulary coverage remain diagnostic but do not block publication", () => {
   const episode = checkpointEpisode("Vocabulary test");
   episode.paragraphs = Array.from({ length: 4 }, () => "Mia saw the hubcap and the floorboards near the whistle.");
   episode.targetWords = ["hubcap", "floorboards", "whistle", "saw"];
@@ -1714,14 +1713,14 @@ test("candidate vocabulary and final publication share the same measurement and 
   const final = assessStoryQuality(episode, { examId: "middle", readerStage: "stage1" }, 1, lexical);
   assert.equal(candidate.lexicalCoverage, final.lexicalCoverage);
   assert.deepEqual(candidate.unfamiliarWords, final.unfamiliarWords);
-  assert.equal(passesStoryQualityFloor({ ...candidate, blockingIssues: [] }, 0.95), false);
-  assert.equal(passesStoryQualityFloor({ ...final, blockingIssues: [] }, 0.95), false);
+  assert.equal(passesStoryQualityFloor({ ...candidate, blockingIssues: [] }, 0.95), true);
+  assert.equal(passesStoryQualityFloor({ ...final, blockingIssues: [] }, 0.95), true);
 });
 
-test("failed vocabulary elites cannot return even when their semantic score was high", () => {
-  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.846 }, 0.95), false);
-  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.846 }, 0.95, true), false);
-  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.96 }, 0.95, true), false);
+test("semantic elites remain reusable regardless of diagnostic vocabulary coverage", () => {
+  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.846 }, 0.95), true);
+  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.846 }, 0.95, true), true);
+  assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.96 }, 0.95, true), true);
   assert.equal(canReuseLexicalElite({ wordCount: 227, lexicalCoverage: 0.96 }, 0.95), true);
 });
 
@@ -2336,7 +2335,7 @@ test("short quoted dialogue is excluded from the fragment sentence ratio", () =>
   assert.ok(fragmentSentenceRatio(withNarrativeFragments) > 0);
 });
 
-test("story quality keeps 95 percent as a target and allows one token of rounding at the 90 percent floor", () => {
+test("story quality keeps coverage as a diagnostic regardless of the measured percentage", () => {
   const baseQuality = {
     score: 88,
     wordCount: 240,
@@ -2351,10 +2350,7 @@ test("story quality keeps 95 percent as a target and allows one token of roundin
     passesStoryQualityFloor({ ...baseQuality, lexicalCoverage: 0.899 }, 0.95),
     true,
   );
-  assert.equal(
-    passesStoryQualityFloor({ ...baseQuality, lexicalCoverage: 0.895 }, 0.95),
-    false,
-  );
+  assert.equal(passesStoryQualityFloor({ ...baseQuality, lexicalCoverage: 0.895 }, 0.95), true);
 });
 
 test("model JSON parser ignores a second object or trailing commentary", () => {

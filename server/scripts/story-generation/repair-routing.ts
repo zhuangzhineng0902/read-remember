@@ -44,17 +44,15 @@ export function lexicalFloorPassed(quality: Pick<RepairQuality, "lexicalCoverage
   return quality.lexicalCoverage === null || Math.max(0, Math.min(target, 0.9) - quality.lexicalCoverage) * quality.wordCount <= 1.0001;
 }
 
-export function chooseRepairKind(quality: RepairQuality, target: number): RepairKind {
-  const domains = new Set(quality.blockingIssueDetails?.map((issue) => issue.domain) ?? []);
+export function chooseRepairKind(quality: RepairQuality, _target: number): RepairKind {
+  const domains = new Set(
+    quality.blockingIssueDetails?.map((issue) => issue.domain).filter((domain) => domain !== "lexical") ?? [],
+  );
   if (domains.has("narrative") || domains.has("language")) return "narrative";
   if (domains.size) {
-    // Fix prose before regenerating evidence derived from that prose. Lexical
-    // coverage is measured independently and can coexist with metadata defects.
-    if (domains.has("lexical") || !lexicalFloorPassed(quality, target)) return "lexical";
     return domains.size === 1 && domains.has("metadata") ? "metadata" : "narrative";
   }
   if (quality.blockingIssues.length && !onlyMetadataBlocks(quality)) return "narrative";
-  if (!lexicalFloorPassed(quality, target)) return "lexical";
   return quality.blockingIssues.length ? "metadata" : "none";
 }
 

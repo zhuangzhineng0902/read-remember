@@ -1158,19 +1158,6 @@ export function storyCheckpointRetryBlockReason(checkpoint: StoryGenerationCheck
   if (!elite) return null;
   const state = checkpoint.starterRepairStates?.find((item) => item.episode === elite.index + 1);
   if (!state?.actionSimplification) return null;
-  const lexicalReason = elite.repairReason === "starter_lexical_load"
-    || (elite.repairReason === "starter_language_load" && isStrictStoryCritique(elite.critique));
-  if (lexicalReason) {
-    const lexical = state.lexicalEdit;
-    const lexicalResult = lexical
-      ? Math.abs(lexical.afterCoverage - lexical.beforeCoverage) >= 0.0005
-        ? `从 ${(lexical.beforeCoverage * 100).toFixed(1)}% 提升到 ${(lexical.afterCoverage * 100).toFixed(1)}%`
-        : `为 ${(lexical.afterCoverage * 100).toFixed(1)}%`
-      : "仍未达到发布底线";
-    return `第 ${elite.index + 1} 集语义已通过（均分 ${critiqueAverage(elite.critique).toFixed(2)}），`
-      + `定向换词后覆盖率${lexicalResult}，`
-      + "专项行动简化后的自动重试也已完成。正文已保存，需要调整词汇表或任务设计后继续。";
-  }
   if (elite.repairReason === "starter_language_load") {
     return `第 ${elite.index + 1} 集已完成语言编辑及专项行动简化后的自动重试；正文已保存，需要调整本集表达设计后继续。`;
   }
@@ -2384,13 +2371,12 @@ export function needsStarterLanguageEdit(
 }
 
 export function canAdoptQualifiedLexicalRepair(
-  quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount">,
-  targetCoverage: number,
+  _quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount">,
+  _targetCoverage: number,
   critique: StoryCritique,
   firstEpisodeBaseline?: StoryCritique | null,
 ) {
-  return lexicalFloorPassed(quality, targetCoverage)
-    && isStrictStoryCritique(critique, firstEpisodeBaseline);
+  return isStrictStoryCritique(critique, firstEpisodeBaseline);
 }
 
 export function shouldPreserveStarterQualifiedLexicalFailure(
@@ -2692,7 +2678,12 @@ export function assessStoryQuality(
   if (averageSentenceWords > Math.min(level.maxSentenceWords, languageLimits.averageSentenceWords) + 2) block("LANGUAGE_AVERAGE_SENTENCE_TOO_LONG", "language", `平均句长过高：${averageSentenceWords.toFixed(1)}`, "paragraphs");
   const sentenceMaximum = Math.min(level.maxSentenceWords + 6, languageLimits.maximumSentenceWords);
   if (longestSentenceWords > sentenceMaximum) {
-    block("LANGUAGE_SENTENCE_TOO_LONG", "language", `最长句过长：${longestSentenceWords} > ${sentenceMaximum}`, "paragraphs");
+    const message = `最长句超过 ${sentenceMaximum} 词建议值：${longestSentenceWords} 词`;
+    if (longestSentenceWords > sentenceMaximum + storyGenerationPolicy.length.severeSentenceExtraWords) {
+      block("LANGUAGE_SENTENCE_TOO_LONG", "language", message, "paragraphs");
+    } else {
+      issues.push(message);
+    }
   }
   const fragmentRatio = fragmentSentenceRatio(text);
   if (fragmentRatio > 0.3) block("LANGUAGE_FRAGMENTED", "language", `碎片化短句过多：${(fragmentRatio * 100).toFixed(0)}% 的句子不超过 4 词`, "paragraphs");
@@ -3465,31 +3456,13 @@ async function generateEpisodeDraft(
   diagnostics.rawWordCounts.push(...freshDrafts.map(narrativeWordCount));
   const vocabularyChecks = freshDrafts.map((draft) => draftVocabulary(options, plan, draft));
   const publishableVocabulary = vocabularyChecks.map((quality) => lexicalFloorPassed(quality, options.minLexicalCoverage));
-  const reviewableVocabulary = vocabularyChecks.map((quality) => candidateVocabularyIsReviewable(quality, options.minLexicalCoverage));
   for (const [candidateIndex, quality] of vocabularyChecks.entries()) {
     if (publishableVocabulary[candidateIndex]) continue;
     const lesson = `候选词汇提前检查未通过：${((quality.lexicalCoverage ?? 0) * 100).toFixed(1)}%；先简化 ${quality.unfamiliarWords.join(", ")}，不要保护未发布的教学目标词。`;
-    options.log(`[${episodeNumber}/${options.episodes}] 候选 ${candidateIndex + 1} ${lesson}${reviewableVocabulary[candidateIndex] ? " 该稿仍保留作剧情评审素材，最终发布前必须完成词汇修复。" : ""}`);
+    options.log(`[${episodeNumber}/${options.episodes}] 候选 ${candidateIndex + 1} ${lesson} 该指标仅用于编辑诊断，不淘汰候选。`);
     discardedDraftLessons = [...discardedDraftLessons, lesson].slice(-20);
   }
-  // One bounded rescue per batch, before any semantic review or metadata.
-  // If another candidate already passes, do not spend a model call on bad ones.
-  if (freshDrafts.length && !publishableVocabulary.some(Boolean)) {
-    const best = vocabularyChecks.reduce((winner, value, index) =>
-      (value.lexicalCoverage ?? 1) > (vocabularyChecks[winner].lexicalCoverage ?? 1) ? index : winner, 0);
-    options.log(`[${episodeNumber}/${options.episodes}] 本批词汇均未过线，仅对覆盖率最高的候选执行一次前置换词，不生成元数据。`);
-    freshDrafts[best] = await simplifyNarrativeVocabulary(options, plan, episodeNumber, freshDrafts[best], vocabularyChecks[best].unfamiliarWords, previousEpisode);
-    const repairedVocabulary = draftVocabulary(options, plan, freshDrafts[best]);
-    publishableVocabulary[best] = lexicalFloorPassed(repairedVocabulary, options.minLexicalCoverage);
-    reviewableVocabulary[best] = candidateVocabularyIsReviewable(repairedVocabulary, options.minLexicalCoverage);
-  }
-  freshDrafts = freshDrafts.filter((_, candidateIndex) => reviewableVocabulary[candidateIndex]);
   onLessons?.(discardedDraftLessons, eliteRejected);
-  if (vocabularyChecks.length && !freshDrafts.length && !eliteRejected) {
-    options.onLexicalBatchFailure?.(episodeNumber, [...new Set(vocabularyChecks.flatMap((quality) => quality.unfamiliarWords))].slice(0, 36));
-    throw new StoryGenerationFailure(`第 ${episodeNumber} 集候选词汇门禁未通过；一次前置换词后仍未达标，已停止评审和元数据生成，保留难词经验供下一批使用`,
-      "CANDIDATE_LEXICAL_GATE", "lexical", "new_candidates");
-  }
   const drafts = eliteRejected
     ? [...freshDrafts, eliteRejected.narrative]
     : freshDrafts;
@@ -4033,10 +4006,9 @@ async function generateEpisodeDraft(
     );
   }
   let selectedVocabulary = draftVocabulary(options, plan, narrative);
-  if (!passesStoryQualityFloor({ ...selectedVocabulary, blockingIssues: [] }, options.minLexicalCoverage)) {
+  if (!lexicalFloorPassed(selectedVocabulary, options.minLexicalCoverage)) {
     options.log(
-      `[${episodeNumber}/${options.episodes}] 正文已通过语义终审，但词汇门禁未通过；`
-      + "保留当前合格剧情，仅执行一次定向换词，不重新生成候选。",
+      `[${episodeNumber}/${options.episodes}] 正文已通过语义终审；词汇覆盖率偏低，仅作为诊断提示执行一次保守简化，不作为发布门禁。`,
     );
     const lexicalEdited = await simplifyNarrativeVocabulary(
       options,
@@ -4047,11 +4019,10 @@ async function generateEpisodeDraft(
       previousEpisode,
     );
     const lexicalEditedVocabulary = draftVocabulary(options, plan, lexicalEdited);
-    let lexicalEditedReview: StoryCritique | null = null;
-    if (lexicalFloorPassed(lexicalEditedVocabulary, options.minLexicalCoverage)) {
-      lexicalEditedReview = lexicalEdited === narrative
-        ? critique
-        : await reviewEpisodeSemantics(options, plan, lexicalEdited, episodeNumber, previousEpisode);
+    const lexicalEditedReview = lexicalEdited === narrative
+      ? critique
+      : await reviewEpisodeSemantics(options, plan, lexicalEdited, episodeNumber, previousEpisode);
+    if (lexicalEdited !== narrative) {
       recordDraftReview(diagnostics, lexicalEditedReview);
       if (canAdoptQualifiedLexicalRepair(
         lexicalEditedVocabulary,
@@ -4065,39 +4036,14 @@ async function generateEpisodeDraft(
         selectedByTargetedEdit = true;
         options.log(
           `[${episodeNumber}/${options.episodes}] 语义合格稿定向换词后仍通过语义终审，`
-          + `词汇覆盖率提升至 ${((selectedVocabulary.lexicalCoverage ?? 0) * 100).toFixed(1)}%；继续生成元数据。`,
+          + `词汇覆盖率变为 ${((selectedVocabulary.lexicalCoverage ?? 0) * 100).toFixed(1)}%；继续生成元数据。`,
         );
       }
     }
-    if (!passesStoryQualityFloor({ ...selectedVocabulary, blockingIssues: [] }, options.minLexicalCoverage)) {
-      const repairFailure = !lexicalFloorPassed(lexicalEditedVocabulary, options.minLexicalCoverage)
-        ? `词汇覆盖率仍未过线：${lexicalEditedVocabulary.unfamiliarWords.join(", ")}`
-        : `换词稿破坏原语义终审结果：${semanticQualityIssues(lexicalEditedReview!, firstEpisodeBaseline).join("；")}`;
-      const lessons = [
-        ...synthesisLessons,
-        `语义合格稿定向换词未能安全采用：${repairFailure}`,
-      ].slice(-20);
-      onLessons?.(lessons, {
-        narrative,
-        critique,
-        ...(resolveReaderProfile(options).id === "starter"
-          ? {
-              repairReason: "starter_lexical_load" as const,
-              repairAttempt: {
-                kind: "lexical" as const,
-                sourceTextHash: episodeNarrativeHash(narrative),
-                resultTextHash: episodeNarrativeHash(lexicalEdited),
-                beforeCoverage: selectedVocabulary.lexicalCoverage ?? 0,
-                afterCoverage: lexicalEditedVocabulary.lexicalCoverage ?? 0,
-              },
-            }
-          : {}),
-      });
-      throw new StoryGenerationFailure(
-        `第 ${episodeNumber} 集已通过语义终审，但唯一一次定向换词未能安全采用；保留该语义合格稿，未重新抽取候选：${repairFailure}`,
-        "QUALIFIED_DRAFT_LEXICAL_REPAIR_GATE",
-        "lexical",
-        "new_candidates",
+    if (!lexicalFloorPassed(selectedVocabulary, options.minLexicalCoverage)) {
+      options.log(
+        `[${episodeNumber}/${options.episodes}] 一次保守简化后覆盖率为 ${((selectedVocabulary.lexicalCoverage ?? 0) * 100).toFixed(1)}%；`
+        + `保留 ${selectedVocabulary.unfamiliarWords.slice(0, 4).join(", ") || "必要生词"} 作为可学习词，不再换词、扩写或压缩全文。`,
       );
     }
   }
@@ -4501,25 +4447,23 @@ export function examVocabularyTags(examId: ExamId, stage?: ResolvedReaderStageId
   return ["zk", "gk", "cet4", "cet6"];
 }
 
-function meetsQualityTarget(quality: StoryQuality, targetCoverage: number) {
+function meetsQualityTarget(quality: StoryQuality, _targetCoverage: number) {
   return quality.blockingIssues.length === 0
-    && quality.score >= 80
-    && (quality.lexicalCoverage === null || quality.lexicalCoverage >= targetCoverage);
+    && quality.score >= 80;
 }
 
-export function passesStoryQualityFloor(quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount" | "blockingIssues">, targetCoverage: number) {
-  return quality.blockingIssues.length === 0
-    // Coverage is ultimately a whole-word count, while the checkpoint stores a
-    // rounded ratio. Permit one token of dictionary/rounding uncertainty so a
-    // 268-word story at 89.7% cannot loop merely to cross a floating threshold.
-    && lexicalFloorPassed(quality, targetCoverage);
+export function passesStoryQualityFloor(
+  quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount" | "blockingIssues">,
+  _targetCoverage: number,
+) {
+  return quality.blockingIssues.length === 0;
 }
 
 export function canReuseLexicalElite(
-  quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount">,
-  targetCoverage: number, repairExhausted = false,
+  _quality: Pick<StoryQuality, "lexicalCoverage" | "wordCount">,
+  _targetCoverage: number, _repairExhausted = false,
 ) {
-  return !repairExhausted && passesStoryQualityFloor({ ...quality, blockingIssues: [] }, targetCoverage);
+  return true;
 }
 
 export function prioritizeTargetWords(
@@ -4593,23 +4537,15 @@ function hasOnlyMetadataBlockingIssues(quality: StoryQuality) {
 export function shouldAdoptMechanicalRepair(
   before: StoryQuality,
   after: StoryQuality,
-  targetCoverage: number,
+  _targetCoverage: number,
 ) {
   const afterBlockingCodes = new Set(after.blockingIssueDetails?.map((issue) => issue.code) ?? []);
   if (afterBlockingCodes.size
     ? afterBlockingCodes.has("NARRATIVE_TOO_SHORT") || afterBlockingCodes.has("NARRATIVE_TOO_LONG")
     : after.blockingIssues.some((issue) => /^正文过(?:短|长)/.test(issue))) return false;
   if (after.blockingIssues.length > before.blockingIssues.length) return false;
-  if (passesStoryQualityFloor(after, targetCoverage)) return true;
-  const publishableCoverage = Math.min(targetCoverage, 0.9);
-  const coverageGap = (quality: StoryQuality) => quality.lexicalCoverage === null
-    ? 0
-    : Math.max(0, publishableCoverage - quality.lexicalCoverage);
-  const beforeGap = coverageGap(before);
-  const afterGap = coverageGap(after);
   return after.blockingIssues.length < before.blockingIssues.length
-    || afterGap + 0.001 < beforeGap
-    || (afterGap <= beforeGap + 0.001 && after.score > before.score);
+    || (after.blockingIssues.length === before.blockingIssues.length && after.score > before.score);
 }
 
 function slug(value: string) {
@@ -5135,25 +5071,13 @@ export async function runStoryGeneration(options: StoryRunOptions) {
         const starterRepairReason = legacyLexicalReason
           ? "starter_lexical_load"
           : rejectedElite?.repairReason;
-        const starterLoad = starterRepairReason === "starter_language_load"
-          || starterRepairReason === "starter_lexical_load";
+        const starterLoad = starterRepairReason === "starter_language_load";
         const starterRepairState = starterRepairStates.get(episodeNumber);
         if (starterLoad && starterRepairState?.actionSimplification) {
-          const lexical = starterRepairState.lexicalEdit;
-          const score = critiqueAverage(rejectedElite!.critique).toFixed(2);
-          const lexicalResult = lexical
-            ? Math.abs(lexical.afterCoverage - lexical.beforeCoverage) >= 0.0005
-              ? `从 ${(lexical.beforeCoverage * 100).toFixed(1)}% 提升到 ${(lexical.afterCoverage * 100).toFixed(1)}%`
-              : `为 ${(lexical.afterCoverage * 100).toFixed(1)}%`
-            : "仍未达到发布底线";
           throw new StoryGenerationFailure(
-            starterRepairReason === "starter_lexical_load"
-              ? `第 ${episodeNumber} 集语义已通过（均分 ${score}），定向换词后覆盖率${lexicalResult}；专项行动简化后的自动重试也已完成。正文已保存，需要调整词汇表或任务设计后继续。`
-              : `第 ${episodeNumber} 集已完成锁定剧情的 Starter 语言编辑，并在专项行动简化后自动重试；自然英语仍未通过。正文已保存，需要调整本集表达设计后继续。`,
-            starterRepairReason === "starter_lexical_load"
-              ? "STARTER_LEXICAL_CAPACITY_EXHAUSTED"
-              : "STARTER_LANGUAGE_CAPACITY_EXHAUSTED",
-            starterRepairReason === "starter_lexical_load" ? "lexical" : "language",
+            `第 ${episodeNumber} 集已完成锁定剧情的 Starter 语言编辑，并在专项行动简化后自动重试；自然英语仍未通过。正文已保存，需要调整本集表达设计后继续。`,
+            "STARTER_LANGUAGE_CAPACITY_EXHAUSTED",
+            "language",
             "manual",
           );
         }
