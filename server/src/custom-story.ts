@@ -4,6 +4,8 @@ import type { AppDatabase } from "./database";
 import {
   isTransientModelCapacityError,
   parseStoryGenerationCheckpoint,
+  parseClassicCheckpoint,
+  runClassicAdaptation,
   runStoryGeneration,
   StoryGenerationFailure,
   storyGenerationPolicy,
@@ -13,6 +15,8 @@ import {
   type StoryGenerationProgress,
   type StoryEpisodeImported,
   type StoryRunOptions,
+  type ClassicCheckpoint,
+  type ClassicRunOptions,
 } from "../scripts/generate-story-series";
 
 type CustomStoryRequestRow = {
@@ -27,6 +31,12 @@ type CustomStoryRequestRow = {
   tone: string;
   episodeCount: number;
   readerStage: ReaderStageId;
+  sourceMode: "favorite" | "classic";
+  classicId: string;
+  classicUnitId: string;
+  sourceVersion: string;
+  baseVersion: string;
+  pipelineVersion: string;
   checkpointJson: string;
   checkpointEpisodeCount: number;
   automaticRetryEpisode: number;
@@ -183,7 +193,7 @@ export class CustomStoryService implements CustomStoryProvider {
   resume() {
     const rows = this.db
       .prepare(
-        `SELECT id, status, episode_count AS episodeCount,
+        `SELECT id, status, episode_count AS episodeCount, source_mode AS sourceMode,
           checkpoint_json AS checkpointJson,
           checkpoint_episode_count AS checkpointEpisodeCount,
           automatic_retry_episode AS automaticRetryEpisode,
@@ -195,12 +205,33 @@ export class CustomStoryService implements CustomStoryProvider {
         id: string;
         status: string;
         episodeCount: number;
+        sourceMode: "favorite" | "classic";
         checkpointJson: string;
         checkpointEpisodeCount: number;
         automaticRetryEpisode: number;
         automaticRetryCount: number;
     }>;
     for (const row of rows) {
+      if (row.sourceMode === "classic") {
+        try {
+          if (row.checkpointJson) parseClassicCheckpoint(JSON.parse(row.checkpointJson));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "名著改写检查点损坏";
+          this.db.prepare(
+            `UPDATE custom_story_requests SET status = 'failed', progress_stage = 'failed',
+             error_message = ?, progress_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          ).run(message.slice(0, 1000), "名著改写检查点无法解析，需要修复数据后继续", row.id);
+          continue;
+        }
+        if (row.status === "generating") {
+          this.db.prepare(
+            `UPDATE custom_story_requests SET status = 'queued', progress_stage = 'queued',
+             progress_message = '服务已重启，等待从已保存阶段继续名著改写', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          ).run(row.id);
+        }
+        this.enqueue(row.id);
+        continue;
+      }
       let checkpoint: StoryGenerationCheckpoint | null;
       try {
         checkpoint = this.parseCheckpoint(row.checkpointJson);
@@ -262,6 +293,9 @@ export class CustomStoryService implements CustomStoryProvider {
         `SELECT id, status, user_id AS userId, exam_id AS examId, idea, characters,
           keywords_json AS keywordsJson, plot_notes AS plotNotes, tone,
           episode_count AS episodeCount, reader_stage AS readerStage,
+          source_mode AS sourceMode, classic_id AS classicId,
+          classic_unit_id AS classicUnitId, source_version AS sourceVersion,
+          base_version AS baseVersion, pipeline_version AS pipelineVersion,
           checkpoint_json AS checkpointJson,
           checkpoint_episode_count AS checkpointEpisodeCount,
           automatic_retry_episode AS automaticRetryEpisode,
@@ -276,6 +310,7 @@ export class CustomStoryService implements CustomStoryProvider {
   private async generate(requestId: string): Promise<void> {
     const request = this.request(requestId);
     if (!request || request.status !== "queued") return;
+    if (request.sourceMode === "classic") return this.generateClassic(request);
     let checkpoint: StoryGenerationCheckpoint | null;
     try {
       checkpoint = this.parseCheckpoint(request.checkpointJson);
@@ -498,6 +533,85 @@ export class CustomStoryService implements CustomStoryProvider {
     }
   }
 
+  private async generateClassic(request: CustomStoryRequestRow) {
+    let checkpoint: ClassicCheckpoint | null = null;
+    try {
+      checkpoint = request.checkpointJson
+        ? parseClassicCheckpoint(JSON.parse(request.checkpointJson))
+        : null;
+      if (checkpoint && (
+        checkpoint.sourceVersion !== request.sourceVersion
+        || checkpoint.baseVersion !== request.baseVersion
+        || checkpoint.workId !== request.classicId
+        || checkpoint.unitId !== request.classicUnitId
+      )) {
+        throw new Error("SOURCE_CONFLICT: 请求绑定的名著版本与检查点不一致");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "名著改写检查点损坏";
+      this.db.prepare(
+        `UPDATE custom_story_requests SET status = 'failed', progress_stage = 'failed',
+         error_message = ?, progress_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      ).run(message.slice(0, 1000), "名著改写检查点无法解析，需要修复数据后继续", request.id);
+      return;
+    }
+    const claim = this.db.prepare(
+      `UPDATE custom_story_requests SET status = 'generating', error_message = '',
+       progress_stage = 'planning', progress_message = '正在读取已核对原作资料',
+       progress_percent = 5, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'queued'`,
+    ).run(request.id);
+    if (claim.changes !== 1) return;
+    try {
+      const result = await runClassicAdaptation({
+        ...this.options,
+        sourceMode: "classic",
+        classicId: request.classicId as StoryRunOptions["classicId"],
+        classicUnitId: request.classicUnitId,
+        readerStage: request.readerStage,
+        examId: request.examId,
+        episodes: request.episodeCount,
+        importNamespace: `custom-${request.id}`,
+        seriesVersionId: request.id,
+        checkpoint,
+        onCheckpoint: (saved) => this.saveClassicCheckpoint(request.id, saved),
+        onProgress: (value) => this.saveProgress(request.id, value),
+        log: (message) => {
+          console.log(`[classic-story:${request.id}] ${message}`);
+          this.appendStoryLog(request.id, "info", message);
+        },
+      } as ClassicRunOptions);
+      if (!result.articleIds.length) throw new Error("CONTENT_REJECTED: 名著改写没有可发布章节");
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db.prepare(
+          `INSERT OR IGNORE INTO interest_deliveries(user_id, article_id, delivery_date)
+           VALUES (?, ?, date('now'))`,
+        ).run(request.userId, result.articleIds[0]);
+        this.db.prepare(
+          `UPDATE custom_story_requests SET status = 'completed', series_title = ?,
+           article_ids_json = ?, completed_at = CURRENT_TIMESTAMP,
+           progress_stage = 'completed', progress_message = '名著改写已完成，可以开始阅读',
+           progress_percent = 100, automatic_retry_episode = 0, automatic_retry_count = 0,
+           last_failure_fingerprint = '', repeated_failure_count = 0,
+           updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        ).run(result.seriesTitle, JSON.stringify(result.articleIds), request.id);
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "MODEL_UNAVAILABLE: 名著改写失败";
+      this.appendStoryLog(request.id, "error", message);
+      this.db.prepare(
+        `UPDATE custom_story_requests SET status = 'failed', error_message = ?,
+         progress_stage = 'failed', progress_message = '已保留最后成功阶段，修复后可从该阶段继续',
+         updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      ).run(message.slice(0, 1000), request.id);
+    }
+  }
+
   private publishEpisode(
     request: CustomStoryRequestRow,
     episode: StoryEpisodeImported,
@@ -587,6 +701,22 @@ export class CustomStoryService implements CustomStoryProvider {
     );
   }
 
+  private saveClassicCheckpoint(requestId: string, checkpoint: ClassicCheckpoint) {
+    const completed = checkpoint.stage === "learning_ready" || checkpoint.stage === "published"
+      ? checkpoint.episodeCount
+      : 0;
+    this.db.prepare(
+      `UPDATE custom_story_requests SET checkpoint_json = ?, checkpoint_episode_count = ?,
+       series_title = COALESCE(?, series_title), updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'generating'`,
+    ).run(
+      JSON.stringify(checkpoint),
+      completed,
+      checkpoint.final?.title ?? checkpoint.draft?.title ?? null,
+      requestId,
+    );
+  }
+
   private parseCheckpoint(value: string) {
     if (!value) return null;
     try {
@@ -603,6 +733,13 @@ export class CustomStoryService implements CustomStoryProvider {
 
   retryBlockReason(checkpointJson: string) {
     try {
+      if (checkpointJson) {
+        const raw = JSON.parse(checkpointJson) as { type?: unknown };
+        if (raw?.type === "classic-adaptation") {
+          parseClassicCheckpoint(raw);
+          return null;
+        }
+      }
       const checkpoint = this.parseCheckpoint(checkpointJson);
       return checkpoint ? storyCheckpointRetryBlockReason(checkpoint) : null;
     } catch (error) {

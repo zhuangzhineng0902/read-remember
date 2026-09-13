@@ -34,6 +34,7 @@ const defaultOptions: Omit<StoryRunOptions, "log"> = {
   examId: "middle",
   sourceMode: "original",
   classicId: "",
+  classicUnitId: "",
   sourceTitle: "",
   sourceNotes: "",
   readerStage: "auto",
@@ -69,6 +70,7 @@ const helpText = `
   --exam <middle|high|toefl|ielts|toeic>
   --source-mode <original|classic|favorite>
   --classic <${classicSourceIds.join("|")}>
+  --unit <id>             classic 模式的已核对原作片段
   --source-title <name>   孩子喜欢的作品名或题材名，仅用于提取吸引力
   --source-notes <text>   喜欢的元素，例如魔法学校、伙伴闯关、幽默宠物
   --reader-stage <auto|starter|stage1|stage2|stage3|stage4|stage5|stage6>
@@ -125,6 +127,7 @@ export function storyOptionsFromCli(argv = process.argv.slice(2)): StoryRunOptio
   const examId = String(from("exam", "STORY_EXAM_ID", "examId") ?? defaultOptions.examId);
   const sourceMode = String(from("source-mode", "STORY_SOURCE_MODE", "sourceMode") ?? defaultOptions.sourceMode);
   const classicId = String(from("classic", "STORY_CLASSIC_ID", "classicId") ?? defaultOptions.classicId);
+  const classicUnitId = String(from("unit", "STORY_CLASSIC_UNIT_ID", "classicUnitId") ?? defaultOptions.classicUnitId);
   const sourceTitle = String(from("source-title", "STORY_SOURCE_TITLE", "sourceTitle") ?? defaultOptions.sourceTitle);
   const sourceNotes = String(from("source-notes", "STORY_SOURCE_NOTES", "sourceNotes") ?? defaultOptions.sourceNotes);
   const readerStage = String(from("reader-stage", "STORY_READER_STAGE", "readerStage") ?? defaultOptions.readerStage);
@@ -215,6 +218,7 @@ export function storyOptionsFromCli(argv = process.argv.slice(2)): StoryRunOptio
     examId: examId as ExamId,
     sourceMode: sourceMode as StorySourceMode,
     classicId: classicId as ClassicSourceId | "",
+    classicUnitId,
     sourceTitle,
     sourceNotes,
     readerStage: readerStage as ReaderStageId,

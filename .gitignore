@@ -27,6 +27,8 @@ server/data/*.zip
 server/data/article-audio/
 server/config/translation.json
 server/config/story-generation.json
+server/data/classics/*
+server/data/classics-staging/*
 
 # Logs and coverage
 *.log

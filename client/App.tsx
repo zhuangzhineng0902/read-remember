@@ -99,6 +99,7 @@ import {
   ArticleTimerSettings,
   CustomStory,
   CustomStoryInput,
+  ClassicSource,
   CustomStoryReaderStage,
   CustomStoryTone,
   ExamId,
@@ -1697,20 +1698,46 @@ function CreateStoryScreen({
   const [tone, setTone] = useState<CustomStoryTone>("adventure");
   const [episodeCount, setEpisodeCount] = useState(3);
   const [readerStage, setReaderStage] = useState<CustomStoryReaderStage>("auto");
+  const [storyMode, setStoryMode] = useState<"favorite" | "classic">("classic");
+  const [classicSources, setClassicSources] = useState<ClassicSource[]>([]);
+  const [selectedClassic, setSelectedClassic] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    void api.getClassicSources().then((sources) => {
+      setClassicSources(sources);
+      const source = sources.find((item) => item.status === "available") ?? sources[0];
+      if (source) {
+        setSelectedClassic(`${source.classicId}/${source.unitId}`);
+        const profile = source.supportedProfiles[0];
+        if (profile) { setReaderStage(profile.readerStage); setEpisodeCount(profile.episodeCount); }
+      }
+    }).catch(() => setClassicSources([]));
+  }, []);
+
+  const classic = classicSources.find(
+    (source) => `${source.classicId}/${source.unitId}` === selectedClassic,
+  );
+  const classicProfiles = classic?.supportedProfiles ?? [];
+  const canSubmit = storyMode === "classic"
+    ? Boolean(classic && classicProfiles.some((profile) => profile.readerStage === readerStage && profile.episodeCount === episodeCount))
+    : idea.trim().length >= 10;
+
   const submit = async () => {
-    if (idea.trim().length < 10 || submitting) return;
+    if (!canSubmit || submitting) return;
     setSubmitting(true);
     try {
-      await onCreate({
+      await onCreate(storyMode === "classic" ? {
+        sourceMode: "classic",
+        classicId: classic!.classicId,
+        unitId: classic!.unitId,
+        readerStage,
+        episodeCount,
+      } : {
+        sourceMode: "favorite",
         idea: idea.trim(),
         characters: characters.trim(),
-        keywords: keywords
-          .split(/[，,、\n]+/)
-          .map((item) => item.trim())
-          .filter(Boolean)
-          .slice(0, 12),
+        keywords: keywords.split(/[，,、\n]+/).map((item) => item.trim()).filter(Boolean).slice(0, 12),
         plotNotes: plotNotes.trim(),
         tone,
         episodeCount,
@@ -1735,19 +1762,58 @@ function CreateStoryScreen({
       showsVerticalScrollIndicator={false}
     >
       <Header
-        title="我要编故事"
-        subtitle="你提供灵感，AI 把它写成专属英语连续剧"
+        title={storyMode === "classic" ? "名著改写" : "我要编故事"}
+        subtitle={storyMode === "classic" ? "依据原作，为你的英语阅读水平改编" : "你提供灵感，AI 把它写成专属英语连续剧"}
       />
       <View style={styles.storyMakerHero}>
         <View style={styles.storyMakerOrb}><Text style={styles.storyMakerOrbText}>✦</Text></View>
-        <Text style={styles.storyMakerEyebrow}>YOUR IDEA · YOUR ADVENTURE</Text>
-        <Text style={styles.storyMakerTitle}>把脑海里的世界，变成下一篇想读的故事</Text>
+        <Text style={styles.storyMakerEyebrow}>{storyMode === "classic" ? "VERIFIED SOURCE · GRADED ENGLISH" : "YOUR IDEA · YOUR ADVENTURE"}</Text>
+        <Text style={styles.storyMakerTitle}>{storyMode === "classic" ? "读懂一个真实的经典故事" : "把脑海里的世界，变成下一篇想读的故事"}</Text>
         <Text style={styles.storyMakerCopy}>
-          系统会自动控制英语难度，设计伙伴、线索、笑点和悬念，并在生成后放进你的个人书架。
+          {storyMode === "classic"
+            ? "从已核对的原作片段出发，保留人物、因果与结局，再按你的英语水平清楚改写。"
+            : "系统会自动控制英语难度，设计伙伴、线索、笑点和悬念，并在生成后放进你的个人书架。"}
         </Text>
       </View>
 
       <View style={styles.storyMakerForm}>
+        <Text style={styles.storyFieldLabel}>故事类型</Text>
+        <View style={styles.storyChoiceWrap}>
+          <Pressable onPress={() => setStoryMode("favorite")} style={[styles.storyChoice, storyMode === "favorite" && styles.storyChoiceActive]}>
+            <Text style={[styles.storyChoiceText, storyMode === "favorite" && styles.storyChoiceTextActive]}>原创</Text>
+          </Pressable>
+          <Pressable onPress={() => {
+            setStoryMode("classic");
+            const profile = classicProfiles[0] ?? classicSources[0]?.supportedProfiles[0];
+            if (profile) { setReaderStage(profile.readerStage); setEpisodeCount(profile.episodeCount); }
+          }} style={[styles.storyChoice, storyMode === "classic" && styles.storyChoiceActive]}>
+            <Text style={[styles.storyChoiceText, storyMode === "classic" && styles.storyChoiceTextActive]}>名著改写</Text>
+          </Pressable>
+        </View>
+
+        {storyMode === "classic" ? (
+          <>
+            <Text style={styles.storyFieldLabel}>选择原作片段</Text>
+            <View style={styles.storyChoiceWrap}>
+              {classicSources.map((source) => (
+                <Pressable
+                  key={`${source.classicId}/${source.unitId}`}
+                  onPress={() => {
+                    setSelectedClassic(`${source.classicId}/${source.unitId}`);
+                    const profile = source.supportedProfiles[0];
+                    if (profile) { setReaderStage(profile.readerStage); setEpisodeCount(profile.episodeCount); }
+                  }}
+                  style={[styles.storyChoice, source.status !== "available" && { opacity: 0.55 }, selectedClassic === `${source.classicId}/${source.unitId}` && styles.storyChoiceActive]}
+                >
+                  <Text style={[styles.storyChoiceText, selectedClassic === `${source.classicId}/${source.unitId}` && styles.storyChoiceTextActive]}>
+                    {source.title} · {source.unitTitle}{source.status === "available" ? "" : "（待核对）"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            {classic && <Text style={styles.storySubmitHint}>{classic.title} · {classic.author}{"\n"}{classic.description}{"\n"}改编范围：{classic.scope}{classic.status === "available" ? "" : "\n待人工核对底稿后开放改写。"}</Text>}
+          </>
+        ) : <>
         <Text style={styles.storyFieldLabel}>你想看一个怎样的故事？ *</Text>
         <TextInput
           multiline
@@ -1802,10 +1868,11 @@ function CreateStoryScreen({
             </Pressable>
           ))}
         </View>
+        </>}
 
         <Text style={styles.storyFieldLabel}>先生成几章？</Text>
         <View style={styles.storyChoiceWrap}>
-          {[2, 3, 4, 5, 6].map((count) => (
+          {(storyMode === "classic" ? [...new Set(classicProfiles.map((profile) => profile.episodeCount))] : [2, 3, 4, 5, 6]).map((count) => (
             <Pressable
               key={count}
               onPress={() => setEpisodeCount(count)}
@@ -1818,7 +1885,7 @@ function CreateStoryScreen({
 
         <Text style={styles.storyFieldLabel}>英语难度</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyStageRow}>
-          {customStoryStages.map((item) => (
+          {customStoryStages.filter((item) => storyMode !== "classic" || classicProfiles.some((profile) => profile.readerStage === item.id)).map((item) => (
             <Pressable
               key={item.id}
               onPress={() => setReaderStage(item.id)}
@@ -1831,25 +1898,25 @@ function CreateStoryScreen({
 
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="开始创作我的故事"
-          disabled={idea.trim().length < 10 || submitting}
+          accessibilityLabel={storyMode === "classic" ? "开始名著改写" : "开始创作我的故事"}
+          disabled={!canSubmit || submitting}
           onPress={() => void submit()}
           style={({ pressed }) => [
             styles.storySubmit,
-            (idea.trim().length < 10 || submitting) && styles.storySubmitDisabled,
+            (!canSubmit || submitting) && styles.storySubmitDisabled,
             pressed && styles.primaryButtonPressed,
           ]}
         >
           {submitting ? <ActivityIndicator color="#FFFFFF" /> : <Sparkles size={19} color="#FFFFFF" />}
-          <Text style={styles.storySubmitText}>{submitting ? "正在提交灵感…" : "开始创作我的故事"}</Text>
+          <Text style={styles.storySubmitText}>{submitting ? "正在提交…" : storyMode === "classic" ? "开始名著改写" : "开始创作我的故事"}</Text>
         </Pressable>
-        <Text style={styles.storySubmitHint}>第一章完成后即可先读，其他章节会继续在后台创作。</Text>
+        <Text style={styles.storySubmitHint}>{storyMode === "classic" ? "依据固定原作和核对底稿改编；整体编辑与命题完成后开放第一章。" : "第一章完成后即可先读，其他章节会继续在后台创作。"}</Text>
       </View>
 
       <View style={styles.sectionHeading}>
         <View>
           <Text style={styles.sectionTitle}>我的故事书架</Text>
-          <Text style={styles.sectionSubtitle}>第一章生成完即可先读，完成一章点亮下一章</Text>
+          <Text style={styles.sectionSubtitle}>{storyMode === "classic" ? "整篇编辑完成后开放第一章，完成一章点亮下一章" : "第一章生成完即可先读，完成一章点亮下一章"}</Text>
         </View>
         <View style={styles.countPill}><Text style={styles.countPillText}>{stories.length} 个系列</Text></View>
       </View>

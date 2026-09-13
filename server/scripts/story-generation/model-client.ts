@@ -44,6 +44,9 @@ export type ModelCallPolicy = {
   maxCompletionTokens?: number;
   disableThinking?: boolean;
   recoverPartial?: (value: unknown, issues: string) => Promise<unknown | null>;
+  /** Shared cap for extra model calls caused by malformed, empty, or truncated protocol output. */
+  protocolRecoveryBudget?: number;
+  onProtocolRecovery?: (attempt: number) => void;
 };
 
 export function normalizeProviderJsonSchema(value: unknown): unknown {
@@ -465,6 +468,13 @@ export async function callStructured<T>(
   let prompt = user;
   let lastError: Error | null = null;
   let lastShape = "无候选";
+  let protocolRecoveries = 0;
+  const reserveProtocolRecovery = () => {
+    if (protocolRecoveries >= (policy.protocolRecoveryBudget ?? Number.POSITIVE_INFINITY)) return false;
+    protocolRecoveries += 1;
+    policy.onProtocolRecovery?.(protocolRecoveries);
+    return true;
+  };
   const structureRetries = policy.structureRetries ?? options.structureRetries;
   structureAttempt: for (let attempt = 1; attempt <= structureRetries; attempt++) {
     const correctionModel = structureModelForAttempt(
@@ -505,7 +515,7 @@ export async function callStructured<T>(
       } catch (error) {
         if (!(error instanceof ModelContentError) || !error.retryableAsStructure) throw error;
         lastError = error;
-        if (recoveryAttempt < 2) {
+        if (recoveryAttempt < 2 && reserveProtocolRecovery()) {
           const reasoningHint = error.reasoningTail
             ? `\n\n上一次推理的末尾如下，仅作为未完成草稿参考，不得原样复述：\n${error.reasoningTail}`
             : "";
@@ -518,7 +528,7 @@ export async function callStructured<T>(
           recoveryPrompt = `${prompt}${reasoningHint}\n\n上一次已完成分析但没有留下最终文本。现在禁止继续分析；立即根据原任务输出一份字段完整、内容精炼的最终 JSON 对象。只输出 JSON，不要 Markdown、解释或第二个对象。`;
           continue;
         }
-        if (attempt < structureRetries) {
+        if (attempt < structureRetries && reserveProtocolRecovery()) {
           options.log(
             `模型内容恢复已用完，进入第 ${attempt + 1}/${structureRetries} 次结构重建…`,
           );
@@ -532,11 +542,13 @@ export async function callStructured<T>(
     lastShape = values.slice(0, 8).map(structuredValueShape).join(" → ") || "无候选";
     if (!values.length) {
       lastError = jsonParseFailure(content);
-      if (attempt < structureRetries) {
+      if (attempt < structureRetries && reserveProtocolRecovery()) {
         options.log(
           `JSON 解析失败 ${attempt}/${structureRetries}，下一次切换到 `
           + `${structureModelForAttempt(options, model, attempt + 1)} 重新输出严格 JSON…`,
         );
+      } else if (attempt < structureRetries) {
+        break;
       }
       prompt = `${user}\n\n上一次响应无法作为 JSON 解析：${lastError.message}。请重新输出一份完整 JSON：只能有一个顶层对象，键名和字符串必须使用英文双引号，数组必须填真实值；禁止输出 Markdown、解释、正则示例（如 [a-z]）、JSON Schema、注释或第二个对象。`;
       continue;
@@ -593,6 +605,7 @@ export async function callStructured<T>(
     }
     const previousValue = JSON.stringify(closest.value).slice(0, 16_000);
     if (attempt < structureRetries) {
+      if (!reserveProtocolRecovery()) break;
       options.log(
         `${failureLabel} ${attempt}/${structureRetries}，下一次切换到 `
         + `${structureModelForAttempt(options, model, attempt + 1)} 并携带字段错误自动修正：${issues}`,

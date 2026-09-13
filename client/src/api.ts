@@ -419,6 +419,8 @@ export const api = {
 
   getCustomStories: () => request<CustomStory[]>("/custom-stories"),
 
+  getClassicSources: () => request<import("./types").ClassicSource[]>("/classic-sources"),
+
   getCustomStory: (id: string) =>
     request<CustomStory>(`/custom-stories/${encodeURIComponent(id)}`),
 

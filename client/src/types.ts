@@ -225,7 +225,8 @@ export type CustomStoryProgressStage =
   | "completed"
   | "failed";
 
-export type CustomStoryInput = {
+export type OriginalStoryInput = {
+  sourceMode?: "favorite";
   idea: string;
   characters: string;
   keywords: string[];
@@ -235,9 +236,51 @@ export type CustomStoryInput = {
   readerStage: CustomStoryReaderStage;
 };
 
-export type CustomStory = CustomStoryInput & {
+export type ClassicStoryInput = {
+  sourceMode: "classic";
+  classicId: string;
+  unitId: string;
+  readerStage: CustomStoryReaderStage;
+  examId?: ExamId;
+  episodeCount: number;
+};
+
+export type CustomStoryInput = OriginalStoryInput | ClassicStoryInput;
+
+export type ClassicSource = {
+  classicId: string;
+  unitId: string;
+  status: "available" | "pending_editorial_review";
+  title: string;
+  unitTitle: string;
+  author: string;
+  description: string;
+  scope: string;
+  sourceUrl: string;
+  supportedProfiles: Array<{
+    readerStage: CustomStoryReaderStage;
+    episodeCount: number;
+    minWords: number;
+    maxWords: number;
+  }>;
+};
+
+export type CustomStory = {
   id: string;
   examId: ExamId;
+  sourceMode: "favorite" | "classic";
+  classicId: string;
+  classicUnitId: string;
+  sourceVersion: string;
+  baseVersion: string;
+  pipelineVersion: string;
+  idea: string;
+  characters: string;
+  keywords: string[];
+  plotNotes: string;
+  tone: CustomStoryTone;
+  episodeCount: number;
+  readerStage: CustomStoryReaderStage;
   status: "queued" | "generating" | "completed" | "failed";
   progressStage: CustomStoryProgressStage;
   progressMessage: string;

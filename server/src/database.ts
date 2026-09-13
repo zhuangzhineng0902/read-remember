@@ -163,6 +163,12 @@ export function createDatabase(filename: string): AppDatabase {
       tone TEXT NOT NULL DEFAULT 'adventure',
       episode_count INTEGER NOT NULL DEFAULT 3 CHECK(episode_count BETWEEN 2 AND 6),
       reader_stage TEXT NOT NULL DEFAULT 'auto',
+      source_mode TEXT NOT NULL DEFAULT 'favorite',
+      classic_id TEXT NOT NULL DEFAULT '',
+      classic_unit_id TEXT NOT NULL DEFAULT '',
+      source_version TEXT NOT NULL DEFAULT '',
+      base_version TEXT NOT NULL DEFAULT '',
+      pipeline_version TEXT NOT NULL DEFAULT 'original-v1',
       series_title TEXT NOT NULL DEFAULT '',
       article_ids_json TEXT NOT NULL DEFAULT '[]',
       error_message TEXT NOT NULL DEFAULT '',
@@ -511,6 +517,12 @@ export function createDatabase(filename: string): AppDatabase {
     "repeated_failure_count",
     "repeated_failure_count INTEGER NOT NULL DEFAULT 0",
   );
+  ensureColumn("custom_story_requests", "source_mode", "source_mode TEXT NOT NULL DEFAULT 'favorite'");
+  ensureColumn("custom_story_requests", "classic_id", "classic_id TEXT NOT NULL DEFAULT ''");
+  ensureColumn("custom_story_requests", "classic_unit_id", "classic_unit_id TEXT NOT NULL DEFAULT ''");
+  ensureColumn("custom_story_requests", "source_version", "source_version TEXT NOT NULL DEFAULT ''");
+  ensureColumn("custom_story_requests", "base_version", "base_version TEXT NOT NULL DEFAULT ''");
+  ensureColumn("custom_story_requests", "pipeline_version", "pipeline_version TEXT NOT NULL DEFAULT 'original-v1'");
   migrateCustomStorySeriesVersions(db);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_articles_interest

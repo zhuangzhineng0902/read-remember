@@ -417,6 +417,8 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(story.requiresRevision, false);
   assert.equal(story.revisionMessage, null);
   assert.equal(story.episodeCount, 3);
+  assert.equal(story.sourceMode, "favorite");
+  assert.equal(story.pipelineVersion, "original-v1");
   assert.deepEqual(story.keywords, ["星图", "机关", "猫"]);
   assert.deepEqual(enqueuedCustomStories, [story.id]);
 
@@ -465,6 +467,55 @@ test("registered users can queue and inspect a private custom story", async () =
   assert.equal(resumeError.error.code, "CUSTOM_STORY_REQUIRES_REVISION");
   assert.match(resumeError.error.message, /检查点损坏/);
   assert.deepEqual(enqueuedCustomStories, [story.id, story.id]);
+});
+
+test("registered users can see pending classics and queue only verified profiles", async () => {
+  const catalog = await request("/api/v1/classic-sources");
+  assert.equal(catalog.status, 200);
+  const sources = (await catalog.json()).data;
+  assert.equal(sources.filter((item: { status: string }) => item.status === "pending_editorial_review").length, 0);
+  assert.equal(sources.filter((item: { status: string }) => item.status === "available").length, 16);
+  assert.equal(sources.find((item: { classicId: string; unitId: string }) =>
+    item.classicId === "journey-to-the-west" && item.unitId === "meeting-zhu-bajie")?.status, "available");
+  const source = sources.find((item: { classicId: string; unitId: string }) =>
+    item.classicId === "aesop" && item.unitId === "lion-and-mouse");
+  assert.ok(source);
+  assert.equal(source.status, "available");
+  assert.equal(source.unitTitle, "The Lion and the Mouse");
+  assert.deepEqual(source.supportedProfiles.map((item: { readerStage: string }) => item.readerStage), ["starter", "stage1"]);
+
+  const created = await request("/api/v1/custom-stories", {
+    method: "POST",
+    body: JSON.stringify({
+      sourceMode: "classic",
+      classicId: "aesop",
+      unitId: "lion-and-mouse",
+      readerStage: "starter",
+      examId: "middle",
+      episodeCount: 2,
+    }),
+  });
+  assert.equal(created.status, 202);
+  const story = (await created.json()).data;
+  assert.equal(story.sourceMode, "classic");
+  assert.equal(story.classicId, "aesop");
+  assert.equal(story.classicUnitId, "lion-and-mouse");
+  assert.equal(story.pipelineVersion, "classic-v1");
+  assert.match(story.sourceVersion, /gutenberg/);
+  assert.equal(story.baseVersion, "editorial-base-v1");
+
+  const unsupported = await request("/api/v1/custom-stories", {
+    method: "POST",
+    body: JSON.stringify({
+      sourceMode: "classic",
+      classicId: "aesop",
+      unitId: "lion-and-mouse",
+      readerStage: "stage4",
+      episodeCount: 2,
+    }),
+  });
+  assert.equal(unsupported.status, 400);
+  assert.equal((await unsupported.json()).error.code, "CONTENT_REJECTED");
 });
 
 test("interest preferences drive the interest feed and mixed daily reading", async () => {

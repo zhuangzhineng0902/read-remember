@@ -41,6 +41,8 @@ import type { ArticleAudioService } from "./article-audio";
 import type { PhraseTranslationProvider } from "./phrase-translation";
 import type { ArticleTranslationProvider } from "./article-translation";
 import type { CustomStoryProvider } from "./custom-story";
+import { ClassicPipelineError, listClassicSources, listPendingClassicSources } from "../scripts/story-generation/classic-assets";
+import { prepareClassicTask } from "../scripts/story-generation/classic-pipeline";
 
 const examIds = ["toefl", "ielts", "toeic", "middle", "high"] as const;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -869,6 +871,9 @@ export function createApp(
     id, user_id AS userId, exam_id AS examId, status, idea, characters,
     keywords_json AS keywordsJson, plot_notes AS plotNotes, tone,
     episode_count AS episodeCount, reader_stage AS readerStage,
+    source_mode AS sourceMode, classic_id AS classicId,
+    classic_unit_id AS classicUnitId, source_version AS sourceVersion,
+    base_version AS baseVersion, pipeline_version AS pipelineVersion,
     series_title AS seriesTitle, error_message AS errorMessage,
     progress_stage AS progressStage, progress_message AS progressMessage,
     progress_percent AS progressPercent,
@@ -890,6 +895,12 @@ export function createApp(
     tone: string;
     episodeCount: number;
     readerStage: string;
+    sourceMode: "favorite" | "classic";
+    classicId: string;
+    classicUnitId: string;
+    sourceVersion: string;
+    baseVersion: string;
+    pipelineVersion: string;
     seriesTitle: string;
     errorMessage: string;
     progressStage: string;
@@ -930,6 +941,12 @@ export function createApp(
       tone: row.tone,
       episodeCount: row.episodeCount,
       readerStage: row.readerStage,
+      sourceMode: row.sourceMode,
+      classicId: row.classicId,
+      classicUnitId: row.classicUnitId,
+      sourceVersion: row.sourceVersion,
+      baseVersion: row.baseVersion,
+      pipelineVersion: row.pipelineVersion,
       seriesTitle: row.seriesTitle,
       errorMessage: row.errorMessage,
       progressStage: row.progressStage,
@@ -950,6 +967,34 @@ export function createApp(
       })),
     };
   };
+
+  authenticated.get("/classic-sources", (_req, res) => {
+    res.json({
+      data: [...listClassicSources().map((source) => ({
+        classicId: source.workId,
+        unitId: source.unitId,
+        status: "available" as const,
+        title: source.title,
+        unitTitle: source.unitTitle,
+        author: source.author,
+        description: source.description,
+        scope: source.scope,
+        sourceUrl: source.sourceUrl,
+        supportedProfiles: source.supportedProfiles,
+      })), ...listPendingClassicSources().map((source) => ({
+        classicId: source.workId,
+        unitId: source.unitId,
+        status: source.status,
+        title: source.title,
+        unitTitle: source.unitTitle,
+        author: source.author,
+        description: source.tags.join(" · "),
+        scope: source.scope,
+        sourceUrl: source.sourceWorkUrl,
+        supportedProfiles: [],
+      }))],
+    });
+  });
 
   authenticated.get("/custom-stories", (_req, res) => {
     const user = currentUser(res);
@@ -1027,8 +1072,8 @@ export function createApp(
     if (!customStories?.enabled) {
       throw new ApiError(503, "CUSTOM_STORY_NOT_CONFIGURED", "定制故事生成服务尚未配置");
     }
-    const body = parse(
-      z.object({
+    const originalRequestSchema = z.object({
+        sourceMode: z.literal("favorite").default("favorite"),
         idea: z.string().trim().min(10).max(600),
         characters: z.string().trim().max(400).default(""),
         keywords: z.array(z.string().trim().min(1).max(40)).max(12).default([]),
@@ -1036,26 +1081,53 @@ export function createApp(
         tone: z.enum(["adventure", "funny", "mystery", "friendship", "fantasy"]).default("adventure"),
         episodeCount: z.number().int().min(2).max(6).default(3),
         readerStage: z.enum(["auto", "starter", "stage1", "stage2", "stage3", "stage4", "stage5", "stage6"]).default("auto"),
-      }),
-      req.body,
-    );
+      });
+    const classicRequestSchema = z.object({
+      sourceMode: z.literal("classic"),
+      classicId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/),
+      unitId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/),
+      readerStage: z.enum(["auto", "starter", "stage1", "stage2", "stage3", "stage4", "stage5", "stage6"]),
+      examId: z.enum(examIds).optional(),
+      episodeCount: z.number().int().min(1).max(12),
+    });
+    const body = (req.body as { sourceMode?: unknown })?.sourceMode === "classic"
+      ? parse(classicRequestSchema, req.body)
+      : parse(originalRequestSchema, req.body);
+    let classic = null as null | ReturnType<typeof prepareClassicTask>;
+    if (body.sourceMode === "classic") {
+      try {
+        classic = prepareClassicTask(body.classicId, body.unitId, body.readerStage, body.episodeCount);
+      } catch (error) {
+        if (error instanceof ClassicPipelineError) throw new ApiError(400, error.code, error.message);
+        throw error;
+      }
+    }
     const id = randomUUID();
     db.prepare(
       `INSERT INTO custom_story_requests(
         id, user_id, exam_id, status, idea, characters, keywords_json,
-        plot_notes, tone, episode_count, reader_stage
-       ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+        plot_notes, tone, episode_count, reader_stage, source_mode,
+        classic_id, classic_unit_id, source_version, base_version, pipeline_version,
+        checkpoint_json
+       ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       user.id,
-      user.examId,
-      body.idea,
-      body.characters,
-      JSON.stringify([...new Set(body.keywords)]),
-      body.plotNotes,
-      body.tone,
+      body.sourceMode === "classic" ? body.examId ?? user.examId : user.examId,
+      body.sourceMode === "classic" ? `${classic!.asset.manifest.title} · ${classic!.asset.manifest.unitTitle}` : body.idea,
+      body.sourceMode === "classic" ? "" : body.characters,
+      body.sourceMode === "classic" ? "[]" : JSON.stringify([...new Set(body.keywords)]),
+      body.sourceMode === "classic" ? classic!.asset.manifest.scope : body.plotNotes,
+      body.sourceMode === "classic" ? "adventure" : body.tone,
       body.episodeCount,
-      body.readerStage,
+      classic?.profile.readerStage ?? body.readerStage,
+      body.sourceMode,
+      body.sourceMode === "classic" ? body.classicId : "",
+      body.sourceMode === "classic" ? body.unitId : "",
+      classic?.asset.manifest.sourceVersion ?? "",
+      classic?.asset.manifest.baseVersion ?? "",
+      body.sourceMode === "classic" ? "classic-v1" : "original-v1",
+      body.sourceMode === "classic" ? JSON.stringify(classic!.checkpoint) : "",
     );
     customStories.enqueue(id);
     const row = db

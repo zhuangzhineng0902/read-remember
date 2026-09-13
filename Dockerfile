@@ -11,6 +11,7 @@ COPY server/package*.json ./
 RUN npm ci
 COPY server ./
 COPY client/src /app/client/src
+COPY story-bible.md good-story-demo.md ./data/story-references/
 RUN npm run build
 
 FROM node:22-bookworm-slim AS dictionary

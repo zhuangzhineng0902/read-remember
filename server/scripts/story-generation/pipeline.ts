@@ -890,6 +890,8 @@ export type StoryRunOptions = {
   examId: ExamId;
   sourceMode: StorySourceMode;
   classicId: ClassicSourceId | "";
+  /** Verified source unit. Used only by the independent classic-v1 pipeline. */
+  classicUnitId?: string;
   sourceTitle: string;
   sourceNotes: string;
   readerStage: ReaderStageId;

@@ -59,6 +59,11 @@ import {
   narrativeCompletionTokenBudget,
   parseJson,
   parseStoryGenerationCheckpoint,
+  parseClassicCheckpoint,
+  classicNarrativeSchema,
+  classicPublishableNarrativeSchema,
+  loadClassicAsset,
+  resolveClassicProfile,
   prioritizeTargetWords,
   readStreamingModelContent,
   relevantEvidenceCandidates,
@@ -93,6 +98,8 @@ import {
   type SeriesPlan,
   type StoryCritique,
   type StoryRunOptions,
+  storyOptionsFromCli,
+  runConfiguredStoryGeneration,
 } from "../scripts/generate-story-series";
 import { createDatabase } from "../src/database";
 import {
@@ -216,6 +223,132 @@ test("classic story prompt uses a public-domain source and controlled reader sta
   assert.match(prompt, /不复制原句/);
   assert.match(prompt, /独立任务合同/);
   assert.match(prompt, /mustNotRepeat/);
+});
+
+test("classic-v1 loads only a verified source/base pair with an approved profile", () => {
+  const asset = loadClassicAsset("aesop", "lion-and-mouse");
+  assert.equal(asset.manifest.sourceVersion, "gutenberg-49010-stickney-1915-v1");
+  assert.equal(asset.manifest.sourceHash, asset.base.sourceHash);
+  assert.deepEqual(asset.sourceParagraphIds, ["p001", "p002", "p003", "p004", "p005", "p006", "p007"]);
+  assert.equal(resolveClassicProfile(asset, "auto", 2).readerStage, "starter");
+  assert.throws(() => resolveClassicProfile(asset, "stage4", 2), /CONTENT_REJECTED/);
+});
+
+test("classic CLI requires and preserves the verified unit identity", () => {
+  const incomplete = storyOptionsFromCli([
+    "--source-mode", "classic", "--classic", "aesop", "--episodes", "2",
+  ]);
+  assert.throws(() => runConfiguredStoryGeneration(incomplete), /classicUnitId/);
+  const options = storyOptionsFromCli([
+    "--source-mode", "classic", "--classic", "aesop", "--unit", "lion-and-mouse",
+    "--episodes", "2", "--reader-stage", "starter",
+  ]);
+  assert.equal(options.classicUnitId, "lion-and-mouse");
+});
+
+test("classic dispatch uses the independent three-call pipeline and publishes all chapters together", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "read-remember-classic-v1-"));
+  const databasePath = path.join(directory, "story.sqlite");
+  createDatabase(databasePath).close();
+  const narrative = {
+    title: "The Lion and His Small Friend",
+    chapters: [{
+      title: "A Surprising Promise",
+      paragraphs: [
+        "A hungry Lion woke and found a small Mouse under his great paw. The Lion was ready to eat him, but the Mouse begged for his life. He said that he meant no harm and promised that he would help the Lion one day.",
+        "The Lion laughed because such a small animal did not seem useful to him. Still, the promise amused him. He lifted his paw and let the Mouse run free. The Mouse remembered the kindness and the promise he had made.",
+      ],
+    }, {
+      title: "The Promise Kept",
+      paragraphs: [
+        "Not long after that day, hunters caught the Lion. They tied him down with a strong rope and left to prepare their next step. The Lion pulled with all his strength, but the rope held him. At last, he gave a loud groan.",
+        "The Mouse heard the Lion and ran to him. He used his sharp teeth to bite the rope again and again. Soon the rope broke, and the Lion stood up free. The Mouse had kept his promise, and the Lion understood that a small friend could give great help.",
+      ],
+    }],
+  };
+  const learning = {
+    chapters: [{ chapterNumber: 1, questions: [{
+      type: "detail", prompt: "What did the Mouse promise?", options: ["To help the Lion", "To find food", "To call the hunters", "To leave the forest"], answer: 0,
+      explanation: "The Mouse promised to help the Lion one day.", evidence: "promised that he would help the Lion one day",
+    }, {
+      type: "cause_effect", prompt: "Why did the Lion let the Mouse go?", options: ["He was asleep", "The promise amused him", "The hunters arrived", "The Mouse bit him"], answer: 1,
+      explanation: "The Lion was amused by the promise.", evidence: "the promise amused him",
+    }] }, { chapterNumber: 2, questions: [{
+      type: "detail", prompt: "What held the Lion?", options: ["A strong rope", "A stone wall", "A deep river", "A wooden box"], answer: 0,
+      explanation: "The hunters tied the Lion with rope.", evidence: "They tied him down with a strong rope",
+    }, {
+      type: "cause_effect", prompt: "How did the Mouse free the Lion?", options: ["He called a friend", "He moved a rock", "He bit the rope", "He opened a gate"], answer: 2,
+      explanation: "The Mouse repeatedly bit the rope until it broke.", evidence: "bite the rope again and again",
+    }] }],
+  };
+  let calls = 0;
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      calls += 1;
+      modelJson(response, calls <= 2 ? narrative : learning);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const logs: string[] = [];
+    const options = resumableRunOptions(databasePath, `http://127.0.0.1:${address.port}`, null, logs);
+    const result = await runConfiguredStoryGeneration({
+      ...options,
+      sourceMode: "classic",
+      classicId: "aesop",
+      classicUnitId: "lion-and-mouse",
+      readerStage: "starter",
+      episodes: 2,
+      seriesVersionId: "classic-test-version",
+    });
+    assert.equal(calls, 3);
+    assert.equal(result.articleIds.length, 2);
+    const published = createDatabase(databasePath);
+    try {
+      const rows = published.prepare(
+        "SELECT series_key AS seriesKey, episode_number AS episodeNumber FROM articles WHERE series_key = ? ORDER BY episode_number",
+      ).all("classic-test-version") as Array<{ seriesKey: string; episodeNumber: number }>;
+      assert.deepEqual(rows.map((row) => ({ ...row })), [
+        { seriesKey: "classic-test-version", episodeNumber: 1 },
+        { seriesKey: "classic-test-version", episodeNumber: 2 },
+      ]);
+    } finally {
+      published.close();
+    }
+    assert.doesNotMatch(logs.join(" "), /候选|融合|线索账本|四维/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("classic output and checkpoint schemas require their complete dedicated root shapes", () => {
+  assert.equal(classicNarrativeSchema.safeParse({
+    title: "A Small Friend",
+    chapters: [
+      { title: "The Promise", paragraphs: ["The Lion chose to let the little Mouse go free."] },
+      { title: "The Rescue", paragraphs: ["The Mouse bit the rope until the Lion was free."] },
+    ],
+  }).success, true);
+  assert.equal(classicNarrativeSchema.safeParse({
+    title: "Missing wrapper",
+    title2: "bad",
+    paragraphs: ["The model incorrectly placed chapter fields at the root."],
+  }).success, false);
+  const danglingDraft = {
+    title: "A Complete JSON Draft",
+    chapters: [{ title: "The ending", paragraphs: ["The editor still needs to complete this sentence,"] }],
+  };
+  assert.equal(classicNarrativeSchema.safeParse(danglingDraft).success, true);
+  assert.equal(classicPublishableNarrativeSchema.safeParse(danglingDraft).success, false);
+  assert.equal(classicPublishableNarrativeSchema.safeParse({
+    ...danglingDraft,
+    chapters: [{ title: "The ending", paragraphs: ["The editor completed the final sentence."] }],
+  }).success, true);
+  assert.throws(() => parseClassicCheckpoint({ type: "classic-adaptation", stage: "drafted" }), /OUTPUT_SCHEMA/);
 });
 
 test("custom stories select public-domain craft references from the submitted theme", () => {

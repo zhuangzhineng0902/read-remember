@@ -142,10 +142,44 @@ Authorization: Bearer <token>
 | `POST` | `/api/v1/custom-stories` | 创建后台故事任务 |
 | `GET` | `/api/v1/custom-stories` | 查询书架和任务状态 |
 | `GET` | `/api/v1/custom-stories/:id` | 查询单个任务和章节 |
+| `POST` | `/api/v1/custom-stories/:id/retry` | 从最后成功阶段继续失败任务 |
+| `GET` | `/api/v1/classic-sources` | 查询可用及待人工核对的名著片段；只有可用片段包含支持档位并可提交改写 |
 
 故事完成后只自动解锁第一章；提交本章答案后再解锁下一章。
 
 ## 连续故事生成
+
+生成入口先按 `sourceMode` 分流：`original / favorite` 保持下述原创连续故事流程；`classic` 进入独立的 `classic-v1` 名著改写流程，不生成季纲、候选池、线索账本或四维评分。
+
+### 名著改写（classic-v1）
+
+```text
+真实原作 + verified 底稿 + 固定写作依据
+  → 整篇分级改编（1 次）
+  → 整篇编辑（1 次）
+  → 全章命题（1 次）
+  → 全章事务入库，只解锁第一章
+```
+
+- 原作资产位于 `data/classics/<workId>/<unitId>/`，包含带段落编号的 `source.txt`、来源与支持组合 `manifest.json`、人工核对的 `base.json`。
+- `sourceHash`、`sourceVersion`、`baseVersion` 或核对引用不一致时，在模型调用前以 `REFERENCE_UNAVAILABLE` 停止；不会凭作品名回退到旧生成提示。
+- 新任务会把 `story-bible.md` 与 `good-story-demo.md` 的内容哈希和实际采用片段固定进专用检查点。续跑沿用固定输入，不受文档随后修改影响。
+- 检查点阶段为 `source_ready → drafted → edited → learning_ready → published`。命题失败不会退回正文，编辑失败不会进入原创候选循环。
+- 正文硬检查仅包括完整根对象、准确章数、非空正文、无明显截断和资产批准的宽松总词数。词汇覆盖率、平均句长与难词分布只作诊断。
+- 当前 MVP 开放 `Aesop's Fables · The Lion and the Mouse`，支持 `starter / stage1`、2 章；目录接口只展示完整通过资产校验的单元。
+
+新名著请求示例：
+
+```json
+{
+  "sourceMode": "classic",
+  "classicId": "aesop",
+  "unitId": "lion-and-mouse",
+  "readerStage": "starter",
+  "examId": "middle",
+  "episodeCount": 2
+}
+```
 
 ### 当前流程
 
@@ -311,10 +345,10 @@ npm run generate:story-series -- --config config/story-generation.json
 常见模式：
 
 ```bash
-# 公版名著独立分级重述
+# 名著改写：只允许目录中已核对的作品片段和组合
 npm run generate:story-series -- \
-  --source-mode classic --classic treasure-island \
-  --interest tiger --exam middle --reader-stage stage1 --episodes 6
+  --source-mode classic --classic aesop --unit lion-and-mouse \
+  --interest custom-story --exam middle --reader-stage starter --episodes 2
 
 # 根据偏好重新创作人物、世界和情节
 npm run generate:story-series -- \
@@ -329,7 +363,7 @@ npm run generate:story-series -- --interest tiger --exam middle --episodes 6 --d
 选材模式：
 
 - `original`：完全原创。
-- `classic`：基于内置公版作品独立简化重述，不复制商业简写本。
+- `classic`：依据固定版本原作与人工核对底稿进行名著改写；必须同时提供目录中的 `--classic` 和 `--unit`。
 - `favorite`：提取用户偏好的吸引力特征，重新创作具体内容。
 
 可通过 `--reader-stage` 选择 `starter` 至 `stage6`；`auto` 按考试阶段匹配。完整参数运行：
