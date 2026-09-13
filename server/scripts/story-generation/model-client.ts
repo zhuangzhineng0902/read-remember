@@ -38,6 +38,8 @@ export function modelRequestError(error: unknown) {
 }
 
 export type ModelCallPolicy = {
+  stage?: string;
+  providerSchema?: z.ZodType;
   timeoutMs?: number;
   networkRetries?: number;
   structureRetries?: number;
@@ -48,6 +50,29 @@ export type ModelCallPolicy = {
   protocolRecoveryBudget?: number;
   onProtocolRecovery?: (attempt: number) => void;
 };
+
+const rejectedSchemaFormats = new Set<string>();
+
+function schemaFormatKey(options: StoryModelOptions, model: string, responseFormat: ReturnType<typeof responseFormatForSchema>) {
+  return `${endpoint(options)}\0${model}\0${JSON.stringify(responseFormat.json_schema.schema)}`;
+}
+
+function schemaFormatSummary(responseFormat: ReturnType<typeof responseFormatForSchema>) {
+  const schema = responseFormat.json_schema.schema as Record<string, unknown>;
+  const keys = schema.properties && typeof schema.properties === "object"
+    ? Object.keys(schema.properties as Record<string, unknown>).slice(0, 12).join(",")
+    : "-";
+  const combinators = ["anyOf", "oneOf", "allOf"].filter((key) => key in schema).join(",") || "none";
+  return `root=${String(schema.type ?? "unspecified")}; keys=${keys}; combinators=${combinators}`;
+}
+
+function sanitizedProviderError(value: string) {
+  return value
+    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+    .replace(/[\r\n\t]+/g, " ")
+    .slice(0, 800);
+}
 
 export function normalizeProviderJsonSchema(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizeProviderJsonSchema);
@@ -377,6 +402,7 @@ async function callModelText(
   maxCompletionTokens: number = modelTokenBudgets.episode,
   disableThinking = false,
   responseSchema?: z.ZodType,
+  stage = "unspecified",
 ) {
   let lastError: unknown;
   let capacityRetries = 0;
@@ -384,7 +410,8 @@ async function callModelText(
   for (let attempt = 1; attempt <= networkRetries; attempt++) {
     const dispatcher = modelDispatcher(timeoutMs);
     try {
-      let useSchemaFormat = Boolean(responseSchema);
+      const schemaKey = schemaResponseFormat ? schemaFormatKey(options, model, schemaResponseFormat) : "";
+      let useSchemaFormat = Boolean(responseSchema) && !rejectedSchemaFormats.has(schemaKey);
       const request = () => fetch(endpoint(options), {
         method: "POST",
         headers: {
@@ -412,9 +439,10 @@ async function callModelText(
       });
       let response = await request();
       if (!response.ok && useSchemaFormat && [400, 422].includes(response.status)) {
-        const responseText = (await response.text()).slice(0, 1000);
-        if (/(?:json_schema|response_format|schema|additionalProperties|mismatch type bool|invalid params)/i.test(responseText)) {
-          options.log(`模型端拒绝 JSON Schema 响应格式（${response.status}），本次请求回退到 json_object；本地 Zod 校验仍保持。`);
+        const responseText = sanitizedProviderError(await response.text());
+        if (/(?:json_schema|response_format|additionalProperties|anyOf|oneOf|allOf|\bschema\b|mismatch type bool)/i.test(responseText)) {
+          rejectedSchemaFormats.add(schemaKey);
+          options.log(`模型端拒绝 JSON Schema 响应格式（status=${response.status}，model=${model}，stage=${stage}，${schemaFormatSummary(schemaResponseFormat!)}）：${responseText}；本次及后续同结构请求改用 json_object，本地 Zod 校验仍保持。`);
           useSchemaFormat = false;
           response = await request();
         } else {
@@ -510,6 +538,7 @@ export async function callStructured<T>(
           requestMaxTokens,
           policy.disableThinking || attempt > 1 || recoveringEmptyContent,
           schema,
+          policy.stage,
         );
         break;
       } catch (error) {

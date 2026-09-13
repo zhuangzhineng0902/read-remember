@@ -229,7 +229,7 @@ flowchart TD
 
 ### 模型输出边界
 
-结构化调用会将当前 Zod 业务 Schema 转成 `response_format.type=json_schema` 随请求发送，并在本地再次解析和校验。带 transform 的 Schema 向模型发送输入态约束；若供应商明确拒绝 JSON Schema，该次请求兼容降级为 `json_object`，本地 Zod 校验仍然生效。
+结构化调用会将当前 Zod 业务 Schema 转成 `response_format.type=json_schema` 随请求发送，并在本地再次解析和校验。带 transform 的 Schema 向模型发送输入态约束；名著编辑阶段向供应商发送无顶层联合的普通对象 Schema，本地仍执行故事/错误结果联合校验。若供应商明确拒绝 JSON Schema，日志保留脱敏后的原始错误、模型、阶段和结构摘要，并按“接口＋模型＋响应结构”记忆该兼容结果，后续同结构直接使用 `json_object`；本地 Zod 校验始终生效。单独出现 `invalid params` 不会被误判为 Schema 不兼容。
 
 连续性季纲修正只允许模型返回：
 

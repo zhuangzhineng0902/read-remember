@@ -44,6 +44,12 @@ const sourceConflictSchema = z.object({
   }).strict(),
 }).strict();
 
+export const classicEditorProviderSchema = z.object({
+  title: classicNarrativeSchema.shape.title.optional(),
+  chapters: classicNarrativeSchema.shape.chapters.optional(),
+  error: sourceConflictSchema.shape.error.optional(),
+}).strict();
+
 const editedNarrativeSchema = z.union([classicPublishableNarrativeSchema, sourceConflictSchema]);
 
 const generatedQuestionSchema = z.object({
@@ -379,7 +385,7 @@ export async function runClassicAdaptation(options: ClassicRunOptions) {
         adaptationPrompt(checkpoint, asset, profile),
         options.model,
         options.temperature,
-        { structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 12_288, timeoutMs: options.rewriteTimeoutMs, disableThinking: true, ...protocolRecovery("adaptation") },
+        { stage: "classic-adaptation", structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 12_288, timeoutMs: options.rewriteTimeoutMs, disableThinking: true, ...protocolRecovery("adaptation") },
       );
       validateNarrative(draft, profile, false);
       save({ ...checkpoint, stage: "drafted", draft, failure: undefined });
@@ -398,7 +404,7 @@ export async function runClassicAdaptation(options: ClassicRunOptions) {
         editorPrompt(checkpoint, asset, profile),
         options.reviewModel || options.model,
         options.reviewTemperature,
-        { structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 12_288, timeoutMs: options.rewriteTimeoutMs, disableThinking: true, ...protocolRecovery("editor") },
+        { stage: "classic-editor", providerSchema: classicEditorProviderSchema, structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 12_288, timeoutMs: options.rewriteTimeoutMs, disableThinking: true, ...protocolRecovery("editor") },
       );
       if ("error" in edited) throw new ClassicPipelineError("SOURCE_CONFLICT", edited.error.message);
       const wordCount = validateNarrative(edited, profile, true);
@@ -422,7 +428,7 @@ export async function runClassicAdaptation(options: ClassicRunOptions) {
           learningPrompt(checkpoint.final!),
           options.model,
           options.reviewTemperature,
-          { structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 8_192, timeoutMs: options.timeoutMs, disableThinking: true, ...protocolRecovery("learning") },
+          { stage: "classic-learning", structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 8_192, timeoutMs: options.timeoutMs, disableThinking: true, ...protocolRecovery("learning") },
         );
         save({ ...checkpoint, learning, failure: undefined });
       }

@@ -61,6 +61,7 @@ import {
   parseStoryGenerationCheckpoint,
   parseClassicCheckpoint,
   classicNarrativeSchema,
+  classicEditorProviderSchema,
   classicPublishableNarrativeSchema,
   loadClassicAsset,
   resolveClassicProfile,
@@ -348,6 +349,9 @@ test("classic output and checkpoint schemas require their complete dedicated roo
     ...danglingDraft,
     chapters: [{ title: "The ending", paragraphs: ["The editor completed the final sentence."] }],
   }).success, true);
+  const providerSchema = responseFormatForSchema(classicEditorProviderSchema).json_schema.schema as Record<string, unknown>;
+  assert.equal("anyOf" in providerSchema, false);
+  assert.equal(providerSchema.type, "object");
   assert.throws(() => parseClassicCheckpoint({ type: "classic-adaptation", stage: "drafted" }), /OUTPUT_SCHEMA/);
 });
 
@@ -2504,6 +2508,46 @@ test("JSON structure correction alternates between M2.7 and M3", () => {
   assert.equal(structureModelForAttempt(models, "MiniMax-M2.7", 2), "MiniMax-M3");
   assert.equal(structureModelForAttempt(models, "MiniMax-M3", 1), "MiniMax-M3");
   assert.equal(structureModelForAttempt(models, "MiniMax-M3", 2), "MiniMax-M3");
+});
+
+test("a rejected provider schema is logged once and skipped for the same endpoint model and shape", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const logs: string[] = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      bodies.push(body);
+      if ((body.response_format as { type?: string }).type === "json_schema") {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end('{"error":{"message":"response_format json_schema does not support top-level anyOf"}}');
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: "stop" }] }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const options = {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    apiPath: "/chat/completions", apiKey: "", model: "schema-cache-model",
+    reviewModel: "schema-cache-model", structureRepairModel: "schema-cache-model",
+    temperature: 0.1, reviewTemperature: 0.1, timeoutMs: 1_000, rewriteTimeoutMs: 1_000,
+    networkRetries: 1, structureRetries: 1, log: (message: string) => logs.push(message),
+  } as unknown as StoryRunOptions;
+  try {
+    const schema = z.object({ ok: z.boolean() });
+    await callStructured(options, schema, "Return JSON.", "Return JSON.", options.model, 0.1, { stage: "cache-test" });
+    await callStructured(options, schema, "Return JSON.", "Return JSON.", options.model, 0.1, { stage: "cache-test" });
+    assert.deepEqual(bodies.map((body) => (body.response_format as { type: string }).type), ["json_schema", "json_object", "json_object"]);
+    assert.match(logs.join(" "), /stage=cache-test.*root=object.*top-level anyOf/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test("streaming model responses are assembled even when the provider reports a token boundary", async () => {
