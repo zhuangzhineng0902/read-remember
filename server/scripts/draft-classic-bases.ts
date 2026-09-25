@@ -46,13 +46,16 @@ type CatalogUnit = {
   sourceHash: string;
 };
 
-const catalog = z.object({
+const catalogFile = z.object({
   units: z.array(z.object({
-    status: z.literal("pending_editorial_review"),
+    status: z.string(),
     workId: z.string(), unitId: z.string(), title: z.string(), unitTitle: z.string(),
     author: z.string(), language: z.string(), scope: z.string(), sourceHash: z.string(),
   })),
 }).parse(JSON.parse(readFileSync(path.join(root, "catalog.json"), "utf8")));
+const catalog = {
+  units: catalogFile.units.filter((unit): unit is CatalogUnit => unit.status === "pending_editorial_review"),
+};
 
 function paragraphNumber(id: string) {
   return Number(id.slice(1));
@@ -133,8 +136,8 @@ async function worker() {
       const editable = await callStructured(
         options,
         schemaForSource(source),
-        "You prepare faithful editorial story-base drafts from public-domain source text. Return only the allowed JSON fields. Never claim that a draft was human-verified.",
-        `Create a concise English story-base draft for later human verification.\n\nWork: ${unit.title}\nUnit: ${unit.unitTitle}\nAuthor: ${unit.author}\nScope: ${unit.scope}\nSource language: ${unit.language}\n\nRules:\n- Use only facts supported by the supplied source.\n- Cover the complete selected unit in chronological order, including its actual ending.\n- Each event needs what, why, result, and one or more exact pNNN citations.\n- A heading alone is not evidence.\n- Explain mustKeep as factual obligations, not prescribed prose.\n- Put expendable descriptions or side incidents in canOmit.\n- Do not return id, status, hashes, versions, reviewer names, timestamps, or commentary.\n\nReturn this complete root object:\n{"characters":[{"name":"...","role":"..."}],"context":"...","events":[{"what":"...","why":"...","result":"...","sourceParagraphs":["p001"]}],"ending":"...","mustKeep":["..."],"canOmit":["..."]}\n\nSOURCE:\n${source}`,
+        "You prepare faithful editorial story-base drafts from authorized, public-domain, or user-provided source text. Return only the allowed JSON fields. Never claim that a draft was human-verified.",
+        `Create a concise English story-base draft for later human verification.\n\nWork: ${unit.title}\nUnit: ${unit.unitTitle}\nAuthor: ${unit.author}\nScope: ${unit.scope}\nSource language: ${unit.language}\n\nRules:\n- Use only facts supported by the supplied source.\n- Cover the complete selected unit in chronological order, including its actual ending.\n- Return 4-12 chronological events, at most 12 mustKeep items, and at most 12 canOmit items.\n- Each event needs what, why, result, and one or more exact pNNN citations.\n- A heading alone is not evidence.\n- Explain mustKeep as factual obligations, not prescribed prose.\n- Put expendable descriptions or side incidents in canOmit.\n- Do not return id, status, hashes, versions, reviewer names, timestamps, or commentary.\n\nReturn this complete root object:\n{"characters":[{"name":"...","role":"..."}],"context":"...","events":[{"what":"...","why":"...","result":"...","sourceParagraphs":["p001"]}],"ending":"...","mustKeep":["..."],"canOmit":["..."]}\n\nSOURCE:\n${source}`,
         options.model,
         0.15,
         { maxCompletionTokens: 4096, disableThinking: true, networkRetries: 2, structureRetries: 2 },

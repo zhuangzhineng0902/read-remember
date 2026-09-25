@@ -12,6 +12,7 @@
     "translate:articles": "tsx scripts/translate-articles.ts",
     "generate:story-series": "tsx scripts/generate-story-series.ts",
     "prepare:classic-staging": "tsx scripts/prepare-classic-staging.ts",
+    "prepare:local-harry-potter": "tsx scripts/prepare-local-harry-potter.ts",
     "draft:classic-bases": "tsx scripts/draft-classic-bases.ts",
     "publish:classic-bases": "tsx scripts/publish-classic-bases.ts",
     "generate:article-audio": "tsx scripts/generate-article-audio.ts",

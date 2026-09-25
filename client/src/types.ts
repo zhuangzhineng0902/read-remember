@@ -265,6 +265,16 @@ export type ClassicSource = {
   }>;
 };
 
+export type ClassicMatchResult = {
+  hasExactMatch: boolean;
+  message: string;
+  recommendations: Array<{
+    classicId: string;
+    unitId: string;
+    reason: string;
+  }>;
+};
+
 export type CustomStory = {
   id: string;
   examId: ExamId;

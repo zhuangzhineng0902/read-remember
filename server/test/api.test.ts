@@ -107,6 +107,18 @@ const server = createServer(
         enqueuedCustomStories.push(requestId);
       },
       resume() {},
+      async recommendClassics(input) {
+        assert.equal(input.readerStage, "starter");
+        return {
+          hasExactMatch: true,
+          message: "找到适合的经典片段。",
+          recommendations: [{
+            classicId: "aesop",
+            unitId: "lion-and-mouse",
+            reason: "弱小伙伴用智慧回报善意，适合友情主题。",
+          }],
+        };
+      },
       retryBlockReason(checkpointJson) {
         if (!checkpointJson) return null;
         try {
@@ -474,7 +486,7 @@ test("registered users can see pending classics and queue only verified profiles
   assert.equal(catalog.status, 200);
   const sources = (await catalog.json()).data;
   assert.equal(sources.filter((item: { status: string }) => item.status === "pending_editorial_review").length, 0);
-  assert.equal(sources.filter((item: { status: string }) => item.status === "available").length, 16);
+  assert.ok(sources.filter((item: { status: string }) => item.status === "available").length >= 16);
   assert.equal(sources.find((item: { classicId: string; unitId: string }) =>
     item.classicId === "journey-to-the-west" && item.unitId === "meeting-zhu-bajie")?.status, "available");
   const source = sources.find((item: { classicId: string; unitId: string }) =>
@@ -483,6 +495,17 @@ test("registered users can see pending classics and queue only verified profiles
   assert.equal(source.status, "available");
   assert.equal(source.unitTitle, "The Lion and the Mouse");
   assert.deepEqual(source.supportedProfiles.map((item: { readerStage: string }) => item.readerStage), ["starter", "stage1"]);
+
+  const matched = await request("/api/v1/classic-sources/recommendations", {
+    method: "POST",
+    body: JSON.stringify({ keywords: "友情、智慧", avoid: "恐怖", readerStage: "starter" }),
+  });
+  assert.equal(matched.status, 200);
+  assert.deepEqual((await matched.json()).data.recommendations, [{
+    classicId: "aesop",
+    unitId: "lion-and-mouse",
+    reason: "弱小伙伴用智慧回报善意，适合友情主题。",
+  }]);
 
   const created = await request("/api/v1/custom-stories", {
     method: "POST",

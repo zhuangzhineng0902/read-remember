@@ -996,6 +996,18 @@ export function createApp(
     });
   });
 
+  authenticated.post("/classic-sources/recommendations", async (req, res) => {
+    if (!customStories?.enabled || !customStories.recommendClassics) {
+      throw new ApiError(503, "CLASSIC_MATCHING_UNAVAILABLE", "名著匹配服务尚未配置");
+    }
+    const body = parse(z.object({
+      keywords: z.string().trim().min(1).max(200),
+      avoid: z.string().trim().max(200).default(""),
+      readerStage: z.enum(["auto", "starter", "stage1", "stage2", "stage3", "stage4", "stage5", "stage6"]),
+    }), req.body);
+    res.json({ data: await customStories.recommendClassics(body) });
+  });
+
   authenticated.get("/custom-stories", (_req, res) => {
     const user = currentUser(res);
     const rows = db

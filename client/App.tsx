@@ -99,6 +99,7 @@ import {
   ArticleTimerSettings,
   CustomStory,
   CustomStoryInput,
+  ClassicMatchResult,
   ClassicSource,
   CustomStoryReaderStage,
   CustomStoryTone,
@@ -1701,6 +1702,11 @@ function CreateStoryScreen({
   const [storyMode, setStoryMode] = useState<"favorite" | "classic">("classic");
   const [classicSources, setClassicSources] = useState<ClassicSource[]>([]);
   const [selectedClassic, setSelectedClassic] = useState("");
+  const [classicPickerMode, setClassicPickerMode] = useState<"match" | "manual">("match");
+  const [classicKeywords, setClassicKeywords] = useState("");
+  const [classicAvoid, setClassicAvoid] = useState("");
+  const [classicMatches, setClassicMatches] = useState<ClassicMatchResult | null>(null);
+  const [matchingClassics, setMatchingClassics] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -1708,7 +1714,6 @@ function CreateStoryScreen({
       setClassicSources(sources);
       const source = sources.find((item) => item.status === "available") ?? sources[0];
       if (source) {
-        setSelectedClassic(`${source.classicId}/${source.unitId}`);
         const profile = source.supportedProfiles[0];
         if (profile) { setReaderStage(profile.readerStage); setEpisodeCount(profile.episodeCount); }
       }
@@ -1719,6 +1724,32 @@ function CreateStoryScreen({
     (source) => `${source.classicId}/${source.unitId}` === selectedClassic,
   );
   const classicProfiles = classic?.supportedProfiles ?? [];
+  const availableClassics = classicSources.filter((source) => source.status === "available");
+  const classicStages = customStoryStages.filter((stage) =>
+    availableClassics.some((source) => source.supportedProfiles.some((profile) => profile.readerStage === stage.id))
+  );
+  const chooseClassic = (source: ClassicSource) => {
+    setSelectedClassic(`${source.classicId}/${source.unitId}`);
+    const profile = source.supportedProfiles.find((item) => item.readerStage === readerStage)
+      ?? source.supportedProfiles[0];
+    if (profile) { setReaderStage(profile.readerStage); setEpisodeCount(profile.episodeCount); }
+  };
+  const matchClassics = async () => {
+    if (!classicKeywords.trim() || matchingClassics) return;
+    setMatchingClassics(true);
+    try {
+      setClassicMatches(await api.recommendClassics({
+        keywords: classicKeywords.trim(),
+        avoid: classicAvoid.trim(),
+        readerStage,
+      }));
+      setSelectedClassic("");
+    } catch {
+      setClassicMatches({ hasExactMatch: false, message: "暂时无法完成匹配，可以稍后重试、手动选书或改用原创。", recommendations: [] });
+    } finally {
+      setMatchingClassics(false);
+    }
+  };
   const canSubmit = storyMode === "classic"
     ? Boolean(classic && classicProfiles.some((profile) => profile.readerStage === readerStage && profile.episodeCount === episodeCount))
     : idea.trim().length >= 10;
@@ -1784,7 +1815,7 @@ function CreateStoryScreen({
           </Pressable>
           <Pressable onPress={() => {
             setStoryMode("classic");
-            const profile = classicProfiles[0] ?? classicSources[0]?.supportedProfiles[0];
+            const profile = classicProfiles[0] ?? availableClassics[0]?.supportedProfiles[0];
             if (profile) { setReaderStage(profile.readerStage); setEpisodeCount(profile.episodeCount); }
           }} style={[styles.storyChoice, storyMode === "classic" && styles.storyChoiceActive]}>
             <Text style={[styles.storyChoiceText, storyMode === "classic" && styles.storyChoiceTextActive]}>名著改写</Text>
@@ -1793,24 +1824,62 @@ function CreateStoryScreen({
 
         {storyMode === "classic" ? (
           <>
-            <Text style={styles.storyFieldLabel}>选择原作片段</Text>
+            <Text style={styles.storyFieldLabel}>选材方式</Text>
             <View style={styles.storyChoiceWrap}>
-              {classicSources.map((source) => (
-                <Pressable
-                  key={`${source.classicId}/${source.unitId}`}
-                  onPress={() => {
-                    setSelectedClassic(`${source.classicId}/${source.unitId}`);
-                    const profile = source.supportedProfiles[0];
-                    if (profile) { setReaderStage(profile.readerStage); setEpisodeCount(profile.episodeCount); }
-                  }}
-                  style={[styles.storyChoice, source.status !== "available" && { opacity: 0.55 }, selectedClassic === `${source.classicId}/${source.unitId}` && styles.storyChoiceActive]}
-                >
-                  <Text style={[styles.storyChoiceText, selectedClassic === `${source.classicId}/${source.unitId}` && styles.storyChoiceTextActive]}>
-                    {source.title} · {source.unitTitle}{source.status === "available" ? "" : "（待核对）"}
-                  </Text>
+              <Pressable onPress={() => setClassicPickerMode("match")} style={[styles.storyChoice, classicPickerMode === "match" && styles.storyChoiceActive]}>
+                <Text style={[styles.storyChoiceText, classicPickerMode === "match" && styles.storyChoiceTextActive]}>输入关键词，帮我选名著</Text>
+              </Pressable>
+              <Pressable onPress={() => setClassicPickerMode("manual")} style={[styles.storyChoice, classicPickerMode === "manual" && styles.storyChoiceActive]}>
+                <Text style={[styles.storyChoiceText, classicPickerMode === "manual" && styles.storyChoiceTextActive]}>手动选书</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.storyFieldLabel}>英语难度</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyStageRow}>
+              {classicStages.map((item) => (
+                <Pressable key={item.id} onPress={() => {
+                  setReaderStage(item.id);
+                  setSelectedClassic("");
+                  setClassicMatches(null);
+                }} style={[styles.storyStageChoice, readerStage === item.id && styles.storyChoiceActive]}>
+                  <Text style={[styles.storyChoiceText, readerStage === item.id && styles.storyChoiceTextActive]}>{item.label}</Text>
                 </Pressable>
               ))}
-            </View>
+            </ScrollView>
+            {classicPickerMode === "match" ? <>
+              <Text style={styles.storyFieldLabel}>你对什么感兴趣？ *</Text>
+              <TextInput value={classicKeywords} onChangeText={setClassicKeywords} maxLength={200} placeholder="例如：友情、解谜、冒险、奇妙世界" placeholderTextColor={colors.inkMuted} style={styles.storyInput} />
+              <Text style={styles.storyFieldLabel}>不想看什么？</Text>
+              <TextInput value={classicAvoid} onChangeText={setClassicAvoid} maxLength={200} placeholder="例如：太吓人、背叛、战争（可留空）" placeholderTextColor={colors.inkMuted} style={styles.storyInput} />
+              <Pressable disabled={!classicKeywords.trim() || matchingClassics} onPress={() => void matchClassics()} style={[styles.storySubmit, (!classicKeywords.trim() || matchingClassics) && styles.storySubmitDisabled]}>
+                {matchingClassics ? <ActivityIndicator color="#FFFFFF" /> : <Search size={18} color="#FFFFFF" />}
+                <Text style={styles.storySubmitText}>{matchingClassics ? "正在匹配…" : "帮我匹配"}</Text>
+              </Pressable>
+              {classicMatches && <>
+                <Text style={styles.storySubmitHint}>{classicMatches.message}{!classicMatches.hasExactMatch && classicMatches.recommendations.length ? "\n没有完全匹配，以下是相近选材；也可以切换到原创。" : ""}</Text>
+                <View style={[styles.storyChoiceWrap, { marginTop: 10 }]}>
+                  {classicMatches.recommendations.map((match) => {
+                    const source = availableClassics.find((item) => item.classicId === match.classicId && item.unitId === match.unitId);
+                    return source ? <Pressable key={`${match.classicId}/${match.unitId}`} onPress={() => chooseClassic(source)} style={[styles.storyChoice, selectedClassic === `${match.classicId}/${match.unitId}` && styles.storyChoiceActive]}>
+                      <Text style={[styles.storyChoiceText, selectedClassic === `${match.classicId}/${match.unitId}` && styles.storyChoiceTextActive]}>{source.title} · {source.unitTitle}{"\n"}{match.reason}</Text>
+                    </Pressable> : null;
+                  })}
+                </View>
+                {classicMatches.recommendations.length > 0 && <Pressable onPress={() => {
+                  const first = classicMatches.recommendations[0];
+                  const source = availableClassics.find((item) => item.classicId === first.classicId && item.unitId === first.unitId);
+                  if (source) chooseClassic(source);
+                }} style={[styles.storyChoice, { alignSelf: "flex-start", marginTop: 10 }]}>
+                  <Sparkles size={15} color={colors.primary} /><Text style={styles.storyChoiceText}>一键帮我选</Text>
+                </Pressable>}
+              </>}
+            </> : <>
+              <Text style={styles.storyFieldLabel}>选择原作片段</Text>
+              <View style={styles.storyChoiceWrap}>
+                {classicSources.map((source) => <Pressable key={`${source.classicId}/${source.unitId}`} disabled={source.status !== "available"} onPress={() => chooseClassic(source)} style={[styles.storyChoice, source.status !== "available" && { opacity: 0.55 }, selectedClassic === `${source.classicId}/${source.unitId}` && styles.storyChoiceActive]}>
+                  <Text style={[styles.storyChoiceText, selectedClassic === `${source.classicId}/${source.unitId}` && styles.storyChoiceTextActive]}>{source.title} · {source.unitTitle}{source.status === "available" ? "" : "（待核对）"}</Text>
+                </Pressable>)}
+              </View>
+            </>}
             {classic && <Text style={styles.storySubmitHint}>{classic.title} · {classic.author}{"\n"}{classic.description}{"\n"}改编范围：{classic.scope}{classic.status === "available" ? "" : "\n待人工核对底稿后开放改写。"}</Text>}
           </>
         ) : <>
@@ -1870,7 +1939,7 @@ function CreateStoryScreen({
         </View>
         </>}
 
-        <Text style={styles.storyFieldLabel}>先生成几章？</Text>
+        {(storyMode !== "classic" || classic) && <><Text style={styles.storyFieldLabel}>先生成几章？</Text>
         <View style={styles.storyChoiceWrap}>
           {(storyMode === "classic" ? [...new Set(classicProfiles.map((profile) => profile.episodeCount))] : [2, 3, 4, 5, 6]).map((count) => (
             <Pressable
@@ -1881,11 +1950,11 @@ function CreateStoryScreen({
               <Text style={[styles.storyChoiceText, episodeCount === count && styles.storyChoiceTextActive]}>{count} 章</Text>
             </Pressable>
           ))}
-        </View>
+        </View></>}
 
-        <Text style={styles.storyFieldLabel}>英语难度</Text>
+        {storyMode !== "classic" && <><Text style={styles.storyFieldLabel}>英语难度</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyStageRow}>
-          {customStoryStages.filter((item) => storyMode !== "classic" || classicProfiles.some((profile) => profile.readerStage === item.id)).map((item) => (
+          {customStoryStages.map((item) => (
             <Pressable
               key={item.id}
               onPress={() => setReaderStage(item.id)}
@@ -1894,7 +1963,7 @@ function CreateStoryScreen({
               <Text style={[styles.storyChoiceText, readerStage === item.id && styles.storyChoiceTextActive]}>{item.label}</Text>
             </Pressable>
           ))}
-        </ScrollView>
+        </ScrollView></>}
 
         <Pressable
           accessibilityRole="button"

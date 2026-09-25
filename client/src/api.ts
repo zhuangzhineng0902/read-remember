@@ -421,6 +421,12 @@ export const api = {
 
   getClassicSources: () => request<import("./types").ClassicSource[]>("/classic-sources"),
 
+  recommendClassics: (input: { keywords: string; avoid: string; readerStage: import("./types").CustomStoryReaderStage }) =>
+    request<import("./types").ClassicMatchResult>("/classic-sources/recommendations", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
   getCustomStory: (id: string) =>
     request<CustomStory>(`/custom-stories/${encodeURIComponent(id)}`),
 

@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import { planningHistorySchema } from "../scripts/story-generation/plan-feasibility";
+import { callStructured, modelTokenBudgets } from "../scripts/story-generation/model-client";
+import { listClassicSources, loadClassicAsset } from "../scripts/story-generation/classic-assets";
 import type { AppDatabase } from "./database";
 import {
   isTransientModelCapacityError,
@@ -50,7 +53,33 @@ export type CustomStoryProvider = {
   enqueue(requestId: string): void;
   resume(): void;
   retryBlockReason?(checkpointJson: string): string | null;
+  recommendClassics?(input: ClassicMatchInput): Promise<ClassicMatchResult>;
 };
+
+export type ClassicMatchInput = {
+  keywords: string;
+  avoid: string;
+  readerStage: ReaderStageId;
+};
+
+export type ClassicMatchResult = {
+  hasExactMatch: boolean;
+  message: string;
+  recommendations: Array<{
+    classicId: string;
+    unitId: string;
+    reason: string;
+  }>;
+};
+
+const classicMatchSchema = z.object({
+  recommendations: z.array(z.object({
+    classicId: z.string().trim().min(1),
+    unitId: z.string().trim().min(1),
+    reason: z.string().trim().min(1).max(160),
+    matchType: z.enum(["exact", "nearby"]),
+  })).max(3),
+});
 
 export class CorruptStoryCheckpointError extends Error {
   constructor(detail: string) {
@@ -188,6 +217,60 @@ export class CustomStoryService implements CustomStoryProvider {
 
   get enabled() {
     return Boolean(this.options.baseUrl && this.options.model);
+  }
+
+  async recommendClassics(input: ClassicMatchInput): Promise<ClassicMatchResult> {
+    const readerStage = input.readerStage === "auto" ? "starter" : input.readerStage;
+    const candidates = listClassicSources().filter((source) =>
+      source.supportedProfiles.some((profile) => profile.readerStage === readerStage)
+    );
+    if (!candidates.length) {
+      return { hasExactMatch: false, message: "当前阅读等级暂无可改编的名著片段，可以调整等级或改用原创。", recommendations: [] };
+    }
+    const catalog = candidates.map((source) => {
+      const base = loadClassicAsset(source.workId, source.unitId).base;
+      return {
+        classicId: source.workId,
+        unitId: source.unitId,
+        title: source.title,
+        unitTitle: source.unitTitle,
+        description: source.description,
+        characters: base.characters,
+        conflict: base.events.map((event) => event.what),
+        ending: base.ending,
+      };
+    });
+    const result = await callStructured(
+      this.options,
+      classicMatchSchema,
+      "你负责从给定的已核对名著片段目录中匹配阅读兴趣。只做选材，不改写故事；关键词不能改变原作人物、因果或结局。",
+      `阅读等级：${readerStage}\n兴趣关键词：${input.keywords}\n不想看：${input.avoid || "无"}\n\n候选目录：\n${JSON.stringify(catalog)}\n\n请按主题、人物关系、冲突和氛围返回最多三个目录 ID 和简短中文理由。没有真正贴合的片段时可返回相近选材，并将 matchType 设为 nearby；不要为了迎合关键词虚构目录内容。\n\n完整返回格式：\n{"recommendations":[{"classicId":"候选中的作品ID","unitId":"候选中的片段ID","reason":"简短中文理由","matchType":"exact或nearby"}]}\n只能返回这个根对象，不要增加 matched、message 等字段。`,
+      this.options.reviewModel || this.options.model,
+      Math.min(this.options.reviewTemperature, 0.2),
+      {
+        stage: "classic_matching",
+        structureRetries: 2,
+        maxCompletionTokens: modelTokenBudgets.questions,
+        disableThinking: true,
+      },
+    );
+    const allowed = new Set(candidates.map((source) => `${source.workId}/${source.unitId}`));
+    const seen = new Set<string>();
+    const recommendations = result.recommendations.filter((item) => {
+        const id = `${item.classicId}/${item.unitId}`;
+        if (!allowed.has(id) || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+    return {
+      hasExactMatch: recommendations.some((item) => item.matchType === "exact"),
+      message: recommendations.length
+        ? recommendations.some((item) => item.matchType === "exact")
+          ? "找到适合你兴趣和阅读等级的经典片段。"
+          : "没有完全匹配的片段，以下是内容最接近的选择。"
+        : "没有找到可验证的匹配片段，可以手动选书或改用原创。",
+      recommendations: recommendations.map(({ matchType: _matchType, ...item }) => item),
+    };
   }
 
   resume() {

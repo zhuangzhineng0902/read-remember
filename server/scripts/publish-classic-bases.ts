@@ -26,7 +26,8 @@ function profiles(unit: Record<string, unknown>) {
   ];
 }
 
-for (const unit of catalog.units) {
+const pendingUnits = catalog.units.filter((unit) => unit.status === "pending_editorial_review");
+for (const unit of pendingUnits) {
   const workId = String(unit.workId);
   const unitId = String(unit.unitId);
   const stagingDirectory = path.join(stagingRoot, workId, unitId);
@@ -41,7 +42,9 @@ for (const unit of catalog.units) {
     baseVersion,
     sourceHash: unit.sourceHash,
     status: "verified",
-    checkedBy: "workspace owner bulk approval",
+    checkedBy: String(unit.sourceProvider) === "Local user-provided file"
+      ? "automated citation validation for local private source"
+      : "workspace owner bulk approval",
     checkedAt,
     characters: draft.characters,
     context: draft.context,
@@ -85,4 +88,4 @@ for (const unit of catalog.units) {
 }
 
 writeFileSync(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
-console.log(`Published and verified ${catalog.units.length} classic units.`);
+console.log(`Published and verified ${pendingUnits.length} classic units.`);

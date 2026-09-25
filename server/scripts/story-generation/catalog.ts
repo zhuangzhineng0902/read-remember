@@ -39,6 +39,7 @@ export const classicSourceIds = [
   "little-princess",
   "wizard-of-oz",
   "tom-sawyer",
+  "harry-potter",
 ] as const;
 export type ClassicSourceId = (typeof classicSourceIds)[number];
 
@@ -105,6 +106,12 @@ export const classicSources: Record<
     author: "Mark Twain",
     storyCore: "an imaginative child turns ordinary life into adventures, but must learn when a joke becomes a real responsibility",
     childAppeal: "mischief, caves, treasure, school life, friendship, and comic plans that go wrong",
+  },
+  "harry-potter": {
+    title: "Harry Potter",
+    author: "J. K. Rowling",
+    storyCore: "a young wizard and his friends face mysteries and conflicts while growing through school, family, and difficult choices",
+    childAppeal: "magic, friendship, school life, puzzles, courage, and adventure",
   },
 };
 
@@ -326,4 +333,3 @@ export function storyGuideFor(
     humor: "来自人物性格、计划偏差和伙伴之间温暖而精准的吐槽",
   };
 }
-

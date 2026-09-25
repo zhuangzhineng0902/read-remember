@@ -162,6 +162,7 @@ Authorization: Bearer <token>
 ```
 
 - 原作资产位于 `data/classics/<workId>/<unitId>/`，包含带段落编号的 `source.txt`、来源与支持组合 `manifest.json`、人工核对的 `base.json`。
+- 本地自有或用户提供、但不宜进入 Git 的文本可以保存在同一运行时目录。以本机《Harry Potter》合集为例：`npm run prepare:local-harry-potter -- --source /absolute/path/to/source.txt`，随后运行 `npm run draft:classic-bases` 和 `npm run publish:classic-bases`。导入器只准备七卷各一个完整开篇章节，并记录本地文件哈希；其 `usageBasis` 明确限制为私人本地改编，版权或发布许可未核验时不得公开分发。
 - `sourceHash`、`sourceVersion`、`baseVersion` 或核对引用不一致时，在模型调用前以 `REFERENCE_UNAVAILABLE` 停止；不会凭作品名回退到旧生成提示。
 - 新任务会把 `story-bible.md` 与 `good-story-demo.md` 的内容哈希和实际采用片段固定进专用检查点。续跑沿用固定输入，不受文档随后修改影响。
 - 检查点阶段为 `source_ready → drafted → edited → learning_ready → published`。命题失败不会退回正文，编辑失败不会进入原创候选循环。
