@@ -10,6 +10,7 @@ const catalog = JSON.parse(readFileSync(catalogPath, "utf8")) as { units: Array<
 const checkedAt = new Date().toISOString();
 
 function profiles(unit: Record<string, unknown>) {
+  if (Array.isArray(unit.supportedProfiles)) return unit.supportedProfiles;
   const words = Number(unit.wordCount ?? 0);
   const characters = Number(unit.characterCount ?? 0);
   if (words && words <= 250) return [
@@ -43,7 +44,7 @@ for (const unit of pendingUnits) {
     sourceHash: unit.sourceHash,
     status: "verified",
     checkedBy: String(unit.sourceProvider) === "Local user-provided file"
-      ? "automated citation validation for local private source"
+      ? "workspace-approved local source with citation validation"
       : "workspace owner bulk approval",
     checkedAt,
     characters: draft.characters,

@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/database";
 import { importArticles } from "../../src/content-import";
 import type { StoryGenerationProgress, StoryRunOptions } from "./pipeline";
 import { callStructured } from "./model-client";
+import { compressionDriftIssues } from "./edit-guards";
 import {
   ClassicPipelineError,
   loadClassicAsset,
@@ -44,13 +45,22 @@ const sourceConflictSchema = z.object({
   }).strict(),
 }).strict();
 
+const chapterEditSchema = z.object({
+  chapterNumber: z.number().int().min(1).max(12),
+  title: chapterSchema.shape.title.optional(),
+  paragraphs: chapterSchema.shape.paragraphs.optional(),
+}).strict();
+
 export const classicEditorProviderSchema = z.object({
   title: classicNarrativeSchema.shape.title.optional(),
-  chapters: classicNarrativeSchema.shape.chapters.optional(),
+  chapterEdits: z.array(chapterEditSchema).max(12).optional(),
   error: sourceConflictSchema.shape.error.optional(),
 }).strict();
 
-const editedNarrativeSchema = z.union([classicPublishableNarrativeSchema, sourceConflictSchema]);
+const compressionAuditSchema = z.object({
+  complete: z.boolean(),
+  issues: z.array(z.string().trim().min(1).max(500)).max(12),
+}).strict();
 
 const generatedQuestionSchema = z.object({
   type: z.enum(["detail", "inference", "cause_effect"]),
@@ -97,7 +107,12 @@ export const classicCheckpointSchema = z.object({
   final: classicNarrativeSchema.optional(),
   finalTextHash: z.string().length(64).optional(),
   learning: learningSchema.optional(),
-  recoveryAttempts: z.object({ adaptation: z.number().int().min(0), editor: z.number().int().min(0), learning: z.number().int().min(0) }).strict(),
+  recoveryAttempts: z.object({
+    adaptation: z.number().int().min(0),
+    editor: z.number().int().min(0),
+    length: z.number().int().min(0).default(0),
+    learning: z.number().int().min(0),
+  }).strict(),
   failure: z.object({ code: z.string(), message: z.string() }).strict().optional(),
 }).strict().superRefine((checkpoint, context) => {
   const stages = ["source_ready", "drafted", "edited", "learning_ready", "published"] as const;
@@ -135,8 +150,15 @@ function narrativeRootExample(chapterCount: number) {
   }, null, 2);
 }
 
-function editorRootExamples(chapterCount: number) {
-  return `${narrativeRootExample(chapterCount)}\nOR\n${JSON.stringify({
+function editorRootExamples() {
+  return `${JSON.stringify({
+    title: "Only when the story title needs correction",
+    chapterEdits: [{
+      chapterNumber: 1,
+      title: "Only when this chapter title needs correction",
+      paragraphs: ["Return the complete replacement paragraphs only for a chapter that needs correction."],
+    }],
+  }, null, 2)}\nOR\n${JSON.stringify({
     error: { code: "SOURCE_CONFLICT", message: "A specific conflict that cannot be repaired without changing the source." },
   }, null, 2)}`;
 }
@@ -204,6 +226,13 @@ export function parseClassicCheckpoint(value: unknown): ClassicCheckpoint | null
   return parsed.data;
 }
 
+export function classicCheckpointRetryBlockReason(checkpoint: ClassicCheckpoint) {
+  if (checkpoint.failure?.code === "CONTENT_REJECTED" && /当前故事范围无法在指定篇幅内/.test(checkpoint.failure.message)) {
+    return checkpoint.failure.message;
+  }
+  return null;
+}
+
 function checkpointFor(asset: ClassicAsset, profile: ClassicProfile): ClassicCheckpoint {
   return {
     type: "classic-adaptation",
@@ -219,7 +248,7 @@ function checkpointFor(asset: ClassicAsset, profile: ClassicProfile): ClassicChe
     maxWords: profile.maxWords,
     references: readReferences(),
     stage: "source_ready",
-    recoveryAttempts: { adaptation: 0, editor: 0, learning: 0 },
+    recoveryAttempts: { adaptation: 0, editor: 0, length: 0, learning: 0 },
   };
 }
 
@@ -248,6 +277,37 @@ function validateCheckpoint(checkpoint: ClassicCheckpoint, asset: ClassicAsset, 
 
 function words(narrative: z.infer<typeof classicNarrativeSchema>) {
   return narrative.chapters.flatMap((chapter) => chapter.paragraphs).join(" ").match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g)?.length ?? 0;
+}
+
+function textWords(value: string) {
+  return value.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g)?.length ?? 0;
+}
+
+export function classicChapterBudgets(profile: ClassicProfile) {
+  const distribute = (total: number) => Array.from({ length: profile.episodeCount }, (_, index) =>
+    Math.floor(total / profile.episodeCount) + (index < total % profile.episodeCount ? 1 : 0));
+  const targetMaximums = distribute(Math.floor(profile.maxWords * 0.875));
+  const targetMinimums = distribute(Math.max(profile.minWords, Math.floor(profile.maxWords * 0.75)));
+  const hardMaximums = distribute(profile.maxWords);
+  return hardMaximums.map((hardMaximum, index) => ({
+    targetMinimum: Math.min(targetMinimums[index], targetMaximums[index]),
+    targetMaximum: targetMaximums[index],
+    hardMaximum,
+  }));
+}
+
+export function classicCapacityIssue(asset: ClassicAsset, profile: ClassicProfile) {
+  const targetWords = classicChapterBudgets(profile).reduce((sum, budget) => sum + budget.targetMaximum, 0);
+  const obligationWords = textWords(asset.base.mustKeep.join(" "));
+  if (asset.base.mustKeep.length > profile.episodeCount * 6 || obligationWords > targetWords * 0.65) {
+    return `已保存完整稿，但当前故事范围无法在指定篇幅内完成合格改编。可选择缩小原作范围，或增加阅读篇幅后继续。当前范围包含 ${asset.base.mustKeep.length} 项必须保留内容，目标正文约 ${targetWords} 词。`;
+  }
+  return "";
+}
+
+function chapterBudgetText(profile: ClassicProfile) {
+  return classicChapterBudgets(profile).map((budget, index) =>
+    `Chapter ${index + 1}: target ${budget.targetMinimum}-${budget.targetMaximum} words; hard maximum ${budget.hardMaximum}.`).join("\n");
 }
 
 function validateNarrative(narrative: z.infer<typeof classicNarrativeSchema>, profile: ClassicProfile, requireLength: boolean) {
@@ -290,11 +350,54 @@ function fixedContext(checkpoint: ClassicCheckpoint, asset: ClassicAsset, profil
 }
 
 function adaptationPrompt(checkpoint: ClassicCheckpoint, asset: ClassicAsset, profile: ClassicProfile) {
-  return `${fixedContext(checkpoint, asset, profile)}\n\nAdapt the complete selected source range into clear, engaging English for this profile. Preserve people, motives, event order, causes, consequences, and ending. You may simplify wording and omit only items allowed by the verified base. Do not import events, characters, a countdown, danger, or a twist from the example. Each chapter must advance an actual source event; the final chapter must resolve this source range. Readability and accurate expression are primary. Difficult-word and sentence-length statistics are diagnostics, not quotas. Return only this complete root object:\n${narrativeRootExample(profile.episodeCount)}`;
+  return `${fixedContext(checkpoint, asset, profile)}\n\nWORD BUDGETS (write below the targets; do not aim at the hard limits):\n${chapterBudgetText(profile)}\n\nAdapt the complete selected source range into clear, engaging English for this profile. Preserve people, motives, event order, causes, consequences, and ending. You may simplify wording and omit only items allowed by the verified base. Do not import events, characters, a countdown, danger, or a twist from the example. Each chapter must advance an actual source event; the final chapter must resolve this source range. Readability and accurate expression are primary. Difficult-word and sentence-length statistics are diagnostics, not quotas. Return only this complete root object:\n${narrativeRootExample(profile.episodeCount)}`;
 }
 
 function editorPrompt(checkpoint: ClassicCheckpoint, asset: ClassicAsset, profile: ClassicProfile) {
-  return `${fixedContext(checkpoint, asset, profile)}\n\nDRAFT TO EDIT:\n${JSON.stringify(checkpoint.draft, null, 2)}\n\nPerform the one allowed whole-story edit. Directly fix source fidelity, cause and effect, chapter continuity, summary-like gaps, unclear references, age suitability, and genuinely hard or unnatural language. Preserve clear expressions and worthwhile learning words; do not chase vocabulary coverage. Do not add requirements from the example. Return the complete edited story, even if no changes are needed. Only if source and verified base materially conflict in a way one edit cannot solve, return the error object. Return exactly one of these complete root objects:\n${editorRootExamples(profile.episodeCount)}`;
+  const counts = checkpoint.draft!.chapters.map((chapter, index) => `Chapter ${index + 1}: ${textWords(chapter.paragraphs.join(" "))} words`).join("\n");
+  return `${fixedContext(checkpoint, asset, profile)}\n\nWORD BUDGETS:\n${chapterBudgetText(profile)}\n\nCURRENT COUNTS:\n${counts}\n\nDRAFT TO EDIT:\n${JSON.stringify(checkpoint.draft, null, 2)}\n\nPerform the one allowed story edit as local chapter patches. Fix only chapters with an actual source-fidelity, cause-and-effect, continuity, clarity, age-suitability, or natural-language problem. Omit every already-qualified chapter from chapterEdits so the program preserves it byte-for-byte. Return complete replacement paragraphs for each changed chapter. A changed chapter must remain under its hard maximum; whenever you add an explanation, delete equal or greater redundant wording in that same chapter. Preserve clear expressions and worthwhile learning words; do not chase vocabulary coverage or add requirements from the example. Return an empty chapterEdits array when no correction is needed. Only if source and verified base materially conflict, return the error object. Return exactly one of these complete root objects:\n${editorRootExamples()}`;
+}
+
+function chapterLengthRepairPrompt(
+  chapter: z.infer<typeof chapterSchema>,
+  chapterNumber: number,
+  narrative: z.infer<typeof classicNarrativeSchema>,
+  asset: ClassicAsset,
+  budget: ReturnType<typeof classicChapterBudgets>[number],
+) {
+  const previousEnding = narrative.chapters[chapterNumber - 2]?.paragraphs.at(-1) ?? "This is the first chapter.";
+  const nextOpening = narrative.chapters[chapterNumber]?.paragraphs[0] ?? "This is the final chapter.";
+  return `Compress only Chapter ${chapterNumber} from ${textWords(chapter.paragraphs.join(" "))} words to ${budget.targetMinimum}-${budget.targetMaximum} words; ${budget.hardMaximum} is a hard rejection limit. Preserve every event, motive, turn, identity, and consequence already present in this chapter. Delete repetition and optional description; do not add events or move material between chapters. Keep the chapter's connection to these unchanged seams:\nPREVIOUS ENDING: ${previousEnding}\nNEXT OPENING: ${nextOpening}\n\nVerified obligations are reference material; preserve the ones already represented in this chapter but do not import obligations belonging elsewhere:\n${JSON.stringify(asset.base.mustKeep)}\n\nCHAPTER TO COMPRESS:\n${JSON.stringify(chapter, null, 2)}\n\nReturn only this complete root object:\n${JSON.stringify({ title: chapter.title, paragraphs: ["Complete compressed chapter paragraphs."] }, null, 2)}`;
+}
+
+function applyEditorPatches(
+  draft: z.infer<typeof classicNarrativeSchema>,
+  result: z.infer<typeof classicEditorProviderSchema>,
+) {
+  if (result.error) throw new ClassicPipelineError("SOURCE_CONFLICT", result.error.message);
+  const edits = result.chapterEdits ?? [];
+  const chapterNumbers = edits.map((edit) => edit.chapterNumber);
+  if (new Set(chapterNumbers).size !== chapterNumbers.length) {
+    throw new ClassicPipelineError("OUTPUT_SCHEMA", "Editor returned duplicate chapter patches.");
+  }
+  const chapters = draft.chapters.map((chapter) => ({ ...chapter, paragraphs: [...chapter.paragraphs] }));
+  for (const edit of edits) {
+    const chapter = chapters[edit.chapterNumber - 1];
+    if (!chapter) throw new ClassicPipelineError("OUTPUT_SCHEMA", `Editor patched missing chapter ${edit.chapterNumber}.`);
+    chapters[edit.chapterNumber - 1] = chapterSchema.parse({
+      title: edit.title ?? chapter.title,
+      paragraphs: edit.paragraphs ?? chapter.paragraphs,
+    });
+  }
+  return classicNarrativeSchema.parse({ title: result.title ?? draft.title, chapters });
+}
+
+function compressionAuditPrompt(
+  before: z.infer<typeof classicNarrativeSchema>,
+  after: z.infer<typeof classicNarrativeSchema>,
+  asset: ClassicAsset,
+) {
+  return `Check whether the compressed adaptation still preserves every key motive, turn, consequence, identity, and ending that was present before compression and required by the verified base. Do not request optional detail or new prose. Return complete=true only when no causal link or required ending was cut or changed.\n\nVERIFIED MUST KEEP:\n${JSON.stringify(asset.base.mustKeep)}\n\nBEFORE COMPRESSION:\n${JSON.stringify(before, null, 2)}\n\nAFTER COMPRESSION:\n${JSON.stringify(after, null, 2)}\n\nReturn only:\n${JSON.stringify({ complete: true, issues: [] }, null, 2)}`;
 }
 
 function normalized(value: string) {
@@ -370,6 +473,12 @@ export async function runClassicAdaptation(options: ClassicRunOptions) {
   });
   if (!options.checkpoint) save(checkpoint);
 
+  const capacityIssue = checkpoint.stage === "published" ? "" : classicCapacityIssue(asset, profile);
+  if (capacityIssue) {
+    save({ ...checkpoint, failure: { code: "CONTENT_REJECTED", message: capacityIssue } });
+    throw new ClassicPipelineError("CONTENT_REJECTED", capacityIssue);
+  }
+
   if (options.dryRun) {
     options.log(adaptationPrompt(checkpoint, asset, profile));
     return { seriesTitle: asset.manifest.unitTitle, generated: 0, imported: 0, articleIds: [] as string[] };
@@ -397,22 +506,85 @@ export async function runClassicAdaptation(options: ClassicRunOptions) {
   if (checkpoint.stage === "drafted") {
     progress(options, "editing", "正在进行唯一一次整篇编辑检查", 50);
     try {
-      const edited = await callStructured(
-        options,
-        editedNarrativeSchema,
-        "You are the sole whole-story editor. Preserve source truth, repair the draft once, and output JSON only.",
-        editorPrompt(checkpoint, asset, profile),
-        options.reviewModel || options.model,
-        options.reviewTemperature,
-        { stage: "classic-editor", providerSchema: classicEditorProviderSchema, structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 12_288, timeoutMs: options.rewriteTimeoutMs, disableThinking: true, ...protocolRecovery("editor") },
-      );
-      if ("error" in edited) throw new ClassicPipelineError("SOURCE_CONFLICT", edited.error.message);
+      let edited = checkpoint.final;
+      if (!edited) {
+        const result = await callStructured(
+          options,
+          classicEditorProviderSchema,
+          "You are the sole story editor. Return only local chapter patches and preserve every unlisted chapter. Output JSON only.",
+          editorPrompt(checkpoint, asset, profile),
+          options.reviewModel || options.model,
+          options.reviewTemperature,
+          { stage: "classic-editor", providerSchema: classicEditorProviderSchema, structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 12_288, timeoutMs: options.rewriteTimeoutMs, disableThinking: true, ...protocolRecovery("editor") },
+        );
+        edited = applyEditorPatches(checkpoint.draft!, result);
+      }
+      const beforeCompression = checkpoint.draft!;
+      let compressed = false;
+      const budgets = classicChapterBudgets(profile);
+      const maximumLengthRepairs = 3;
+      let overBudget = edited.chapters.map((chapter, index) => ({ chapter, index }))
+        .filter(({ chapter, index }) => textWords(chapter.paragraphs.join(" ")) > budgets[index].hardMaximum);
+      while (overBudget.length && checkpoint.recoveryAttempts.length < maximumLengthRepairs) {
+        const attempt = checkpoint.recoveryAttempts.length + 1;
+        save({
+          ...checkpoint,
+          final: edited,
+          recoveryAttempts: { ...checkpoint.recoveryAttempts, length: attempt },
+          failure: undefined,
+        });
+        progress(options, "editing", `正在进行第 ${attempt}/${maximumLengthRepairs} 次分章压缩：第 ${overBudget.map(({ index }) => index + 1).join("、")} 章`, 58);
+        for (const { chapter, index } of overBudget) {
+          const repaired: z.infer<typeof chapterSchema> = await callStructured(
+            options,
+            chapterSchema,
+            "Compress only the supplied over-budget chapter. Preserve its events and both chapter seams. Output JSON only.",
+            chapterLengthRepairPrompt(chapter, index + 1, edited, asset, budgets[index]),
+            options.reviewModel || options.model,
+            options.reviewTemperature,
+            { stage: "classic-length-repair", structureRetries: 2, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 4_096, timeoutMs: options.rewriteTimeoutMs, disableThinking: true, protocolRecoveryBudget: 1 },
+          );
+          const driftIssues = compressionDriftIssues(chapter, repaired);
+          if (driftIssues.length) {
+            throw new ClassicPipelineError("CONTENT_REJECTED", `第 ${index + 1} 章压缩偏离原稿：${driftIssues.join("；")}`);
+          }
+          edited = { ...edited, chapters: edited.chapters.map((item, chapterIndex) => chapterIndex === index ? repaired : item) };
+          compressed = true;
+          save({ ...checkpoint, final: edited, failure: undefined });
+        }
+        overBudget = edited.chapters.map((chapter, index) => ({ chapter, index }))
+          .filter(({ chapter, index }) => textWords(chapter.paragraphs.join(" ")) > budgets[index].hardMaximum);
+      }
+      if (overBudget.length || words(edited) > profile.maxWords) {
+        throw new ClassicPipelineError(
+          "CONTENT_REJECTED",
+          "已保存完整稿，但当前故事范围无法在指定篇幅内完成合格改编。可选择缩小原作范围，或增加阅读篇幅后继续。",
+        );
+      }
+      if (compressed || (checkpoint.recoveryAttempts.length > 0 && checkpoint.final)) {
+        const audit = await callStructured(
+          options,
+          compressionAuditSchema,
+          "Audit compressed story completeness against the pre-compression story and verified obligations. Output JSON only.",
+          compressionAuditPrompt(beforeCompression, edited, asset),
+          options.reviewModel || options.model,
+          0,
+          { stage: "classic-length-audit", structureRetries: 1, networkRetries: Math.min(2, options.networkRetries), maxCompletionTokens: 2_048, timeoutMs: options.rewriteTimeoutMs, disableThinking: true, protocolRecoveryBudget: 0 },
+        );
+        if (!audit.complete || audit.issues.length) {
+          throw new ClassicPipelineError("CONTENT_REJECTED", `压缩后内容完整性检查未通过：${audit.issues.join("；") || "关键因果或结局不完整"}`);
+        }
+      }
       const wordCount = validateNarrative(edited, profile, true);
       const sentenceCount = edited.chapters.flatMap((chapter) => chapter.paragraphs).join(" ").split(/[.!?]+/).filter((item) => item.trim()).length;
       options.log(`编辑稿机械检查通过：${wordCount} words，平均句长约 ${sentenceCount ? (wordCount / sentenceCount).toFixed(1) : "-"}；词汇覆盖率仅作诊断，不触发重写。`);
       save({ ...checkpoint, stage: "edited", final: edited, finalTextHash: sha256(JSON.stringify(edited)), failure: undefined });
     } catch (error) {
-      throw stageError(error, "CONTENT_REJECTED");
+      const staged = stageError(error, "CONTENT_REJECTED");
+      if (checkpoint.final && checkpoint.recoveryAttempts.length >= 1 && staged.code === "CONTENT_REJECTED") {
+        save({ ...checkpoint, failure: { code: staged.code, message: staged.message } });
+      }
+      throw staged;
     }
   }
 

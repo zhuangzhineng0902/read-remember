@@ -60,6 +60,10 @@ import {
   parseJson,
   parseStoryGenerationCheckpoint,
   parseClassicCheckpoint,
+  classicChapterBudgets,
+  classicCapacityIssue,
+  classicCheckpointRetryBlockReason,
+  prepareClassicTask,
   classicNarrativeSchema,
   classicEditorProviderSchema,
   classicPublishableNarrativeSchema,
@@ -247,7 +251,7 @@ test("classic CLI requires and preserves the verified unit identity", () => {
   assert.equal(options.classicUnitId, "lion-and-mouse");
 });
 
-test("classic dispatch uses the independent three-call pipeline and publishes all chapters together", async () => {
+test("classic dispatch repeats bounded compression until an overlong edit fits", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "read-remember-classic-v1-"));
   const databasePath = path.join(directory, "story.sqlite");
   createDatabase(databasePath).close();
@@ -282,12 +286,37 @@ test("classic dispatch uses the independent three-call pipeline and publishes al
       explanation: "The Mouse repeatedly bit the rope until it broke.", evidence: "bite the rope again and again",
     }] }],
   };
+  const overlongNarrative = {
+    ...narrative,
+    chapters: [{
+      ...narrative.chapters[0],
+      paragraphs: [...narrative.chapters[0].paragraphs, Array.from({ length: 180 }, () => "extra").join(" ")],
+    }, narrative.chapters[1]],
+  };
+  const shorterButOverBudget = {
+    ...narrative,
+    chapters: [{
+      ...narrative.chapters[0],
+      paragraphs: [...narrative.chapters[0].paragraphs, Array.from({ length: 100 }, () => "extra").join(" ")],
+    }, narrative.chapters[1]],
+  };
+  const editorPatch = {
+    chapterEdits: [{ chapterNumber: 1, paragraphs: overlongNarrative.chapters[0].paragraphs }],
+  };
   let calls = 0;
   const server = createServer((request, response) => {
     request.resume();
     request.on("end", () => {
       calls += 1;
-      modelJson(response, calls <= 2 ? narrative : learning);
+      const outputs = [
+        narrative,
+        editorPatch,
+        shorterButOverBudget.chapters[0],
+        narrative.chapters[0],
+        { complete: true, issues: [] },
+        learning,
+      ];
+      modelJson(response, outputs[calls - 1]);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -305,21 +334,24 @@ test("classic dispatch uses the independent three-call pipeline and publishes al
       episodes: 2,
       seriesVersionId: "classic-test-version",
     });
-    assert.equal(calls, 3);
+    assert.equal(calls, 6);
     assert.equal(result.articleIds.length, 2);
     const published = createDatabase(databasePath);
     try {
       const rows = published.prepare(
-        "SELECT series_key AS seriesKey, episode_number AS episodeNumber FROM articles WHERE series_key = ? ORDER BY episode_number",
-      ).all("classic-test-version") as Array<{ seriesKey: string; episodeNumber: number }>;
-      assert.deepEqual(rows.map((row) => ({ ...row })), [
+        "SELECT series_key AS seriesKey, episode_number AS episodeNumber, paragraphs_json AS paragraphsJson FROM articles WHERE series_key = ? ORDER BY episode_number",
+      ).all("classic-test-version") as Array<{ seriesKey: string; episodeNumber: number; paragraphsJson: string }>;
+      assert.deepEqual(rows.map(({ seriesKey, episodeNumber }) => ({ seriesKey, episodeNumber })), [
         { seriesKey: "classic-test-version", episodeNumber: 1 },
         { seriesKey: "classic-test-version", episodeNumber: 2 },
       ]);
+      assert.deepEqual(JSON.parse(rows[1].paragraphsJson), narrative.chapters[1].paragraphs);
     } finally {
       published.close();
     }
     assert.doesNotMatch(logs.join(" "), /候选|融合|线索账本|四维/);
+    assert.match(logs.join(" "), /第 1\/3 次分章压缩：第 1 章/);
+    assert.match(logs.join(" "), /第 2\/3 次分章压缩：第 1 章/);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     rmSync(directory, { recursive: true, force: true });
@@ -327,6 +359,11 @@ test("classic dispatch uses the independent three-call pipeline and publishes al
 });
 
 test("classic output and checkpoint schemas require their complete dedicated root shapes", () => {
+  assert.deepEqual(classicChapterBudgets({ readerStage: "starter", episodeCount: 3, minWords: 300, maxWords: 1200 }), [
+    { targetMinimum: 300, targetMaximum: 350, hardMaximum: 400 },
+    { targetMinimum: 300, targetMaximum: 350, hardMaximum: 400 },
+    { targetMinimum: 300, targetMaximum: 350, hardMaximum: 400 },
+  ]);
   assert.equal(classicNarrativeSchema.safeParse({
     title: "A Small Friend",
     chapters: [
@@ -353,6 +390,22 @@ test("classic output and checkpoint schemas require their complete dedicated roo
   assert.equal("anyOf" in providerSchema, false);
   assert.equal(providerSchema.type, "object");
   assert.throws(() => parseClassicCheckpoint({ type: "classic-adaptation", stage: "drafted" }), /OUTPUT_SCHEMA/);
+});
+
+test("classic capacity failures stop before generation and require a changed scope or profile", () => {
+  const asset = loadClassicAsset("aesop", "lion-and-mouse");
+  const profile = resolveClassicProfile(asset, "starter", 2);
+  const overloaded = {
+    ...asset,
+    base: { ...asset.base, mustKeep: Array.from({ length: 13 }, (_, index) => `Required event ${index + 1}`) },
+  };
+  assert.match(classicCapacityIssue(overloaded, profile), /缩小原作范围，或增加阅读篇幅/);
+  const checkpoint = prepareClassicTask("aesop", "lion-and-mouse", "starter", 2).checkpoint;
+  checkpoint.failure = {
+    code: "CONTENT_REJECTED",
+    message: "已保存完整稿，但当前故事范围无法在指定篇幅内完成合格改编。可选择缩小原作范围，或增加阅读篇幅后继续。",
+  };
+  assert.match(classicCheckpointRetryBlockReason(checkpoint) ?? "", /无法在指定篇幅内/);
 });
 
 test("custom stories select public-domain craft references from the submitted theme", () => {

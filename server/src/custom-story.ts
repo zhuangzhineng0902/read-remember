@@ -8,6 +8,7 @@ import {
   isTransientModelCapacityError,
   parseStoryGenerationCheckpoint,
   parseClassicCheckpoint,
+  classicCheckpointRetryBlockReason,
   runClassicAdaptation,
   runStoryGeneration,
   StoryGenerationFailure,
@@ -687,11 +688,14 @@ export class CustomStoryService implements CustomStoryProvider {
     } catch (error) {
       const message = error instanceof Error ? error.message : "MODEL_UNAVAILABLE: 名著改写失败";
       this.appendStoryLog(request.id, "error", message);
+      const progressMessage = /当前故事范围无法在指定篇幅内/.test(message)
+        ? "需要修改后继续：缩小原作范围，或选择更长的阅读规格"
+        : "已保留最后成功阶段，修复后可从该阶段继续";
       this.db.prepare(
         `UPDATE custom_story_requests SET status = 'failed', error_message = ?,
-         progress_stage = 'failed', progress_message = '已保留最后成功阶段，修复后可从该阶段继续',
+         progress_stage = 'failed', progress_message = ?,
          updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-      ).run(message.slice(0, 1000), request.id);
+      ).run(message.slice(0, 1000), progressMessage, request.id);
     }
   }
 
@@ -819,8 +823,8 @@ export class CustomStoryService implements CustomStoryProvider {
       if (checkpointJson) {
         const raw = JSON.parse(checkpointJson) as { type?: unknown };
         if (raw?.type === "classic-adaptation") {
-          parseClassicCheckpoint(raw);
-          return null;
+          const checkpoint = parseClassicCheckpoint(raw);
+          return checkpoint ? classicCheckpointRetryBlockReason(checkpoint) : null;
         }
       }
       const checkpoint = this.parseCheckpoint(checkpointJson);

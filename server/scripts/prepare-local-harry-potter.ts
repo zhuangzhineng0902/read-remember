@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const sourceArg = process.argv.indexOf("--source");
@@ -7,6 +7,7 @@ const sourcePath = path.resolve(sourceArg >= 0
   ? process.argv[sourceArg + 1]
   : "/Users/zhuangzhineng/Downloads/哈利波特1-7英文原版.txt");
 const root = path.resolve(process.cwd(), "data/classics-staging");
+const publishedRoot = path.resolve(process.cwd(), "data/classics");
 const catalogPath = path.join(root, "catalog.json");
 const rawBuffer = readFileSync(sourcePath);
 const raw = new TextDecoder("gb18030").decode(rawBuffer).replace(/\r\n?/g, "\n");
@@ -15,6 +16,10 @@ const units = [
   { book: 1, unitId: "book-1-the-boy-who-lived", title: "Harry Potter and the Sorcerer's Stone", unitTitle: "The Boy Who Lived", start: /^\s*CHAPTER ONE\s*$/mi, end: /^\s*CHAPTER TWO\s*$/mi, tags: ["mystery", "family", "magic", "new-beginning"] },
   { book: 2, unitId: "book-2-the-worst-birthday", title: "Harry Potter and the Chamber of Secrets", unitTitle: "The Worst Birthday", start: /^\s*CHAPTER[\t ]+ONE\s*$/mi, end: /^\s*CHAPTER[\t ]+TWO\s*$/mi, tags: ["family", "friendship", "secrecy", "unexpected-visitor"] },
   { book: 3, unitId: "book-3-owl-post", title: "Harry Potter and the Prisoner of Azkaban", unitTitle: "Owl Post", start: /^\s*CHAPTER ONE\s*$/mi, end: /^\s*CHAPTER TWO\s*$/mi, tags: ["friendship", "letters", "school", "anticipation"] },
+  { book: 3, unitId: "book-3-birthday-owls", title: "Harry Potter and the Prisoner of Azkaban", unitTitle: "The Birthday Owls and Ron's Gift", scope: "Chapter One excerpt: the three owls arrive and Harry opens Ron's birthday post", start: /^(?=\s*Silhouetted against the golden moon)/m, end: /^\s*Inside this, too, there was a wrapped present/m, tags: ["friendship", "birthday", "owls", "gift"], supportedProfiles: [
+    { readerStage: "starter", episodeCount: 2, minWords: 300, maxWords: 700 },
+    { readerStage: "stage1", episodeCount: 2, minWords: 400, maxWords: 900 },
+  ] },
   { book: 4, unitId: "book-4-the-riddle-house", title: "Harry Potter and the Goblet of Fire", unitTitle: "The Riddle House", start: /^\s*CHAPTER ONE - THE RIDDLE HOUSE\s*$/mi, end: /^\s*CHAPTER TWO - THE SCAR\s*$/mi, tags: ["mystery", "danger", "secrets", "dark-atmosphere"] },
   { book: 5, unitId: "book-5-dudley-demented", title: "Harry Potter and the Order of the Phoenix", unitTitle: "Dudley Demented", start: /^\s*- CHAPTER ONE -\s*$/mi, end: /^\s*- CHAPTER TWO -\s*$/mi, tags: ["danger", "family", "defense", "unexpected-ally"] },
   { book: 6, unitId: "book-6-the-other-minister", title: "Harry Potter and the Half-Blood Prince", unitTitle: "The Other Minister", start: /^\s*Chapter 1: The Other Minister\s*$/mi, end: /^\s*Chapter 2: Spinner's End\s*$/mi, startOccurrence: 2, tags: ["leadership", "crisis", "two-worlds", "politics"] },
@@ -68,12 +73,19 @@ for (const unit of units) {
   const end = nthMatch(book.slice(start.index + start[0].length), unit.end);
   const body = book.slice(start.index + start[0].length, start.index + start[0].length + end.index);
   const source = paragraphize(body, unit.book === 6);
+  if (unit.unitId === "book-3-birthday-owls" && (
+    !source.startsWith("p001\tSilhouetted against the golden moon")
+    || source.includes("Inside this, too, there was a wrapped present")
+  )) throw new Error("Birthday owls excerpt boundaries are incomplete");
   const sourceHash = sha256(source);
   const directory = path.join(root, "harry-potter", unit.unitId);
   mkdirSync(directory, { recursive: true });
   writeFileSync(path.join(directory, "source.txt"), source);
+  const publishedManifestPath = path.join(publishedRoot, "harry-potter", unit.unitId, "manifest.json");
+  const published = existsSync(publishedManifestPath)
+    && JSON.parse(readFileSync(publishedManifestPath, "utf8")).sourceHash === sourceHash;
   const manifest = {
-    status: "pending_editorial_review",
+    status: published ? "published" : "pending_editorial_review",
     workId: "harry-potter",
     unitId: unit.unitId,
     title: unit.title,
@@ -83,12 +95,13 @@ for (const unit of units) {
     sourceProvider: "Local user-provided file",
     sourceWorkUrl: "local://harry-potter-1-7",
     sourceDownloadUrl: "local://harry-potter-1-7",
-    scope: `Complete opening chapter: ${unit.unitTitle}`,
+    scope: "scope" in unit ? unit.scope : `Complete opening chapter: ${unit.unitTitle}`,
     sourceVersion: `local-${sha256(rawBuffer).slice(0, 16)}`,
     sourceHash,
     paragraphCount: (source.match(/^p\d+\t/gm) ?? []).length,
     wordCount: (source.match(/[A-Za-z]+(?:[’'-][A-Za-z]+)*/g) ?? []).length,
     tags: unit.tags,
+    ...("supportedProfiles" in unit ? { supportedProfiles: unit.supportedProfiles } : {}),
     cleaning: "GB18030 decoded to UTF-8; page numbers removed; wrapped prose joined; stable paragraph IDs added.",
     usageBasis: "User-provided local text. Copyright/permission has not been verified; private local adaptation only. Do not publish or redistribute.",
     localSourceFile: path.basename(sourcePath),
